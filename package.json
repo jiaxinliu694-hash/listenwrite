@@ -1,0 +1,12 @@
+{
+  "name": "listenwrite",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "ts-fsrs": "5.4.1"
+  }
+}
