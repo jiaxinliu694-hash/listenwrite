@@ -2111,7 +2111,7 @@ function recordWholeSentenceAttempt(entry, { input = "", alignment = null, revea
 }
 function sentencePracticeIndexes(state2, entry, {
   onlyProblems = false,
-  unique = false,
+  unique: unique2 = false,
   skipSimple = true,
   statuses = ["unfamiliar", "unknown"]
 } = {}) {
@@ -2123,7 +2123,7 @@ function sentencePracticeIndexes(state2, entry, {
     const key = token.normalized || normalizeLexeme(token.surface);
     if (onlyProblems && !wanted.has(token.status)) continue;
     if (skipSimple && isSimpleLexeme(state2, key)) continue;
-    if (unique && seen.has(key)) continue;
+    if (unique2 && seen.has(key)) continue;
     seen.add(key);
     out.push(index);
   }
@@ -3103,6 +3103,19 @@ function finishCurrent(session, result) {
   if (result === "bad") session.retry.push({ wordId: current.wordId, attempt: current.attempt, eligibleTurn: session.turn + retryGap(current.attempt), addedAt: Date.now() });
   session.current = null;
 }
+function resyncRetryForWord(session, state2, wordId, date = session?.date, mode = session?.mode || "listen") {
+  if (!session || !wordId) return;
+  session.retry = (session.retry || []).filter((x) => x.wordId !== wordId);
+  const last = latestEventOnDay(state2, wordId, date, mode);
+  if (!last || last.result !== "bad") return;
+  if (session.current?.wordId === wordId || (session.pendingBase || []).includes(wordId)) return;
+  session.retry.push({
+    wordId,
+    attempt: eventsOnDay(state2, wordId, date, mode).length,
+    eligibleTurn: session.turn,
+    addedAt: last.ts
+  });
+}
 function sessionProgress(state2, plan, session) {
   const status = planStatus(state2, plan);
   return {
@@ -3130,6 +3143,42 @@ function dueForecast(state2, days = 7) {
   return out;
 }
 
+// src/typefilters.js
+function unique(ids) {
+  return [...new Set(ids)];
+}
+function typePresetIds(state2, candidates, kind, today, plan = null) {
+  const allowed = new Set(candidates.map((w) => w.id));
+  const heard = (ids) => unique((ids || []).filter((id3) => allowed.has(id3) && state2.events.some((e) => e.wordId === id3 && e.date === today && e.mode === "listen")));
+  if (kind === "todayNew") return heard(plan?.newIds || []);
+  if (kind === "todayReview") return heard(plan?.reviewIds || []);
+  if (kind === "todayListen") return unique(state2.events.filter((e) => e.date === today && e.mode === "listen" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId));
+  if (kind === "todayType") return unique(state2.events.filter((e) => e.date === today && e.mode === "type" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId));
+  const sevenDayStart = addStudyDays(today, -6);
+  const recentEvents = state2.events.filter((e) => e.date >= sevenDayStart);
+  if (kind === "repeat7") {
+    const bad = recentEvents.filter((e) => e.result === "bad" && allowed.has(e.wordId));
+    return candidates.map((w) => ({ id: w.id, ev: bad.filter((e) => e.wordId === w.id) })).filter((x) => x.ev.length >= 2 || new Set(x.ev.map((e) => e.date)).size >= 2).sort((a, b) => b.ev.length - a.ev.length).map((x) => x.id);
+  }
+  return candidates.map((w) => {
+    const ev = state2.events.filter((e) => e.wordId === w.id);
+    const coldBad = ev.filter((e) => e.mode === "listen" && e.cold && e.result === "bad").length;
+    const bad = ev.filter((e) => e.result === "bad").length;
+    const recent = recentEvents.filter((e) => e.wordId === w.id && e.result === "bad").length;
+    const r = retrievability(w.card, Date.now(), state2.settings.retention);
+    return { id: w.id, score: coldBad * 5 + bad + recent * 1.5 + (w.card?.reps ? (1 - r) * 2 : 0) };
+  }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).map((x) => x.id);
+}
+function customTypeIdsFromEvents(events, allowedIds, { date, mode = "all", min = 1 } = {}) {
+  const allowed = allowedIds instanceof Set ? allowedIds : new Set(allowedIds || []);
+  const groups = /* @__PURE__ */ new Map();
+  for (const e of events || []) {
+    if (e.date !== date || e.result !== "bad" || !allowed.has(e.wordId) || mode !== "all" && e.mode !== mode) continue;
+    groups.set(e.wordId, (groups.get(e.wordId) || 0) + 1);
+  }
+  return [...groups.entries()].filter(([, n]) => n >= Math.max(1, Number(min) || 1)).sort((a, b) => b[1] - a[1]).map(([id3]) => id3);
+}
+
 // src/app.js
 var root = document.getElementById("app");
 var restoreInput = document.getElementById("file-restore");
@@ -3147,6 +3196,8 @@ var wholeSentenceRun = null;
 var statRange = 30;
 var statDay = currentDayKey();
 var statMonth = calendarDate(statDay);
+var saveChain = Promise.resolve();
+var saveFailureShown = false;
 function currentDayKey(ts = Date.now()) {
   return state ? activeStudyDayKey(state, ts) : dayKey(ts);
 }
@@ -3171,7 +3222,16 @@ function toast(message) {
   }, 1500);
 }
 function persist() {
-  void saveState(state);
+  saveChain = saveChain.then(() => saveState(state)).then(() => {
+    saveFailureShown = false;
+  }).catch((error) => {
+    console.error("Listenwrite save failed", error);
+    if (!saveFailureShown) {
+      saveFailureShown = true;
+      toast("\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u5148\u5BFC\u51FA\u5907\u4EFD\u540E\u518D\u7EE7\u7EED");
+    }
+  });
+  return saveChain;
 }
 function wordById(id3) {
   return state.words.find((w) => w.id === id3);
@@ -3335,14 +3395,20 @@ function renderToday() {
   const sequentialRows = plan.mode === "sequential" ? (plan.bookSegments || []).map((seg, i) => {
     const st = segmentStatus(state, plan, seg);
     const nd = st.new.done, rd = st.review.done;
-    return `<div class="bookrow" style="grid-template-columns:minmax(90px,1.4fr) 1fr 1fr"><b>${i + 1}. ${esc(seg.book)}${currentSeg?.book === seg.book ? " \xB7 \u5F53\u524D" : ""}</b><label class="small">\u65B0\u8BCD <input data-seq-new="${i}" type="number" min="0" value="${seg.newTarget}" style="width:78px"> <span>${nd}/${seg.newIds.length}</span></label><label class="small">\u590D\u4E60 <input data-seq-review="${i}" type="number" min="0" value="${seg.reviewTarget}" style="width:78px"> <span>${rd}/${seg.reviewIds.length}</span></label></div>`;
+    const newShort = seg.newIds.length < seg.newTarget ? ` \xB7 \u53EF\u5206\u914D ${seg.newIds.length}` : "";
+    const reviewShort = seg.reviewIds.length < seg.reviewTarget ? ` \xB7 \u53EF\u5206\u914D ${seg.reviewIds.length}` : "";
+    return `<div class="bookrow" style="grid-template-columns:minmax(90px,1.4fr) 1fr 1fr"><b>${i + 1}. ${esc(seg.book)}${currentSeg?.book === seg.book ? " \xB7 \u5F53\u524D" : ""}</b><label class="small">\u65B0\u8BCD <input data-seq-new="${i}" type="number" min="0" value="${seg.newTarget}" style="width:78px"> <span>${nd}/${seg.newIds.length}${newShort}</span></label><label class="small">\u590D\u4E60 <input data-seq-review="${i}" type="number" min="0" value="${seg.reviewTarget}" style="width:78px"> <span>${rd}/${seg.reviewIds.length}${reviewShort}</span></label></div>`;
   }).join("") : "";
-  const bookRows = (books.length ? books : allBooks(state)).map((b) => {
+  const bookRows = plan.mode === "sequential" ? (plan.bookSegments || []).map((seg) => {
+    const x = segmentStatus(state, plan, seg);
+    return `<div class="bookrow"><b>${esc(seg.book)}</b><span>${x.new.done}/${seg.newIds.length} \u65B0</span><span>${x.review.done}/${seg.reviewIds.length} \u590D\u4E60</span><span class="mobilehide">\u672C\u8F6E\u5B9E\u9645\u5F52\u5C5E</span><span class="mobilehide">\u53BB\u91CD\u540E\u7EDF\u8BA1</span></div>`;
+  }).join("") : (books.length ? books : allBooks(state)).map((b) => {
     const x = todayListeningStats(state, [b], date);
     return `<div class="bookrow"><b>${esc(b)}</b><span>${x.newCount} \u65B0</span><span>${x.reviewCount} \u590D\u4E60</span><span class="mobilehide good">${x.firstGood} \u719F\u6089</span><span class="mobilehide bad">${x.firstBad} \u4E0D\u719F</span></div>`;
   }).join("");
+  const bookStatsNote = plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21\u6309\u4ECA\u65E5\u4EFB\u52A1\u7684\u5B9E\u9645\u5F52\u5C5E\u7EDF\u8BA1\uFF0C\u5171\u4EAB\u8BCD\u53EA\u7B97\u5728\u524D\u9762\u7B2C\u4E00\u672C\u3002" : "\u6DF7\u5408\u6A21\u5F0F\u6309\u8BCD\u4E66\u6765\u6E90\u5206\u522B\u7EDF\u8BA1\uFF1B\u540C\u4E00\u4E2A\u5171\u4EAB\u8BCD\u53EF\u80FD\u540C\u65F6\u51FA\u73B0\u5728\u591A\u672C\u8BCD\u4E66\uFF0C\u56E0\u6B64\u5404\u884C\u4E0D\u8981\u76F4\u63A5\u76F8\u52A0\u3002";
   const planControls = plan.mode === "sequential" ? `<div class="small" style="margin:10px 0">\u6309\u4E0B\u9762\u987A\u5E8F\u4E00\u672C\u4E00\u672C\u5B66\u5B8C\u3002\u91CD\u590D\u8BCD\u53EA\u5F52\u524D\u9762\u7B2C\u4E00\u672C\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5360\u540D\u989D\u3002</div>${sequentialRows || '<div class="empty">\u5148\u9009\u62E9\u81F3\u5C11\u4E00\u672C\u5177\u4F53\u8BCD\u4E66\u3002</div>'}` : `<div class="grid2" style="margin-top:12px"><div class="field"><label>\u4ECA\u5929\u65B0\u8BCD\u76EE\u6807</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>\u4ECA\u5929\u590D\u4E60\u76EE\u6807</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div>`;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">${plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21" : "\u6DF7\u5408"} \xB7 FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">\u5F53\u524D\u8BCD\u4E66\uFF1A<b>${esc(currentSeg.book)}</b>\uFF0C\u5B8C\u6210\u540E\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u672C\u3002</div>` : ""}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u672C\u8F6E\u5355\u8BCD\u6E05\u5355 \xB7 ${prog.newTotal + prog.reviewTotal}</summary><div style="margin-top:10px">${planChecklistHtml(plan)}</div></details><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="field"><label>\u5B66\u4E60\u65B9\u5F0F</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === "mixed" ? "selected" : ""}>\u6DF7\u5408\u5B66\u4E60\uFF1A\u591A\u672C\u8BCD\u4E66\u5171\u7528\u4E00\u4E2A\u603B\u91CF</option><option value="sequential" ${plan.mode === "sequential" ? "selected" : ""}>\u5206\u672C\u4F9D\u6B21\uFF1A\u4E00\u672C\u5B66\u5B8C\u518D\u4E0B\u4E00\u672C</option></select></div><div class="small" style="margin:10px 0">\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\u3002</div>${bookChips(books, "today")}${planControls}</div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u53EA\u5F71\u54CD\u4E4B\u540E\u65B0\u751F\u6210\u7684\u6DF7\u5408\u8BA1\u5212\uFF1B\u5206\u672C\u6A21\u5F0F\u6BCF\u672C\u5355\u72EC\u8BBE\u7F6E\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">${plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21" : "\u6DF7\u5408"} \xB7 FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">\u5F53\u524D\u8BCD\u4E66\uFF1A<b>${esc(currentSeg.book)}</b>\uFF0C\u5B8C\u6210\u540E\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u672C\u3002</div>` : ""}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u672C\u8F6E\u5355\u8BCD\u6E05\u5355 \xB7 ${prog.newTotal + prog.reviewTotal}</summary><div style="margin-top:10px">${planChecklistHtml(plan)}</div></details><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="field"><label>\u5B66\u4E60\u65B9\u5F0F</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === "mixed" ? "selected" : ""}>\u6DF7\u5408\u5B66\u4E60\uFF1A\u591A\u672C\u8BCD\u4E66\u5171\u7528\u4E00\u4E2A\u603B\u91CF</option><option value="sequential" ${plan.mode === "sequential" ? "selected" : ""}>\u5206\u672C\u4F9D\u6B21\uFF1A\u4E00\u672C\u5B66\u5B8C\u518D\u4E0B\u4E00\u672C</option></select></div><div class="small" style="margin:10px 0">\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\u3002</div>${bookChips(books, "today")}${planControls}</div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u53EA\u5F71\u54CD\u4E4B\u540E\u65B0\u751F\u6210\u7684\u6DF7\u5408\u8BA1\u5212\uFF1B\u5206\u672C\u6A21\u5F0F\u6BCF\u672C\u5355\u72EC\u8BBE\u7F6E\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002${bookStatsNote}</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
   bindBookChips("today", () => {
     if (plan.mode === "sequential") {
       const existing = new Map((plan.bookSegments || []).map((x) => [x.book, x]));
@@ -3487,6 +3553,7 @@ function judgeListen(result) {
   if (listen.historyView) {
     editAttempt(state, listen.historyView.eventId, result);
     listen.historyView.result = result;
+    resyncRetryForWord(listen.session, state, w.id, listen.plan.date, "listen");
     persist();
     renderListen();
     return;
@@ -3544,42 +3611,17 @@ function showPreviousListen() {
   renderListen();
 }
 function returnFromHistory() {
-  const plan = ensureDailyPlan(state, { date: listen.plan.date });
-  const activityId = listen.activityId;
-  listen = null;
-  startListen(plan, activityId);
+  listen.historyView = null;
+  renderListen();
 }
 function typeCandidates() {
   const books = state.settings.typeBooks || [];
   return state.words.filter((w) => !w.retired && matchesBooks(w, books));
 }
-function eventsSince(days) {
-  const key = addStudyDays(currentDayKey(), -days + 1);
-  return state.events.filter((e) => e.date >= key);
-}
 function typePreset(kind) {
   const candidates = typeCandidates();
-  const allowed = new Set(candidates.map((w) => w.id));
   const today = currentDayKey();
-  const plan = state.dailyPlans?.[today];
-  const heard = (ids) => [...new Set((ids || []).filter((id3) => allowed.has(id3) && latestEventOnDay(state, id3, today, "listen")))];
-  if (kind === "todayNew") return heard(plan?.newIds || []);
-  if (kind === "todayReview") return heard(plan?.reviewIds || []);
-  if (kind === "todayListen") return [...new Set(state.events.filter((e) => e.date === today && e.mode === "listen" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId))];
-  if (kind === "todayType") return [...new Set(state.events.filter((e) => e.date === today && e.mode === "type" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId))];
-  if (kind === "repeat7") {
-    const bad = eventsSince(7).filter((e) => e.result === "bad" && allowed.has(e.wordId));
-    return candidates.map((w) => ({ id: w.id, ev: bad.filter((e) => e.wordId === w.id) })).filter((x) => x.ev.length >= 2 || new Set(x.ev.map((e) => e.date)).size >= 2).sort((a, b) => b.ev.length - a.ev.length).map((x) => x.id);
-  }
-  const scored = candidates.map((w) => {
-    const ev = state.events.filter((e) => e.wordId === w.id);
-    const coldBad = ev.filter((e) => e.cold && e.result === "bad").length;
-    const bad = ev.filter((e) => e.result === "bad").length;
-    const recent = eventsSince(7).filter((e) => e.wordId === w.id && e.result === "bad").length;
-    const r = retrievability(w.card, Date.now(), state.settings.retention);
-    return { id: w.id, score: coldBad * 5 + bad + recent * 1.5 + (w.card?.reps ? (1 - r) * 2 : 0) };
-  }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
-  return scored.map((x) => x.id);
+  return typePresetIds(state, candidates, kind, today, state.dailyPlans?.[today] || null);
 }
 function renderType() {
   const books = state.settings.typeBooks || [];
@@ -3598,12 +3640,7 @@ function customTypeIds() {
   const mode = document.getElementById("typeMode")?.value || "all";
   const min = Number(document.getElementById("typeMin")?.value || 1);
   const allowed = new Set(typeCandidates().map((w) => w.id));
-  const groups = /* @__PURE__ */ new Map();
-  for (const e of state.events) {
-    if (e.date !== date || e.result !== "bad" || !allowed.has(e.wordId) || mode !== "all" && e.mode !== mode) continue;
-    groups.set(e.wordId, (groups.get(e.wordId) || 0) + 1);
-  }
-  return [...groups.entries()].filter(([, n]) => n >= min).sort((a, b) => b[1] - a[1]).map(([id3]) => id3);
+  return customTypeIdsFromEvents(state.events, allowed, { date, mode, min });
 }
 function renderTypeCustom() {
   const box = document.getElementById("customTypePreview");
@@ -3771,14 +3808,14 @@ function renderText() {
     document.getElementById("saveText").onclick = saveTextItem;
     document.getElementById("importTextFile").onclick = () => textInput.click();
   }
-  const sentenceBox = document.getElementById("sentenceDictationText"), unique = document.getElementById("sentenceUnique"), preview = document.getElementById("sentencePreview");
+  const sentenceBox = document.getElementById("sentenceDictationText"), unique2 = document.getElementById("sentenceUnique"), preview = document.getElementById("sentencePreview");
   const drawSentencePreview = () => {
-    const tokens = tokenizeEnglish(sentenceBox.value, { unique: unique.checked });
+    const tokens = tokenizeEnglish(sentenceBox.value, { unique: unique2.checked });
     preview.innerHTML = tokens.slice(0, 30).map((x) => `<span class="tag">${esc(x)}${isSimpleLexeme(state, x) ? " \xB7 \u7B80\u5355" : ""}</span>`).join("") + (tokens.length > 30 ? `<span class="tag">\u2026 \u5171 ${tokens.length} \u4E2A</span>` : "");
   };
   sentenceBox.oninput = drawSentencePreview;
-  unique.onchange = drawSentencePreview;
-  document.getElementById("startSentenceDictation").onclick = () => startSentenceDictation(sentenceBox.value, unique.checked, document.getElementById("sentenceBookName").value);
+  unique2.onchange = drawSentencePreview;
+  document.getElementById("startSentenceDictation").onclick = () => startSentenceDictation(sentenceBox.value, unique2.checked, document.getElementById("sentenceBookName").value);
   document.getElementById("sentenceProblemBook").onchange = drawSentenceProblemList;
   document.getElementById("sentenceProblemSearch").oninput = drawSentenceProblemList;
   document.getElementById("sentenceProblemUnique").onchange = drawSentenceProblemList;
@@ -3806,16 +3843,16 @@ function drawSentenceProblemList() {
   if (!box) return;
   const rows = activeProblemRows();
   const uniqueWords = new Set(rows.flatMap((row) => row.problems.map((token) => token.normalized || String(token.surface).toLowerCase())));
-  const unique = document.getElementById("sentenceProblemUnique")?.checked !== false;
+  const unique2 = document.getElementById("sentenceProblemUnique")?.checked !== false;
   box.innerHTML = `<div class="space"><div><b>${rows.length} \u53E5 \xB7 ${uniqueWords.size} \u4E2A\u9519\u8BCD</b><div class="small">\u70B9\u67D0\u4E00\u53E5\u7CBE\u51C6\u91CD\u7EC3\uFF0C\u4E5F\u53EF\u4EE5\u628A\u5F53\u524D\u68C0\u7D22\u7ED3\u679C\u4E00\u8D77\u91CD\u542C\u3002</div></div><button id="retryFilteredProblems" class="primary" ${rows.length ? "" : "disabled"}>\u91CD\u542C\u5F53\u524D\u7B5B\u9009\u9519\u8BCD</button></div><div style="margin-top:10px">${rows.map((row) => `<article class="textitem"><div class="space"><div><h3>${esc(sentenceSourceLabel(row.entry))}</h3><div class="small">${esc(row.book.name)} \xB7 ${problemSummary(row.problems)}</div></div></div><p class="snippet">${esc(row.entry.text)}</p><div class="toolbar"><button class="primary" data-whole-problem-entry="${row.book.id}|${row.entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-retry-entry="${row.book.id}|${row.entry.id}">\u53EA\u91CD\u542C\u8FD9\u53E5\u9519\u8BCD</button><button class="soft" data-retry-entry-all="${row.book.id}|${row.entry.id}">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button></div></article>`).join("")}</div>`;
-  document.getElementById("retryFilteredProblems").onclick = () => startSentenceProblemRows(rows, unique, "\u7B5B\u9009\u51FA\u6765\u7684\u53E5\u5B50\u9519\u8BCD");
+  document.getElementById("retryFilteredProblems").onclick = () => startSentenceProblemRows(rows, unique2, "\u7B5B\u9009\u51FA\u6765\u7684\u53E5\u5B50\u9519\u8BCD");
   document.querySelectorAll("[data-whole-problem-entry]").forEach((button) => button.onclick = () => {
     const [bookId, entryId] = button.dataset.wholeProblemEntry.split("|");
     startWholeSentenceEntry(bookId, entryId);
   });
   document.querySelectorAll("[data-retry-entry]").forEach((button) => button.onclick = () => {
     const [bookId, entryId] = button.dataset.retryEntry.split("|");
-    startSavedEntryDictation(bookId, entryId, { onlyProblems: true, unique });
+    startSavedEntryDictation(bookId, entryId, { onlyProblems: true, unique: unique2 });
   });
   document.querySelectorAll("[data-retry-entry-all]").forEach((button) => button.onclick = () => {
     const [bookId, entryId] = button.dataset.retryEntryAll.split("|");
@@ -3930,12 +3967,12 @@ function renderWholeSentenceRun() {
     document.getElementById("wholeFinish").onclick = () => returnFromWholeSentenceRun(run);
   }
 }
-function startSentenceDictation(text, unique, bookName, meta = {}) {
+function startSentenceDictation(text, unique2, bookName, meta = {}) {
   const allTokens = tokenizeEnglish(text, { unique: false });
   if (!allTokens.length) return toast("\u8FD9\u53E5\u8BDD\u91CC\u6CA1\u6709\u8BC6\u522B\u5230\u82F1\u6587\u5355\u8BCD");
   const saved = addSentenceEntry(state, { bookName: bookName || "\u53E5\u5B50\u8BCD\u5E93", text, tokens: allTokens, sourceTextId: meta.sourceTextId || null, sourceSentenceId: meta.sourceSentenceId || null, sourceTitle: meta.sourceTitle || "", sourceCollection: meta.sourceCollection || "", sentenceIndex: meta.sentenceIndex ?? null });
   persist();
-  const indexes = sentencePracticeIndexes(state, saved.entry, { unique, skipSimple: true });
+  const indexes = sentencePracticeIndexes(state, saved.entry, { unique: unique2, skipSimple: true });
   const skippedSimple = saved.entry.tokens.filter((token) => isSimpleLexeme(state, token.normalized || token.surface)).length;
   if (!indexes.length) return toast("\u8FD9\u53E5\u6CA1\u6709\u9700\u8981\u542C\u5199\u7684\u8BCD\uFF1B\u5DF2\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u4F1A\u81EA\u52A8\u8DF3\u8FC7");
   const items = indexes.map((tokenIndex) => ({ bookId: saved.book.id, entryId: saved.entry.id, tokenIndex }));
@@ -3945,22 +3982,22 @@ function startLinkedSentenceDictation(text, sentenceRecord, sentenceIndex) {
   const bookName = `${text.collection || "\u6587\u672C"} \xB7 \u53E5\u5B50`;
   startSentenceDictation(sentenceRecord.text, false, bookName, { sourceTextId: text.id, sourceSentenceId: sentenceRecord.id, sourceTitle: text.title, sourceCollection: text.collection || "\u672A\u5206\u7C7B", sentenceIndex, returnTextId: text.id, label: `${text.title} \xB7 \u7B2C ${sentenceIndex + 1} \u53E5` });
 }
-function startSavedEntryDictation(bookId, entryId, { onlyProblems = false, unique = false, returnTextId = null } = {}) {
+function startSavedEntryDictation(bookId, entryId, { onlyProblems = false, unique: unique2 = false, returnTextId = null } = {}) {
   const { book, entry } = getSentenceEntry(state, bookId, entryId);
   if (!book || !entry) return toast("\u6CA1\u6709\u627E\u5230\u8FD9\u53E5\u8BB0\u5F55");
-  const indexes = sentencePracticeIndexes(state, entry, { onlyProblems, unique, skipSimple: true });
+  const indexes = sentencePracticeIndexes(state, entry, { onlyProblems, unique: unique2, skipSimple: true });
   if (!indexes.length) return toast(onlyProblems ? "\u8FD9\u53E5\u5F53\u524D\u6CA1\u6709\u9700\u8981\u91CD\u542C\u7684\u9519\u8BCD" : "\u8FD9\u53E5\u7684\u8BCD\u90FD\u5DF2\u6807\u8BB0\u7B80\u5355");
   const items = indexes.map((tokenIndex) => ({ bookId, entryId, tokenIndex }));
   startSentenceItems(items, onlyProblems ? `${sentenceSourceLabel(entry)} \xB7 \u9519\u8BCD` : sentenceSourceLabel(entry), { returnTextId });
 }
-function startSentenceProblemRows(rows, unique = true, label = "\u53E5\u5B50\u9519\u8BCD", returnTextId = null) {
+function startSentenceProblemRows(rows, unique2 = true, label = "\u53E5\u5B50\u9519\u8BCD", returnTextId = null) {
   const items = [];
   const seen = /* @__PURE__ */ new Set();
   for (const row of rows) {
     for (const token of row.problems || []) {
       const key = token.normalized || String(token.surface).toLowerCase();
       if (isSimpleLexeme(state, key)) continue;
-      if (unique && seen.has(key)) continue;
+      if (unique2 && seen.has(key)) continue;
       seen.add(key);
       items.push({ bookId: row.book.id, entryId: row.entry.id, tokenIndex: token.tokenIndex });
     }
@@ -3992,7 +4029,7 @@ function sentenceRunProblemTokens(run) {
   }
   return [...byWord.values()];
 }
-function sentenceRunProblemItems(run, unique = true) {
+function sentenceRunProblemItems(run, unique2 = true) {
   const out = [];
   const seen = /* @__PURE__ */ new Set();
   for (const item of run?.items || []) {
@@ -4000,7 +4037,7 @@ function sentenceRunProblemItems(run, unique = true) {
     const token = entry?.tokens?.[item.tokenIndex];
     if (!token || !["unfamiliar", "unknown"].includes(token.status) || isSimpleLexeme(state, token.normalized || token.surface)) continue;
     const key = token.normalized || String(token.surface).toLowerCase();
-    if (unique && seen.has(key)) continue;
+    if (unique2 && seen.has(key)) continue;
     seen.add(key);
     out.push({ ...item });
   }

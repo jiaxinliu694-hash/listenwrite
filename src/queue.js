@@ -336,6 +336,20 @@ export function finishCurrent(session, result) {
   session.current = null;
 }
 
+export function resyncRetryForWord(session, state, wordId, date = session?.date, mode = session?.mode || 'listen') {
+  if (!session || !wordId) return;
+  session.retry = (session.retry || []).filter((x) => x.wordId !== wordId);
+  const last = latestEventOnDay(state, wordId, date, mode);
+  if (!last || last.result !== 'bad') return;
+  if (session.current?.wordId === wordId || (session.pendingBase || []).includes(wordId)) return;
+  session.retry.push({
+    wordId,
+    attempt: eventsOnDay(state, wordId, date, mode).length,
+    eligibleTurn: session.turn,
+    addedAt: last.ts,
+  });
+}
+
 export function sessionProgress(state, plan, session) {
   const status = planStatus(state, plan);
   return {

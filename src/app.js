@@ -1,6 +1,7 @@
 import { loadState, saveState, replaceState, exportState } from './storage.js';
 import { activeStudyDayKey, dayKey, uid, recordAttempt, editAttempt, eventsOnDay, latestEventOnDay, rebuildAllCards } from './engine.js';
-import { allBooks, matchesBooks, ensureDailyPlan, configureSequentialPlan, convertPlanToMixed, currentSequentialSegment, segmentStatus, planStatus, todayListeningStats, createRetrySession, pickNext, finishCurrent, sessionProgress, dueForecast } from './queue.js';
+import { allBooks, matchesBooks, ensureDailyPlan, configureSequentialPlan, convertPlanToMixed, currentSequentialSegment, segmentStatus, planStatus, todayListeningStats, createRetrySession, pickNext, finishCurrent, resyncRetryForWord, sessionProgress, dueForecast } from './queue.js';
+import { typePresetIds, customTypeIdsFromEvents } from './typefilters.js';
 import { retrievability, FSRS_VERSION } from './scheduler.js';
 import { addStudyDays, calendarDate, calendarKey, studyDayLabel } from './studyday.js';
 import { tokenizeEnglish, spellingMatches } from './tokenizer.js';
@@ -23,6 +24,8 @@ let wholeSentenceRun = null;
 let statRange = 30;
 let statDay = currentDayKey();
 let statMonth = calendarDate(statDay);
+let saveChain = Promise.resolve();
+let saveFailureShown = false;
 
 function currentDayKey(ts = Date.now()) { return state ? activeStudyDayKey(state, ts) : dayKey(ts); }
 
@@ -33,7 +36,16 @@ const labels = {
 
 function esc(v) { return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function toast(message) { const el = document.getElementById('toast'); el.textContent = message; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => { el.style.display = 'none'; }, 1500); }
-function persist() { void saveState(state); }
+function persist() {
+  saveChain = saveChain
+    .then(() => saveState(state))
+    .then(() => { saveFailureShown = false; })
+    .catch((error) => {
+      console.error('Listenwrite save failed', error);
+      if (!saveFailureShown) { saveFailureShown = true; toast('保存失败，请先导出备份后再继续'); }
+    });
+  return saveChain;
+}
 function wordById(id) { return state.words.find((w) => w.id === id); }
 function pct(a, b) { return b ? `${Math.round(a * 100 / b)}%` : '—'; }
 function dateObj(key) { return calendarDate(key); }
@@ -128,16 +140,26 @@ function renderToday() {
   const sequentialRows = plan.mode === 'sequential' ? (plan.bookSegments || []).map((seg, i) => {
     const st = segmentStatus(state, plan, seg);
     const nd = st.new.done, rd = st.review.done;
-    return `<div class="bookrow" style="grid-template-columns:minmax(90px,1.4fr) 1fr 1fr"><b>${i + 1}. ${esc(seg.book)}${currentSeg?.book === seg.book ? ' · 当前' : ''}</b><label class="small">新词 <input data-seq-new="${i}" type="number" min="0" value="${seg.newTarget}" style="width:78px"> <span>${nd}/${seg.newIds.length}</span></label><label class="small">复习 <input data-seq-review="${i}" type="number" min="0" value="${seg.reviewTarget}" style="width:78px"> <span>${rd}/${seg.reviewIds.length}</span></label></div>`;
+    const newShort = seg.newIds.length < seg.newTarget ? ` · 可分配 ${seg.newIds.length}` : '';
+    const reviewShort = seg.reviewIds.length < seg.reviewTarget ? ` · 可分配 ${seg.reviewIds.length}` : '';
+    return `<div class="bookrow" style="grid-template-columns:minmax(90px,1.4fr) 1fr 1fr"><b>${i + 1}. ${esc(seg.book)}${currentSeg?.book === seg.book ? ' · 当前' : ''}</b><label class="small">新词 <input data-seq-new="${i}" type="number" min="0" value="${seg.newTarget}" style="width:78px"> <span>${nd}/${seg.newIds.length}${newShort}</span></label><label class="small">复习 <input data-seq-review="${i}" type="number" min="0" value="${seg.reviewTarget}" style="width:78px"> <span>${rd}/${seg.reviewIds.length}${reviewShort}</span></label></div>`;
   }).join('') : '';
-  const bookRows = (books.length ? books : allBooks(state)).map((b) => {
-    const x = todayListeningStats(state, [b], date);
-    return `<div class="bookrow"><b>${esc(b)}</b><span>${x.newCount} 新</span><span>${x.reviewCount} 复习</span><span class="mobilehide good">${x.firstGood} 熟悉</span><span class="mobilehide bad">${x.firstBad} 不熟</span></div>`;
-  }).join('');
+  const bookRows = plan.mode === 'sequential'
+    ? (plan.bookSegments || []).map((seg) => {
+        const x = segmentStatus(state, plan, seg);
+        return `<div class="bookrow"><b>${esc(seg.book)}</b><span>${x.new.done}/${seg.newIds.length} 新</span><span>${x.review.done}/${seg.reviewIds.length} 复习</span><span class="mobilehide">本轮实际归属</span><span class="mobilehide">去重后统计</span></div>`;
+      }).join('')
+    : (books.length ? books : allBooks(state)).map((b) => {
+        const x = todayListeningStats(state, [b], date);
+        return `<div class="bookrow"><b>${esc(b)}</b><span>${x.newCount} 新</span><span>${x.reviewCount} 复习</span><span class="mobilehide good">${x.firstGood} 熟悉</span><span class="mobilehide bad">${x.firstBad} 不熟</span></div>`;
+      }).join('');
+  const bookStatsNote = plan.mode === 'sequential'
+    ? '分本依次按今日任务的实际归属统计，共享词只算在前面第一本。'
+    : '混合模式按词书来源分别统计；同一个共享词可能同时出现在多本词书，因此各行不要直接相加。';
   const planControls = plan.mode === 'sequential'
     ? `<div class="small" style="margin:10px 0">按下面顺序一本一本学完。重复词只归前面第一本，不会重复占名额。</div>${sequentialRows || '<div class="empty">先选择至少一本具体词书。</div>'}`
     : `<div class="grid2" style="margin-top:12px"><div class="field"><label>今天新词目标</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>今天复习目标</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div>`;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>今天先完成这一组</h2><div class="small">${esc(selectedText)} · ${studyDayLabel()}</div></div><span class="tag">${plan.mode === 'sequential' ? '分本依次' : '混合'} · FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>新词</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>复习</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? 'bad' : ''}">${prog.retry}</b><span>待巩固</span><div class="small">不增加新词/复习分母</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">当前词书：<b>${esc(currentSeg.book)}</b>，完成后自动继续下一本。</div>` : ''}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? '继续今日听音' : '今日已完成'}</button><span class="small">听音 ${mins} 分钟 · 首轮熟悉 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>本轮单词清单 · ${prog.newTotal+prog.reviewTotal}</summary><div style="margin-top:10px">${planChecklistHtml(plan)}</div></details><details class="details"><summary>调整今天的计划与词书</summary><div style="margin-top:12px"><div class="field"><label>学习方式</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === 'mixed' ? 'selected' : ''}>混合学习：多本词书共用一个总量</option><option value="sequential" ${plan.mode === 'sequential' ? 'selected' : ''}>分本依次：一本学完再下一本</option></select></div><div class="small" style="margin:10px 0">降低目标时只裁掉完全没碰过的词；已经听过的词不会被删除。</div>${bookChips(books, 'today')}${planControls}</div></details><details class="details"><summary>以后每天的默认目标</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>以后默认新词</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>以后默认复习</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">只影响之后新生成的混合计划；分本模式每本单独设置。</div></details></section><section class="card"><h2 class="section-title">今日听音数据</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>听音新词</span></div><div class="statbox"><b>${td.reviewCount}</b><span>听音复习</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>首轮熟悉</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>首轮不熟</span></div></div></section><section class="card"><h2 class="section-title">各词书今天的情况</h2><div class="small">只统计听音，不混入手打。</div><div style="margin-top:8px">${bookRows || '<div class="empty">还没有词书。</div>'}</div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>今天先完成这一组</h2><div class="small">${esc(selectedText)} · ${studyDayLabel()}</div></div><span class="tag">${plan.mode === 'sequential' ? '分本依次' : '混合'} · FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>新词</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>复习</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? 'bad' : ''}">${prog.retry}</b><span>待巩固</span><div class="small">不增加新词/复习分母</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">当前词书：<b>${esc(currentSeg.book)}</b>，完成后自动继续下一本。</div>` : ''}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? '继续今日听音' : '今日已完成'}</button><span class="small">听音 ${mins} 分钟 · 首轮熟悉 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>本轮单词清单 · ${prog.newTotal+prog.reviewTotal}</summary><div style="margin-top:10px">${planChecklistHtml(plan)}</div></details><details class="details"><summary>调整今天的计划与词书</summary><div style="margin-top:12px"><div class="field"><label>学习方式</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === 'mixed' ? 'selected' : ''}>混合学习：多本词书共用一个总量</option><option value="sequential" ${plan.mode === 'sequential' ? 'selected' : ''}>分本依次：一本学完再下一本</option></select></div><div class="small" style="margin:10px 0">降低目标时只裁掉完全没碰过的词；已经听过的词不会被删除。</div>${bookChips(books, 'today')}${planControls}</div></details><details class="details"><summary>以后每天的默认目标</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>以后默认新词</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>以后默认复习</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">只影响之后新生成的混合计划；分本模式每本单独设置。</div></details></section><section class="card"><h2 class="section-title">今日听音数据</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>听音新词</span></div><div class="statbox"><b>${td.reviewCount}</b><span>听音复习</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>首轮熟悉</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>首轮不熟</span></div></div></section><section class="card"><h2 class="section-title">各词书今天的情况</h2><div class="small">只统计听音，不混入手打。${bookStatsNote}</div><div style="margin-top:8px">${bookRows || '<div class="empty">还没有词书。</div>'}</div></section></div>`);
 
   bindBookChips('today', () => {
     if (plan.mode === 'sequential') {
@@ -209,7 +231,7 @@ function renderListen() {
   if (answer) { document.getElementById('prevWord').onclick = () => showPreviousListen(); document.getElementById('nextWord').onclick = () => reviewing ? returnFromHistory() : nextListen(); }
 }
 function judgeListen(result) {
-  const w = listenCurrentWord(); if (listen.historyView) { editAttempt(state, listen.historyView.eventId, result); listen.historyView.result = result; persist(); renderListen(); return; }
+  const w = listenCurrentWord(); if (listen.historyView) { editAttempt(state, listen.historyView.eventId, result); listen.historyView.result = result; resyncRetryForWord(listen.session, state, w.id, listen.plan.date, 'listen'); persist(); renderListen(); return; }
   if (!listen.currentEventId) { const ev = recordAttempt(state, w, 'listen', result, { date: listen.plan.date }); listen.currentEventId = ev.id; listen.session.current.eventId = ev.id; }
   else editAttempt(state, listen.currentEventId, result);
   listen.result = result; listen.answer = true; touchActivity(listen.activityId); persist(); renderListen();
@@ -230,27 +252,17 @@ function advanceListen() {
   document.getElementById('finishListen').onclick = () => { listen = null; view = 'today'; renderToday(); };
 }
 function showPreviousListen() { const h = listen.session.history[listen.session.history.length - 1]; if (!h?.eventId) return; listen.historyView = { wordId: h.wordId, eventId: h.eventId, result: state.events.find(e => e.id === h.eventId)?.result || h.result }; renderListen(); }
-function returnFromHistory() { const plan = ensureDailyPlan(state, { date: listen.plan.date }); const activityId = listen.activityId; listen = null; startListen(plan, activityId); }
+function returnFromHistory() { listen.historyView = null; renderListen(); }
 
 function typeCandidates() { const books = state.settings.typeBooks || []; return state.words.filter(w => !w.retired && matchesBooks(w, books)); }
-function eventsSince(days) { const key = addStudyDays(currentDayKey(), -days + 1); return state.events.filter(e => e.date >= key); }
-function typePreset(kind) {
-  const candidates = typeCandidates(); const allowed = new Set(candidates.map(w => w.id)); const today = currentDayKey(); const plan=state.dailyPlans?.[today];
-  const heard=(ids)=>[...new Set((ids||[]).filter(id=>allowed.has(id)&&latestEventOnDay(state,id,today,'listen')))];
-  if (kind === 'todayNew') return heard(plan?.newIds || []);
-  if (kind === 'todayReview') return heard(plan?.reviewIds || []);
-  if (kind === 'todayListen') return [...new Set(state.events.filter(e => e.date === today && e.mode === 'listen' && e.result === 'bad' && allowed.has(e.wordId)).map(e => e.wordId))];
-  if (kind === 'todayType') return [...new Set(state.events.filter(e => e.date === today && e.mode === 'type' && e.result === 'bad' && allowed.has(e.wordId)).map(e => e.wordId))];
-  if (kind === 'repeat7') { const bad = eventsSince(7).filter(e => e.result === 'bad' && allowed.has(e.wordId)); return candidates.map(w => ({ id: w.id, ev: bad.filter(e => e.wordId === w.id) })).filter(x => x.ev.length >= 2 || new Set(x.ev.map(e => e.date)).size >= 2).sort((a,b) => b.ev.length-a.ev.length).map(x => x.id); }
-  const scored = candidates.map(w => { const ev = state.events.filter(e => e.wordId === w.id); const coldBad = ev.filter(e => e.cold && e.result === 'bad').length; const bad = ev.filter(e => e.result === 'bad').length; const recent = eventsSince(7).filter(e => e.wordId === w.id && e.result === 'bad').length; const r = retrievability(w.card, Date.now(), state.settings.retention); return { id: w.id, score: coldBad * 5 + bad + recent * 1.5 + (w.card?.reps ? (1-r) * 2 : 0) }; }).filter(x => x.score > 0).sort((a,b) => b.score-a.score); return scored.map(x => x.id);
-}
+function typePreset(kind) { const candidates = typeCandidates(); const today = currentDayKey(); return typePresetIds(state, candidates, kind, today, state.dailyPlans?.[today] || null); }
 function renderType() {
   const books = state.settings.typeBooks || []; const auto = typePreset('auto'), n=typePreset('todayNew'), rv=typePreset('todayReview'), l = typePreset('todayListen'), t = typePreset('todayType'), r = typePreset('repeat7'); const typedToday = new Set(state.events.filter(e => e.date === currentDayKey() && e.mode === 'type').map(e => e.wordId)).size;
   shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>手打强化</h2><p>新词和复习词分开看；只把今天已经听过的词放进“今日新词/复习”，不会提前泄露还没冷启动的新词。</p></div><span class="tag">${books.length ? `${books.length} 本词书` : '全部词书'}</span></div><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${n.length}</b><span>今日新词可手打</span></div><div class="statbox"><b>${rv.length}</b><span>今日复习可手打</span></div><div class="statbox"><b>${auto.length}</b><span>建议强化</span></div><div class="statbox"><b>${typedToday}</b><span>今日已手打</span></div></div><div class="small" style="margin-top:9px">手打用时 ${activityMinutes('type')} 分钟</div><div class="row" style="margin-top:15px"><button id="typeStartAuto" class="primary">开始建议强化${auto.length ? ` · ${Math.min(30, auto.length)}` : ''}</button></div><details class="details"><summary>词书范围与高级筛选</summary><div style="margin-top:12px">${bookChips(books, 'type')}<div class="filtergrid" style="margin-top:12px"><div class="field"><label>指定日期</label><input id="typeDate" type="date" value="${currentDayKey()}"></div><div class="field"><label>失败来源</label><select id="typeMode"><option value="all">听音 + 手打</option><option value="listen">只看听音</option><option value="type">只看手打</option></select></div><div class="field"><label>至少不熟次数</label><select id="typeMin"><option>1</option><option>2</option><option>3</option><option>5</option></select></div><div class="field"><label>本轮数量</label><select id="typeLimit"><option>20</option><option selected>50</option><option>100</option><option value="0">全部</option></select></div></div><div id="customTypePreview" style="margin-top:12px"></div></div></details></section><section class="card"><h2 class="section-title">按新词 / 复习进入</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayNew"><span class="num">${n.length}</span><b>今日新词</b><span class="small">今天已经听过的新词</span></button><button data-type-preset="todayReview"><span class="num">${rv.length}</span><b>今日复习词</b><span class="small">今天已经听过的复习词</span></button></div></section><section class="card"><h2 class="section-title">困难词快捷入口</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayListen"><span class="num">${l.length}</span><b>今日听音不熟</b><span class="small">今天听音阶段暴露出来的词</span></button><button data-type-preset="todayType"><span class="num">${t.length}</span><b>今日手打不熟</b><span class="small">今天手打后仍然卡住</span></button><button data-type-preset="repeat7"><span class="num">${r.length}</span><b>近 7 天反复不熟</b><span class="small">近期重复失败的词</span></button><button data-type-preset="auto"><span class="num">${auto.length}</span><b>全部困难词</b><span class="small">按跨天失败与可提取率排序</span></button></div></section></div>`);
   bindBookChips('type', renderType); document.getElementById('typeStartAuto').onclick = () => startType(auto.slice(0,30), '建议强化'); document.querySelectorAll('[data-type-preset]').forEach(b => b.onclick = () => startType(typePreset(b.dataset.typePreset).slice(0,50), b.dataset.typePreset==='todayNew'?'今日新词':b.dataset.typePreset==='todayReview'?'今日复习词':b.textContent.trim().replace(/\d+/,'').slice(0,20)));
   const inputs = ['typeDate','typeMode','typeMin','typeLimit']; inputs.forEach(id => document.getElementById(id).onchange = renderTypeCustom); renderTypeCustom();
 }
-function customTypeIds() { const date = document.getElementById('typeDate')?.value || currentDayKey(); const mode = document.getElementById('typeMode')?.value || 'all'; const min = Number(document.getElementById('typeMin')?.value || 1); const allowed = new Set(typeCandidates().map(w=>w.id)); const groups = new Map(); for (const e of state.events) { if (e.date !== date || e.result !== 'bad' || !allowed.has(e.wordId) || (mode !== 'all' && e.mode !== mode)) continue; groups.set(e.wordId, (groups.get(e.wordId)||0)+1); } return [...groups.entries()].filter(([,n])=>n>=min).sort((a,b)=>b[1]-a[1]).map(([id])=>id); }
+function customTypeIds() { const date = document.getElementById('typeDate')?.value || currentDayKey(); const mode = document.getElementById('typeMode')?.value || 'all'; const min = Number(document.getElementById('typeMin')?.value || 1); const allowed = new Set(typeCandidates().map(w=>w.id)); return customTypeIdsFromEvents(state.events, allowed, { date, mode, min }); }
 function renderTypeCustom() { const box = document.getElementById('customTypePreview'); if (!box) return; const ids = customTypeIds(); const limit = Number(document.getElementById('typeLimit')?.value || 50); const q = limit ? ids.slice(0,limit) : ids; box.innerHTML = `<div class="space"><div><b>${ids.length} 个词匹配</b><div class="small">${q.slice(0,8).map(id=>esc(wordById(id)?.en)).join(' · ')}</div></div><button id="startCustomType" class="soft" ${q.length?'':'disabled'}>开始这组${q.length?` · ${q.length}`:''}</button></div>`; document.getElementById('startCustomType').onclick = () => startType(q,'自定义强化'); }
 function startType(ids, label) { ids = [...new Set(ids)].filter(id => wordById(id) && !wordById(id).retired); if (!ids.length) return toast('这组暂时没有待强化词'); const fakePlan = { date: currentDayKey(), newIds: ids, reviewIds: [] }; const session = createRetrySession(state, fakePlan, 'type', ids); const id = pickNext(session); if (!id) return toast('这些词今天已经手打熟悉了'); typeRun = { ids, label, session, answer:false, input:'', currentEventId:null, result:null, skipped:0, activityId:startActivity('type',label,state.settings.typeBooks||[]) }; renderTypeRun(); speak(wordById(id).en); }
 function typeProgress() { const done = typeRun.ids.filter(id => latestEventOnDay(state,id,currentDayKey(),'type')?.result === 'good').length; const bad = typeRun.ids.filter(id => latestEventOnDay(state,id,currentDayKey(),'type')?.result === 'bad').length; return {done,total:typeRun.ids.length,bad}; }
