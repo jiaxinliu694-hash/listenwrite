@@ -70,5 +70,5 @@ test('resume hint prioritizes the last unjudged word but not over a due retry', 
   const retryWord = S.words.find(w => w.id === plan.newIds[0]);
   recordAttempt(S, retryWord, 'listen', 'bad', { date: plan.date });
   session = createRetrySession(S, plan, 'listen');
-  assert.equal(pickNext(session), retryWord.id, 'due retry remains higher priority than resume hint');
+  assert.equal(pickNext(session), plan.resumeWordId, 'a retry inside its minimum interval must not jump ahead of the resume word');
 });
