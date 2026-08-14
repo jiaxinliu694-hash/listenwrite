@@ -12,8 +12,9 @@ replacement = (
     "if(importStart<0||importEnd<0) throw new Error('sentence import function not found');\n"
     "app=app.slice(0,importStart)+newImport+app.slice(importEnd);"
 )
-s2, n = re.subn(r"const oldImport=.*?app=app\.replace\(oldImport,newImport\);", replacement, s, count=1, flags=re.S)
+pattern = re.compile(r"const oldImport=.*?app=app\.replace\(oldImport,newImport\);", re.S)
+s2, n = pattern.subn(lambda m: replacement, s, count=1)
 if n != 1:
     raise SystemExit(f'could not patch apply-v19.mjs, replacements={n}')
 p.write_text(s2)
-# v19c
+# v19d
