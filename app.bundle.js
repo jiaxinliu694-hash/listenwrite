@@ -1940,6 +1940,138 @@ function studyDayLabel() {
   return "\u4E1C\u516B\u533A \xB7 24:00 \u6B63\u5E38\u6362\u65E5\uFF1B\u672A\u5B8C\u6210\u53EF\u5EF6\u7EED\u5230 02:00";
 }
 
+// src/sentencebooks.js
+var VALID_STATUS = /* @__PURE__ */ new Set(["familiar", "unfamiliar", "unknown"]);
+function id(prefix = "id") {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+}
+function ensureSentenceBooks(state2) {
+  if (!Array.isArray(state2.sentenceBooks)) state2.sentenceBooks = [];
+  return state2.sentenceBooks;
+}
+function ensureSentenceBook(state2, name = "\u53E5\u5B50\u8BCD\u5E93") {
+  const books = ensureSentenceBooks(state2);
+  const clean = String(name || "").trim() || "\u53E5\u5B50\u8BCD\u5E93";
+  let book = books.find((b) => b.name === clean);
+  if (!book) {
+    book = { id: id("sbook"), name: clean, createdAt: Date.now(), updatedAt: Date.now(), entries: [] };
+    books.push(book);
+  }
+  if (!Array.isArray(book.entries)) book.entries = [];
+  return book;
+}
+function addSentenceEntry(state2, { bookName = "\u53E5\u5B50\u8BCD\u5E93", text, tokens = [] }) {
+  const book = ensureSentenceBook(state2, bookName);
+  const cleanText = String(text || "").trim();
+  const entry = {
+    id: id("sent"),
+    text: cleanText,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    tokens: tokens.map((surface, index) => ({
+      id: id(`tok${index}`),
+      surface: String(surface),
+      normalized: String(surface).toLowerCase(),
+      status: null,
+      lastInput: "",
+      lastSpellingResult: null,
+      attempts: []
+    }))
+  };
+  book.entries.unshift(entry);
+  book.updatedAt = Date.now();
+  return { book, entry };
+}
+function getSentenceEntry(state2, bookId, entryId) {
+  const book = ensureSentenceBooks(state2).find((b) => b.id === bookId);
+  const entry = book?.entries?.find((e) => e.id === entryId) || null;
+  return { book: book || null, entry };
+}
+function recordSentenceToken(entry, tokenIndex, { input = "", spellingResult = null, status = null } = {}) {
+  const token = entry?.tokens?.[tokenIndex];
+  if (!token) return null;
+  token.lastInput = String(input || "");
+  token.lastSpellingResult = spellingResult === "good" ? "good" : spellingResult === "bad" ? "bad" : null;
+  if (status && VALID_STATUS.has(status)) token.status = status;
+  token.attempts = Array.isArray(token.attempts) ? token.attempts : [];
+  token.attempts.push({ ts: Date.now(), input: token.lastInput, spellingResult: token.lastSpellingResult, status: token.status });
+  entry.updatedAt = Date.now();
+  return token;
+}
+function setSentenceTokenStatus(entry, tokenIndex, status) {
+  const token = entry?.tokens?.[tokenIndex];
+  if (!token || !VALID_STATUS.has(status)) return null;
+  token.status = status;
+  entry.updatedAt = Date.now();
+  return token;
+}
+function sentenceProblemTokens(entry, statuses = ["unfamiliar", "unknown"]) {
+  const wanted = new Set(statuses);
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const token of entry?.tokens || []) {
+    if (!wanted.has(token.status)) continue;
+    const key = token.normalized || token.surface.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(token);
+  }
+  return out;
+}
+function allSentenceProblemTokens(book, statuses = ["unfamiliar", "unknown"]) {
+  const wanted = new Set(statuses);
+  const byWord = /* @__PURE__ */ new Map();
+  for (const entry of book?.entries || []) {
+    for (const token of entry.tokens || []) {
+      if (!wanted.has(token.status)) continue;
+      const key = token.normalized || token.surface.toLowerCase();
+      if (!byWord.has(key)) byWord.set(key, { ...token, sentence: entry.text });
+    }
+  }
+  return [...byWord.values()];
+}
+function tsvCell(value) {
+  return String(value ?? "").replace(/\t/g, " ").replace(/\r?\n/g, " ");
+}
+function problemTokensToTSV(tokens, { source = "\u53E5\u5B50\u9519\u9898\u672C", sentence = "" } = {}) {
+  const rows = ["en	zh	pos	def	source	example"];
+  for (const token of tokens) {
+    rows.push([
+      token.normalized || String(token.surface).toLowerCase(),
+      "",
+      "",
+      "",
+      source,
+      token.sentence || sentence || ""
+    ].map(tsvCell).join("	"));
+  }
+  return rows.join("\n");
+}
+function normalizeSentenceBooks(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((book, bi) => ({
+    id: book.id || `sbook_legacy_${bi}`,
+    name: String(book.name || "\u53E5\u5B50\u8BCD\u5E93"),
+    createdAt: Number(book.createdAt) || Date.now(),
+    updatedAt: Number(book.updatedAt) || Date.now(),
+    entries: (Array.isArray(book.entries) ? book.entries : []).map((entry, ei) => ({
+      id: entry.id || `sent_legacy_${bi}_${ei}`,
+      text: String(entry.text || ""),
+      createdAt: Number(entry.createdAt) || Date.now(),
+      updatedAt: Number(entry.updatedAt) || Date.now(),
+      tokens: (Array.isArray(entry.tokens) ? entry.tokens : []).map((token, ti) => ({
+        id: token.id || `tok_legacy_${bi}_${ei}_${ti}`,
+        surface: String(token.surface || ""),
+        normalized: String(token.normalized || token.surface || "").toLowerCase(),
+        status: VALID_STATUS.has(token.status) ? token.status : null,
+        lastInput: String(token.lastInput || ""),
+        lastSpellingResult: token.lastSpellingResult === "good" ? "good" : token.lastSpellingResult === "bad" ? "bad" : null,
+        attempts: Array.isArray(token.attempts) ? token.attempts : []
+      }))
+    }))
+  }));
+}
+
 // src/storage.js
 var DB_NAME = "listenwrite-v3";
 var DB_VERSION = 1;
@@ -1978,10 +2110,11 @@ async function dbSet(key, value) {
 }
 function defaultState() {
   return {
-    version: 5,
+    version: 6,
     words: [],
     events: [],
     texts: [],
+    sentenceBooks: [],
     dailyPlans: {},
     activities: [],
     settings: {
@@ -1990,25 +2123,89 @@ function defaultState() {
       retention: 0.9,
       speechRate: 0.92,
       todayBooks: [],
-      typeBooks: []
+      typeBooks: [],
+      todayPlanMode: "mixed"
     }
   };
 }
 function sampleWords() {
-  return [["distribution", "\u5206\u5E03\uFF1B\u5206\u914D", "n.", "the way something is spread or shared"], ["rural", "\u4E61\u6751\u7684\uFF1B\u519C\u6751\u7684", "adj.", "connected with the countryside"], ["decline", "\u4E0B\u964D\uFF1B\u51CF\u5C11", "n./v.", "to become smaller, fewer or less"], ["agriculture", "\u519C\u4E1A", "n.", "the practice of farming"], ["significant", "\u663E\u8457\u7684\uFF1B\u91CD\u8981\u7684", "adj.", "large or important enough to be noticed"]].map(([en, zh, pos, def], i) => ({ id: `sample_${i + 1}`, en, zh, pos, def, sources: ["\u793A\u4F8B\u8BCD\u5E93"], examples: [], retired: false, card: emptyCard() }));
+  return [
+    ["distribution", "\u5206\u5E03\uFF1B\u5206\u914D", "n.", "the way something is spread or shared"],
+    ["rural", "\u4E61\u6751\u7684\uFF1B\u519C\u6751\u7684", "adj.", "connected with the countryside"],
+    ["decline", "\u4E0B\u964D\uFF1B\u51CF\u5C11", "n./v.", "to become smaller, fewer or less"],
+    ["agriculture", "\u519C\u4E1A", "n.", "the practice of farming"],
+    ["significant", "\u663E\u8457\u7684\uFF1B\u91CD\u8981\u7684", "adj.", "large or important enough to be noticed"]
+  ].map(([en, zh, pos, def], i) => ({
+    id: `sample_${i + 1}`,
+    en,
+    zh,
+    pos,
+    def,
+    sources: ["\u793A\u4F8B\u8BCD\u5E93"],
+    examples: [],
+    retired: false,
+    card: emptyCard()
+  }));
 }
 function normalizeWord(word, index) {
-  return { id: word.id || `w_${Date.now().toString(36)}_${index}`, en: String(word.en || "").trim().toLowerCase(), zh: String(word.zh || ""), pos: String(word.pos || ""), def: String(word.def || ""), sources: Array.isArray(word.sources) ? [...new Set(word.sources)] : Array.isArray(word.src) ? [...new Set(word.src)] : [], examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [], retired: Boolean(word.retired ?? word.ret), card: word.card || null };
+  return {
+    id: word.id || `w_${Date.now().toString(36)}_${index}`,
+    en: String(word.en || "").trim().toLowerCase(),
+    zh: String(word.zh || ""),
+    pos: String(word.pos || ""),
+    def: String(word.def || ""),
+    sources: Array.isArray(word.sources) ? [...new Set(word.sources)] : Array.isArray(word.src) ? [...new Set(word.src)] : [],
+    examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [],
+    retired: Boolean(word.retired ?? word.ret),
+    card: word.card || null
+  };
 }
 function normalizeEvent(event, index, preserveDate) {
   const ts = Number(event.ts) || Date.now();
-  return { id: event.id || `legacy_ev_${index}`, wordId: event.wordId, date: preserveDate && event.date ? event.date : calendarDayKey(ts), ts, mode: event.mode === "type" ? "type" : "listen", result: event.result || event.res || "bad", originalResult: event.originalResult || event.result || event.res || "bad", cold: false, attempt: 1, source: event.source || null, sentence: event.sentence || null, editedAt: event.editedAt || null };
+  return {
+    id: event.id || `legacy_ev_${index}`,
+    wordId: event.wordId,
+    date: preserveDate && event.date ? event.date : calendarDayKey(ts),
+    ts,
+    mode: event.mode === "type" ? "type" : "listen",
+    result: event.result || event.res || "bad",
+    originalResult: event.originalResult || event.result || event.res || "bad",
+    cold: false,
+    attempt: 1,
+    source: event.source || null,
+    sentence: event.sentence || null,
+    editedAt: event.editedAt || null
+  };
+}
+function normalizeSegment(segment, index) {
+  return {
+    id: segment.id || `seg_${index}`,
+    book: String(segment.book || ""),
+    newTarget: Math.max(0, Number(segment.newTarget) || 0),
+    reviewTarget: Math.max(0, Number(segment.reviewTarget) || 0),
+    newIds: Array.isArray(segment.newIds) ? segment.newIds : [],
+    reviewIds: Array.isArray(segment.reviewIds) ? segment.reviewIds : []
+  };
 }
 function normalizePlan(plan, key) {
-  return { date: plan.date || key, books: Array.isArray(plan.books) ? plan.books : [], newTarget: Number(plan.newTarget) || 0, reviewTarget: Number(plan.reviewTarget) || 0, newIds: Array.isArray(plan.newIds) ? plan.newIds : [], reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [], createdAt: Number(plan.createdAt) || Date.now(), updatedAt: Number(plan.updatedAt) || Date.now() };
+  const segments = Array.isArray(plan.bookSegments) ? plan.bookSegments.map(normalizeSegment) : [];
+  return {
+    date: plan.date || key,
+    mode: plan.mode === "sequential" ? "sequential" : "mixed",
+    books: Array.isArray(plan.books) ? plan.books : [],
+    newTarget: Math.max(0, Number(plan.newTarget) || 0),
+    reviewTarget: Math.max(0, Number(plan.reviewTarget) || 0),
+    newIds: Array.isArray(plan.newIds) ? plan.newIds : [],
+    reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [],
+    bookSegments: segments,
+    resumeWordId: plan.resumeWordId || null,
+    createdAt: Number(plan.createdAt) || Date.now(),
+    updatedAt: Number(plan.updatedAt) || Date.now()
+  };
 }
 function reindexEvents(events) {
-  const firstByWordDay = /* @__PURE__ */ new Set(), attempts = /* @__PURE__ */ new Map();
+  const firstByWordDay = /* @__PURE__ */ new Set();
+  const attempts = /* @__PURE__ */ new Map();
   events.sort((a, b) => a.ts - b.ts);
   for (const e of events) {
     const coldKey = `${e.wordId}|${e.date}`;
@@ -2022,13 +2219,24 @@ function reindexEvents(events) {
   return events;
 }
 function normalizeActivities(list, preserveDate) {
-  return (Array.isArray(list) ? list : []).map((a) => ({ ...a, date: preserveDate && a.date ? a.date : calendarDayKey(Number(a.start) || Number(a.lastTouch) || Date.now()) }));
+  return (Array.isArray(list) ? list : []).map((a) => ({
+    ...a,
+    date: preserveDate && a.date ? a.date : calendarDayKey(Number(a.start) || Number(a.lastTouch) || Date.now())
+  }));
 }
 function normalizeState(input) {
-  const base = defaultState(), oldSettings = input?.settings || input?.set || {}, state2 = { ...base, ...input || {} };
+  const base = defaultState();
+  const oldSettings = input?.settings || input?.set || {};
+  const state2 = { ...base, ...input || {} };
   const oldNew = Number(oldSettings.defaultNewTarget ?? oldSettings.newTarget ?? oldSettings.newN ?? base.settings.defaultNewTarget);
   const oldReview = Number(oldSettings.defaultReviewTarget ?? oldSettings.reviewTarget ?? oldSettings.reviewN ?? base.settings.defaultReviewTarget);
-  state2.settings = { ...base.settings, ...oldSettings, defaultNewTarget: Math.max(0, oldNew || 0), defaultReviewTarget: Math.max(0, oldReview || 0) };
+  state2.settings = {
+    ...base.settings,
+    ...oldSettings,
+    defaultNewTarget: Math.max(0, oldNew || 0),
+    defaultReviewTarget: Math.max(0, oldReview || 0),
+    todayPlanMode: oldSettings.todayPlanMode === "sequential" ? "sequential" : "mixed"
+  };
   if (input?.set) {
     state2.settings.speechRate = Number(input.set.rate ?? state2.settings.speechRate);
     state2.settings.todayBooks = Array.isArray(input.set.todayBooks) ? input.set.todayBooks : [];
@@ -2044,6 +2252,7 @@ function normalizeState(input) {
   state2.words = (input?.words || []).map(normalizeWord).filter((w) => w.en);
   state2.events = reindexEvents((input?.events || []).map((e, i) => normalizeEvent(e, i, preserveDates)).filter((e) => e.wordId));
   state2.texts = Array.isArray(input?.texts) ? input.texts : [];
+  state2.sentenceBooks = normalizeSentenceBooks(input?.sentenceBooks);
   state2.activities = normalizeActivities(input?.activities, preserveDates);
   state2.dailyPlans = {};
   if (Number(input?.version) >= 4 && input?.dailyPlans && typeof input.dailyPlans === "object" && !Array.isArray(input.dailyPlans)) {
@@ -2053,7 +2262,7 @@ function normalizeState(input) {
     const evs = state2.events.filter((e) => e.wordId === word.id && e.cold).sort((a, b) => a.ts - b.ts);
     word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : word.card || emptyCard();
   }
-  state2.version = 5;
+  state2.version = 6;
   return state2;
 }
 async function parseLocal(key) {
@@ -2088,7 +2297,7 @@ async function loadState() {
   }
 }
 async function saveState(state2) {
-  state2.version = 5;
+  state2.version = 6;
   try {
     await dbSet(STATE_KEY, state2);
     localStorage.removeItem(FALLBACK_KEY);
@@ -2126,12 +2335,12 @@ function hasEventBefore(state2, wordId, date = dayKey()) {
 function isDailyPlanComplete(state2, date, ts = Date.now()) {
   const plan = state2.dailyPlans?.[date];
   if (!plan) return true;
-  const ids = [.../* @__PURE__ */ new Set([...plan.newIds || [], ...plan.reviewIds || []])].filter((id) => state2.words.some((w) => w.id === id));
+  const ids = [.../* @__PURE__ */ new Set([...plan.newIds || [], ...plan.reviewIds || []])].filter((id2) => state2.words.some((w) => w.id === id2));
   if (!ids.length) return true;
-  for (const id of ids) {
-    const word = state2.words.find((w) => w.id === id);
+  for (const id2 of ids) {
+    const word = state2.words.find((w) => w.id === id2);
     if (word?.retired) continue;
-    const latest = state2.events.filter((e) => e.wordId === id && e.date === date && e.mode === "listen" && e.ts <= ts).sort((a, b) => a.ts - b.ts).at(-1);
+    const latest = state2.events.filter((e) => e.wordId === id2 && e.date === date && e.mode === "listen" && e.ts <= ts).sort((a, b) => a.ts - b.ts).at(-1);
     if (!latest || latest.result !== "good") return false;
   }
   return true;
@@ -2196,68 +2405,110 @@ function matchesBooks(word, books = []) {
 function sameBooks(a = [], b = []) {
   return JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 }
-function listenedToday(state2, id, date) {
-  return state2.events.some((e) => e.wordId === id && e.date === date && e.mode === "listen");
+function listenedToday(state2, id2, date) {
+  return state2.events.some((e) => e.wordId === id2 && e.date === date && e.mode === "listen");
 }
 function attemptedCount(state2, ids, date) {
-  return ids.filter((id) => listenedToday(state2, id, date)).length;
+  return ids.filter((id2) => listenedToday(state2, id2, date)).length;
+}
+function reviewCandidates(state2, pool, assigned, date) {
+  const cutoff = studyDayEnd(date);
+  const now = Date.now();
+  return pool.filter((w) => !assigned.has(w.id) && hasEventBefore(state2, w.id, date) && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff).sort((a, b) => {
+    const ra = retrievability(a.card, now, state2.settings.retention);
+    const rb = retrievability(b.card, now, state2.settings.retention);
+    if (ra !== rb) return ra - rb;
+    return Number(a.card?.due || 0) - Number(b.card?.due || 0);
+  });
+}
+function freshCandidates(state2, pool, assigned, date) {
+  return pool.filter((w) => !assigned.has(w.id) && !hasEventBefore(state2, w.id, date)).sort((a, b) => (b.sources?.length || 0) - (a.sources?.length || 0) || a.en.localeCompare(b.en));
 }
 function seedTodayFromListenHistory(state2, plan) {
+  if (plan.mode === "sequential") return;
   const seen = /* @__PURE__ */ new Set([...plan.newIds, ...plan.reviewIds]);
   const listenedIds = [...new Set(state2.events.filter((e) => e.date === plan.date && e.mode === "listen").map((e) => e.wordId))];
-  for (const id of listenedIds) {
-    if (seen.has(id)) continue;
-    if (hasEventBefore(state2, id, plan.date)) plan.reviewIds.push(id);
-    else plan.newIds.push(id);
-    seen.add(id);
+  for (const id2 of listenedIds) {
+    if (seen.has(id2)) continue;
+    if (hasEventBefore(state2, id2, plan.date)) plan.reviewIds.push(id2);
+    else plan.newIds.push(id2);
+    seen.add(id2);
   }
 }
 function reconcileScope(state2, plan, books) {
   if (sameBooks(plan.books, books)) return;
-  const keep = (id) => listenedToday(state2, id, plan.date) || matchesBooks(state2.words.find((w) => w.id === id) || {}, books);
+  const keep = (id2) => listenedToday(state2, id2, plan.date) || matchesBooks(state2.words.find((w) => w.id === id2) || {}, books);
   plan.newIds = plan.newIds.filter(keep);
   plan.reviewIds = plan.reviewIds.filter(keep);
   plan.books = [...books];
 }
-function trimToTarget(state2, plan, key, target) {
-  const ids = plan[key];
-  const attempted = ids.filter((id) => listenedToday(state2, id, plan.date));
-  const untouched = ids.filter((id) => !listenedToday(state2, id, plan.date));
+function trimIdsToTarget(state2, ids, date, target) {
+  const attempted = ids.filter((id2) => listenedToday(state2, id2, date));
+  const untouched = ids.filter((id2) => !listenedToday(state2, id2, date));
   const keepUntouched = Math.max(0, target - attempted.length);
-  plan[key] = [...attempted, ...untouched.slice(0, keepUntouched)];
+  return [...attempted, ...untouched.slice(0, keepUntouched)];
+}
+function syncSequentialTotals(plan) {
+  plan.newIds = [];
+  plan.reviewIds = [];
+  for (const segment of plan.bookSegments || []) {
+    plan.newIds.push(...segment.newIds);
+    plan.reviewIds.push(...segment.reviewIds);
+  }
+  plan.newIds = [...new Set(plan.newIds)];
+  plan.reviewIds = [...new Set(plan.reviewIds.filter((id2) => !plan.newIds.includes(id2)))];
+  plan.newTarget = (plan.bookSegments || []).reduce((sum, x) => sum + x.newTarget, 0);
+  plan.reviewTarget = (plan.bookSegments || []).reduce((sum, x) => sum + x.reviewTarget, 0);
+  plan.books = (plan.bookSegments || []).map((x) => x.book).filter(Boolean);
 }
 function ensureDailyPlan(state2, options = {}) {
   const date = options.date || activeStudyDayKey(state2);
   let plan = state2.dailyPlans[date];
   if (!plan) {
-    plan = state2.dailyPlans[date] = { date, books: [...options.books ?? state2.settings.todayBooks ?? []], newTarget: Math.max(0, Number(state2.settings.defaultNewTarget) || 0), reviewTarget: Math.max(0, Number(state2.settings.defaultReviewTarget) || 0), newIds: [], reviewIds: [], createdAt: Date.now(), updatedAt: Date.now() };
+    plan = state2.dailyPlans[date] = {
+      date,
+      mode: state2.settings.todayPlanMode === "sequential" ? "sequential" : "mixed",
+      books: [...options.books ?? state2.settings.todayBooks ?? []],
+      newTarget: Math.max(0, Number(state2.settings.defaultNewTarget) || 0),
+      reviewTarget: Math.max(0, Number(state2.settings.defaultReviewTarget) || 0),
+      newIds: [],
+      reviewIds: [],
+      bookSegments: [],
+      resumeWordId: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+  }
+  if (options.mode === "mixed" && plan.mode !== "mixed") {
+    convertPlanToMixed(state2, plan, options.books ?? plan.books);
+  }
+  if (plan.mode === "sequential") {
+    plan.updatedAt = Date.now();
+    syncSequentialTotals(plan);
+    return plan;
   }
   if (Object.prototype.hasOwnProperty.call(options, "books")) reconcileScope(state2, plan, options.books || []);
   seedTodayFromListenHistory(state2, plan);
-  const minNew = attemptedCount(state2, plan.newIds, plan.date), minReview = attemptedCount(state2, plan.reviewIds, plan.date);
+  const minNew = attemptedCount(state2, plan.newIds, plan.date);
+  const minReview = attemptedCount(state2, plan.reviewIds, plan.date);
   if (options.newTarget != null) plan.newTarget = Math.max(minNew, Math.max(0, Number(options.newTarget) || 0));
   else plan.newTarget = Math.max(minNew, Number(plan.newTarget) || 0);
   if (options.reviewTarget != null) plan.reviewTarget = Math.max(minReview, Math.max(0, Number(options.reviewTarget) || 0));
   else plan.reviewTarget = Math.max(minReview, Number(plan.reviewTarget) || 0);
-  trimToTarget(state2, plan, "newIds", plan.newTarget);
-  trimToTarget(state2, plan, "reviewIds", plan.reviewTarget);
+  plan.newIds = trimIdsToTarget(state2, plan.newIds, plan.date, plan.newTarget);
+  plan.reviewIds = trimIdsToTarget(state2, plan.reviewIds, plan.date, plan.reviewTarget);
   fillDailyPlan(state2, plan);
   plan.updatedAt = Date.now();
   return plan;
 }
 function fillDailyPlan(state2, plan) {
+  if (plan.mode === "sequential") return fillSequentialPlan(state2, plan);
   const assigned = /* @__PURE__ */ new Set([...plan.newIds, ...plan.reviewIds]);
   const pool = state2.words.filter((w) => !w.retired && matchesBooks(w, plan.books));
-  const cutoff = studyDayEnd(plan.date), now = Date.now();
-  const review = pool.filter((w) => !assigned.has(w.id) && hasEventBefore(state2, w.id, plan.date) && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff);
-  review.sort((a, b) => {
-    const ra = retrievability(a.card, now, state2.settings.retention), rb = retrievability(b.card, now, state2.settings.retention);
-    if (ra !== rb) return ra - rb;
-    return Number(a.card?.due || 0) - Number(b.card?.due || 0);
-  });
-  const fresh = pool.filter((w) => !assigned.has(w.id) && !hasEventBefore(state2, w.id, plan.date));
-  fresh.sort((a, b) => (b.sources?.length || 0) - (a.sources?.length || 0) || a.en.localeCompare(b.en));
-  const needReview = Math.max(0, plan.reviewTarget - plan.reviewIds.length), needNew = Math.max(0, plan.newTarget - plan.newIds.length);
+  const review = reviewCandidates(state2, pool, assigned, plan.date);
+  const fresh = freshCandidates(state2, pool, assigned, plan.date);
+  const needReview = Math.max(0, plan.reviewTarget - plan.reviewIds.length);
+  const needNew = Math.max(0, plan.newTarget - plan.newIds.length);
   for (const w of review.slice(0, needReview)) {
     plan.reviewIds.push(w.id);
     assigned.add(w.id);
@@ -2268,65 +2519,156 @@ function fillDailyPlan(state2, plan) {
   }
   return plan;
 }
+function configureSequentialPlan(state2, plan, configs = []) {
+  const clean = [];
+  const seenBooks = /* @__PURE__ */ new Set();
+  for (const row of configs) {
+    const book = String(row.book || "").trim();
+    if (!book || seenBooks.has(book)) continue;
+    seenBooks.add(book);
+    const prior = (plan.bookSegments || []).find((x) => x.book === book);
+    clean.push({
+      id: prior?.id || `seg_${Math.random().toString(36).slice(2, 9)}`,
+      book,
+      newTarget: Math.max(0, Number(row.newTarget ?? prior?.newTarget) || 0),
+      reviewTarget: Math.max(0, Number(row.reviewTarget ?? prior?.reviewTarget) || 0),
+      newIds: prior?.newIds ? [...prior.newIds] : [],
+      reviewIds: prior?.reviewIds ? [...prior.reviewIds] : []
+    });
+  }
+  plan.mode = "sequential";
+  plan.bookSegments = clean;
+  fillSequentialPlan(state2, plan);
+  plan.updatedAt = Date.now();
+  return plan;
+}
+function fillSequentialPlan(state2, plan) {
+  const assigned = /* @__PURE__ */ new Set();
+  for (const segment of plan.bookSegments || []) {
+    const pool = state2.words.filter((w) => !w.retired && (w.sources || []).includes(segment.book));
+    const valid = new Set(pool.map((w) => w.id));
+    segment.newIds = segment.newIds.filter((id2) => valid.has(id2) && !assigned.has(id2));
+    segment.reviewIds = segment.reviewIds.filter((id2) => valid.has(id2) && !assigned.has(id2));
+    const minNew = attemptedCount(state2, segment.newIds, plan.date);
+    const minReview = attemptedCount(state2, segment.reviewIds, plan.date);
+    segment.newTarget = Math.max(minNew, Math.max(0, Number(segment.newTarget) || 0));
+    segment.reviewTarget = Math.max(minReview, Math.max(0, Number(segment.reviewTarget) || 0));
+    segment.newIds = trimIdsToTarget(state2, segment.newIds, plan.date, segment.newTarget);
+    segment.reviewIds = trimIdsToTarget(state2, segment.reviewIds, plan.date, segment.reviewTarget);
+    segment.newIds.forEach((id2) => assigned.add(id2));
+    segment.reviewIds.forEach((id2) => assigned.add(id2));
+    const review = reviewCandidates(state2, pool, assigned, plan.date);
+    for (const w of review.slice(0, Math.max(0, segment.reviewTarget - segment.reviewIds.length))) {
+      segment.reviewIds.push(w.id);
+      assigned.add(w.id);
+    }
+    const fresh = freshCandidates(state2, pool, assigned, plan.date);
+    for (const w of fresh.slice(0, Math.max(0, segment.newTarget - segment.newIds.length))) {
+      segment.newIds.push(w.id);
+      assigned.add(w.id);
+    }
+  }
+  syncSequentialTotals(plan);
+  return plan;
+}
+function convertPlanToMixed(state2, plan, books = []) {
+  const attemptedNew = plan.newIds.filter((id2) => listenedToday(state2, id2, plan.date));
+  const attemptedReview = plan.reviewIds.filter((id2) => listenedToday(state2, id2, plan.date));
+  plan.mode = "mixed";
+  plan.bookSegments = [];
+  plan.books = [...books];
+  plan.newTarget = Math.max(attemptedNew.length, Number(state2.settings.defaultNewTarget) || 0);
+  plan.reviewTarget = Math.max(attemptedReview.length, Number(state2.settings.defaultReviewTarget) || 0);
+  plan.newIds = attemptedNew;
+  plan.reviewIds = attemptedReview;
+  fillDailyPlan(state2, plan);
+  plan.updatedAt = Date.now();
+  return plan;
+}
 function latestListenResult(state2, wordId, date = activeStudyDayKey(state2)) {
   return latestEventOnDay(state2, wordId, date, "listen");
 }
-function planStatus(state2, plan) {
+function statusForIds(state2, ids, date) {
   const wordMap = new Map(state2.words.map((w) => [w.id, w]));
-  const statusFor = (ids) => {
-    let done = 0, retry = 0, pending = 0;
-    const doneIds = [], retryIds = [], pendingIds = [];
-    for (const id of ids) {
-      const word = wordMap.get(id);
-      if (!word) continue;
-      if (word.retired) {
-        done++;
-        doneIds.push(id);
-        continue;
-      }
-      const last = latestListenResult(state2, id, plan.date);
-      if (!last) {
-        pending++;
-        pendingIds.push(id);
-      } else if (last.result === "good") {
-        done++;
-        doneIds.push(id);
-      } else {
-        retry++;
-        retryIds.push(id);
-      }
+  let done = 0, retry = 0, pending = 0;
+  const doneIds = [], retryIds = [], pendingIds = [];
+  for (const id2 of ids) {
+    const word = wordMap.get(id2);
+    if (!word) continue;
+    if (word.retired) {
+      done++;
+      doneIds.push(id2);
+      continue;
     }
-    return { done, retry, pending, doneIds, retryIds, pendingIds };
+    const last = latestListenResult(state2, id2, date);
+    if (!last) {
+      pending++;
+      pendingIds.push(id2);
+    } else if (last.result === "good") {
+      done++;
+      doneIds.push(id2);
+    } else {
+      retry++;
+      retryIds.push(id2);
+    }
+  }
+  return { done, retry, pending, doneIds, retryIds, pendingIds };
+}
+function planStatus(state2, plan) {
+  return {
+    new: statusForIds(state2, plan.newIds, plan.date),
+    review: statusForIds(state2, plan.reviewIds, plan.date)
   };
-  return { new: statusFor(plan.newIds), review: statusFor(plan.reviewIds) };
+}
+function segmentStatus(state2, plan, segment) {
+  return {
+    new: statusForIds(state2, segment.newIds, plan.date),
+    review: statusForIds(state2, segment.reviewIds, plan.date)
+  };
+}
+function currentSequentialSegment(state2, plan) {
+  if (plan.mode !== "sequential") return null;
+  for (const segment of plan.bookSegments || []) {
+    const s = segmentStatus(state2, plan, segment);
+    if (s.new.pending + s.new.retry + s.review.pending + s.review.retry > 0) return segment;
+  }
+  return null;
 }
 function todayListeningStats(state2, books = [], date = activeStudyDayKey(state2)) {
-  const allowed = new Set(state2.words.filter((w) => matchesBooks(w, books)).map((w) => w.id)), events = state2.events.filter((e) => e.date === date && e.mode === "listen" && allowed.has(e.wordId)), ids = [...new Set(events.map((e) => e.wordId))];
+  const allowed = new Set(state2.words.filter((w) => matchesBooks(w, books)).map((w) => w.id));
+  const events = state2.events.filter((e) => e.date === date && e.mode === "listen" && allowed.has(e.wordId));
+  const ids = [...new Set(events.map((e) => e.wordId))];
   let newCount = 0, reviewCount = 0, firstGood = 0, firstBad = 0;
-  for (const id of ids) {
-    if (hasEventBefore(state2, id, date)) reviewCount++;
+  for (const id2 of ids) {
+    if (hasEventBefore(state2, id2, date)) reviewCount++;
     else newCount++;
-    const first = eventsOnDay(state2, id, date, "listen")[0];
+    const first = eventsOnDay(state2, id2, date, "listen")[0];
     if (first?.result === "good") firstGood++;
     else if (first) firstBad++;
   }
   return { events, ids, newCount, reviewCount, firstGood, firstBad };
 }
 function createRetrySession(state2, plan, mode = "listen", explicitIds = null) {
-  const planIds = explicitIds || [...plan.reviewIds, ...plan.newIds], wordMap = new Map(state2.words.map((w) => [w.id, w]));
-  const pendingBase = [], retry = [];
+  const planIds = explicitIds || [...plan.reviewIds, ...plan.newIds];
+  const wordMap = new Map(state2.words.map((w) => [w.id, w]));
+  const pendingBase = [];
+  const retry = [];
   if (explicitIds) {
-    for (const id of [...new Set(planIds)]) {
-      const word = wordMap.get(id);
-      if (word && !word.retired) pendingBase.push(id);
+    for (const id2 of [...new Set(planIds)]) {
+      const word = wordMap.get(id2);
+      if (word && !word.retired) pendingBase.push(id2);
     }
   } else {
-    for (const id of planIds) {
-      const word = wordMap.get(id);
+    for (const id2 of planIds) {
+      const word = wordMap.get(id2);
       if (!word || word.retired) continue;
-      const last = latestEventOnDay(state2, id, plan.date, mode);
-      if (!last) pendingBase.push(id);
-      else if (last.result === "bad") retry.push({ wordId: id, attempt: eventsOnDay(state2, id, plan.date, mode).length, eligibleTurn: 0, addedAt: last.ts });
+      const last = latestEventOnDay(state2, id2, plan.date, mode);
+      if (!last) pendingBase.push(id2);
+      else if (last.result === "bad") retry.push({ wordId: id2, attempt: eventsOnDay(state2, id2, plan.date, mode).length, eligibleTurn: 0, addedAt: last.ts });
+    }
+    if (plan.resumeWordId) {
+      const i = pendingBase.indexOf(plan.resumeWordId);
+      if (i > 0) pendingBase.unshift(pendingBase.splice(i, 1)[0]);
     }
   }
   return { mode, date: plan.date, fixedIds: [...new Set(planIds)], pendingBase, retry, turn: 0, current: null, history: [] };
@@ -2367,13 +2709,25 @@ function finishCurrent(session, result) {
 }
 function sessionProgress(state2, plan, session) {
   const status = planStatus(state2, plan);
-  return { newDone: status.new.done, newTotal: plan.newIds.length, reviewDone: status.review.done, reviewTotal: plan.reviewIds.length, retry: status.new.retry + status.review.retry, remaining: status.new.pending + status.review.pending + status.new.retry + status.review.retry, turn: session?.turn || 0 };
+  return {
+    newDone: status.new.done,
+    newTotal: plan.newIds.length,
+    reviewDone: status.review.done,
+    reviewTotal: plan.reviewIds.length,
+    retry: status.new.retry + status.review.retry,
+    remaining: status.new.pending + status.review.pending + status.new.retry + status.review.retry,
+    turn: session?.turn || 0
+  };
 }
 function dueForecast(state2, days = 7) {
-  const today = activeStudyDayKey(state2), out = Array.from({ length: days }, (_, i) => ({ date: addStudyDays(today, i), count: 0 })), start = studyDayStart(today);
+  const today = activeStudyDayKey(state2);
+  const out = Array.from({ length: days }, (_, i) => ({ date: addStudyDays(today, i), count: 0 }));
+  const start = studyDayStart(today);
   for (const word of state2.words) {
     if (word.retired || !(word.card?.reps || 0)) continue;
-    const due = Number(word.card.due), key = dayKey(due), row = out.find((x) => x.date === key);
+    const due = Number(word.card.due);
+    const key = dayKey(due);
+    const row = out.find((x) => x.date === key);
     if (row) row.count++;
     else if (due < start) out[0].count++;
   }
@@ -2441,8 +2795,8 @@ function toast(message) {
 function persist() {
   void saveState(state);
 }
-function wordById(id) {
-  return state.words.find((w) => w.id === id);
+function wordById(id2) {
+  return state.words.find((w) => w.id === id2);
 }
 function pct(a, b) {
   return b ? `${Math.round(a * 100 / b)}%` : "\u2014";
@@ -2468,8 +2822,8 @@ function startActivity(mode, label, books = []) {
   persist();
   return a.id;
 }
-function touchActivity(id) {
-  const a = state.activities.find((x) => x.id === id);
+function touchActivity(id2) {
+  const a = state.activities.find((x) => x.id === id2);
   if (!a) return;
   const now = Date.now();
   const last = a.lastTouch || a.start || now;
@@ -2484,7 +2838,7 @@ function activityMinutes(mode = null, date = currentDayKey()) {
 }
 function navHtml() {
   const items = [["home", "\u9996\u9875"], ["today", "\u4ECA\u65E5"], ["type", "\u624B\u6253"], ["text", "\u6587\u672C"], ["library", "\u8BCD\u5E93"]];
-  return `<nav class="nav">${items.map(([id, t]) => `<button data-nav="${id}" class="${view === id ? "on" : ""}">${t}</button>`).join("")}</nav>`;
+  return `<nav class="nav">${items.map(([id2, t]) => `<button data-nav="${id2}" class="${view === id2 ? "on" : ""}">${t}</button>`).join("")}</nav>`;
 }
 function shell(content) {
   const [ey, title] = labels[view] || ["", ""];
@@ -2534,33 +2888,79 @@ function renderHome() {
   document.getElementById("goStats").onclick = () => go("stats");
 }
 function renderToday() {
+  const date = currentDayKey();
   const books = state.settings.todayBooks || [];
-  const plan = ensureDailyPlan(state, { books });
+  let plan = ensureDailyPlan(state, planForTodayOptions(date, books));
+  if (plan.mode === "sequential") {
+    const existing = new Map((plan.bookSegments || []).map((x) => [x.book, x]));
+    const chosen = books.map((book) => ({ book, newTarget: existing.get(book)?.newTarget ?? 0, reviewTarget: existing.get(book)?.reviewTarget ?? 0 }));
+    configureSequentialPlan(state, plan, chosen);
+  }
   persist();
   const prog = sessionProgress(state, plan, null);
-  const td = todayListeningStats(state, books);
-  const mins = activityMinutes("listen");
+  const td = todayListeningStats(state, books, date);
+  const mins = activityMinutes("listen", date);
   const selectedText = books.length ? books.join("\u3001") : "\u5168\u90E8\u8BCD\u4E66";
+  const currentSeg = currentSequentialSegment(state, plan);
+  const sequentialRows = plan.mode === "sequential" ? (plan.bookSegments || []).map((seg, i) => {
+    const st = segmentStatus(state, plan, seg);
+    const nd = st.new.done, rd = st.review.done;
+    return `<div class="bookrow" style="grid-template-columns:minmax(90px,1.4fr) 1fr 1fr"><b>${i + 1}. ${esc(seg.book)}${currentSeg?.book === seg.book ? " \xB7 \u5F53\u524D" : ""}</b><label class="small">\u65B0\u8BCD <input data-seq-new="${i}" type="number" min="0" value="${seg.newTarget}" style="width:78px"> <span>${nd}/${seg.newIds.length}</span></label><label class="small">\u590D\u4E60 <input data-seq-review="${i}" type="number" min="0" value="${seg.reviewTarget}" style="width:78px"> <span>${rd}/${seg.reviewIds.length}</span></label></div>`;
+  }).join("") : "";
   const bookRows = (books.length ? books : allBooks(state)).map((b) => {
-    const x = todayListeningStats(state, [b]);
+    const x = todayListeningStats(state, [b], date);
     return `<div class="bookrow"><b>${esc(b)}</b><span>${x.newCount} \u65B0</span><span>${x.reviewCount} \u590D\u4E60</span><span class="mobilehide good">${x.firstGood} \u719F\u6089</span><span class="mobilehide bad">${x.firstBad} \u4E0D\u719F</span></div>`;
   }).join("");
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div><div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="small">\u8FD9\u91CC\u53EA\u6539\u4ECA\u5929\u3002\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\uFF0C\u4E5F\u4E0D\u4F1A\u51FA\u73B0 36 / 30\u3002</div>${bookChips(books, "today")}<div class="grid2" style="margin-top:12px"><div class="field"><label>\u4ECA\u5929\u65B0\u8BCD\u76EE\u6807</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>\u4ECA\u5929\u590D\u4E60\u76EE\u6807</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div></div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u4FEE\u6539\u8FD9\u91CC\u4E0D\u4F1A\u6539\u53D8\u4ECA\u5929\u5DF2\u7ECF\u751F\u6210\u7684\u8BA1\u5212\uFF0C\u4ECE\u4E0B\u4E00\u8F6E\u5B66\u4E60\u65E5\u5F00\u59CB\u4F7F\u7528\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
-  bindBookChips("today", renderToday);
-  document.getElementById("todayNewTarget").onchange = (e) => {
-    const requested = Math.max(0, Number(e.target.value) || 0);
-    const updated = ensureDailyPlan(state, { newTarget: requested });
+  const planControls = plan.mode === "sequential" ? `<div class="small" style="margin:10px 0">\u6309\u4E0B\u9762\u987A\u5E8F\u4E00\u672C\u4E00\u672C\u5B66\u5B8C\u3002\u91CD\u590D\u8BCD\u53EA\u5F52\u524D\u9762\u7B2C\u4E00\u672C\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5360\u540D\u989D\u3002</div>${sequentialRows || '<div class="empty">\u5148\u9009\u62E9\u81F3\u5C11\u4E00\u672C\u5177\u4F53\u8BCD\u4E66\u3002</div>'}` : `<div class="grid2" style="margin-top:12px"><div class="field"><label>\u4ECA\u5929\u65B0\u8BCD\u76EE\u6807</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>\u4ECA\u5929\u590D\u4E60\u76EE\u6807</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div>`;
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">${plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21" : "\u6DF7\u5408"} \xB7 FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">\u5F53\u524D\u8BCD\u4E66\uFF1A<b>${esc(currentSeg.book)}</b>\uFF0C\u5B8C\u6210\u540E\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u672C\u3002</div>` : ""}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="field"><label>\u5B66\u4E60\u65B9\u5F0F</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === "mixed" ? "selected" : ""}>\u6DF7\u5408\u5B66\u4E60\uFF1A\u591A\u672C\u8BCD\u4E66\u5171\u7528\u4E00\u4E2A\u603B\u91CF</option><option value="sequential" ${plan.mode === "sequential" ? "selected" : ""}>\u5206\u672C\u4F9D\u6B21\uFF1A\u4E00\u672C\u5B66\u5B8C\u518D\u4E0B\u4E00\u672C</option></select></div><div class="small" style="margin:10px 0">\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\u3002</div>${bookChips(books, "today")}${planControls}</div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u53EA\u5F71\u54CD\u4E4B\u540E\u65B0\u751F\u6210\u7684\u6DF7\u5408\u8BA1\u5212\uFF1B\u5206\u672C\u6A21\u5F0F\u6BCF\u672C\u5355\u72EC\u8BBE\u7F6E\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
+  bindBookChips("today", () => {
+    if (plan.mode === "sequential") {
+      const existing = new Map((plan.bookSegments || []).map((x) => [x.book, x]));
+      configureSequentialPlan(state, plan, (state.settings.todayBooks || []).map((book) => ({ book, newTarget: existing.get(book)?.newTarget ?? 0, reviewTarget: existing.get(book)?.reviewTarget ?? 0 })));
+      persist();
+    }
+    renderToday();
+  });
+  document.getElementById("todayPlanMode").onchange = (e) => {
+    if (e.target.value === "sequential") {
+      if (!books.length) {
+        toast("\u5206\u672C\u4F9D\u6B21\u5B66\u4E60\u9700\u8981\u5148\u9009\u5177\u4F53\u8BCD\u4E66");
+        e.target.value = "mixed";
+        return;
+      }
+      state.settings.todayPlanMode = "sequential";
+      configureSequentialPlan(state, plan, books.map((book) => ({ book, newTarget: 0, reviewTarget: 0 })));
+    } else {
+      state.settings.todayPlanMode = "mixed";
+      convertPlanToMixed(state, plan, books);
+    }
     persist();
-    if (updated.newTarget !== requested) toast(`\u4ECA\u5929\u5DF2\u7ECF\u505A\u8FC7 ${updated.newTarget} \u4E2A\u65B0\u8BCD\uFF0C\u76EE\u6807\u4E0D\u80FD\u518D\u964D`);
     renderToday();
   };
-  document.getElementById("todayReviewTarget").onchange = (e) => {
-    const requested = Math.max(0, Number(e.target.value) || 0);
-    const updated = ensureDailyPlan(state, { reviewTarget: requested });
-    persist();
-    if (updated.reviewTarget !== requested) toast(`\u4ECA\u5929\u5DF2\u7ECF\u505A\u8FC7 ${updated.reviewTarget} \u4E2A\u590D\u4E60\u8BCD\uFF0C\u76EE\u6807\u4E0D\u80FD\u518D\u964D`);
-    renderToday();
-  };
+  if (plan.mode === "mixed") {
+    document.getElementById("todayNewTarget").onchange = (e) => {
+      const requested = Math.max(0, Number(e.target.value) || 0);
+      const updated = ensureDailyPlan(state, { date, newTarget: requested });
+      persist();
+      if (updated.newTarget !== requested) toast(`\u4ECA\u5929\u5DF2\u7ECF\u505A\u8FC7 ${updated.newTarget} \u4E2A\u65B0\u8BCD\uFF0C\u76EE\u6807\u4E0D\u80FD\u518D\u964D`);
+      renderToday();
+    };
+    document.getElementById("todayReviewTarget").onchange = (e) => {
+      const requested = Math.max(0, Number(e.target.value) || 0);
+      const updated = ensureDailyPlan(state, { date, reviewTarget: requested });
+      persist();
+      if (updated.reviewTarget !== requested) toast(`\u4ECA\u5929\u5DF2\u7ECF\u505A\u8FC7 ${updated.reviewTarget} \u4E2A\u590D\u4E60\u8BCD\uFF0C\u76EE\u6807\u4E0D\u80FD\u518D\u964D`);
+      renderToday();
+    };
+  } else {
+    const saveSegments = () => {
+      const configs = (plan.bookSegments || []).map((seg, i) => ({ book: seg.book, newTarget: Math.max(0, Number(document.querySelector(`[data-seq-new="${i}"]`)?.value) || 0), reviewTarget: Math.max(0, Number(document.querySelector(`[data-seq-review="${i}"]`)?.value) || 0) }));
+      configureSequentialPlan(state, plan, configs);
+      persist();
+      renderToday();
+    };
+    document.querySelectorAll("[data-seq-new],[data-seq-review]").forEach((el) => el.onchange = saveSegments);
+  }
   document.getElementById("defaultNewTarget").onchange = (e) => {
     state.settings.defaultNewTarget = Math.max(0, Number(e.target.value) || 0);
     persist();
@@ -2576,17 +2976,32 @@ function renderToday() {
     startListen(plan);
   };
 }
-function startListen(plan) {
-  const session = createRetrySession(state, plan, "listen");
-  const id = pickNext(session);
-  if (!id) return toast("\u4ECA\u5929\u8FD9\u4E00\u7EC4\u5DF2\u7ECF\u5B8C\u6210");
-  listen = { plan, session, currentEventId: null, result: null, answer: false, activityId: startActivity("listen", "\u4ECA\u65E5\u542C\u97F3", plan.books), historyView: null };
+function planForTodayOptions(date, books) {
+  const existing = state.dailyPlans[date];
+  if (existing?.mode === "sequential") return { date };
+  return { date, books };
+}
+function makeListenPlan(plan) {
+  if (plan.mode !== "sequential") return plan;
+  const segment = currentSequentialSegment(state, plan);
+  if (!segment) return null;
+  return { ...plan, newIds: [...segment.newIds], reviewIds: [...segment.reviewIds], resumeWordId: plan.resumeWordId, segmentBook: segment.book };
+}
+function startListen(plan, activityId = null) {
+  const sessionPlan = makeListenPlan(plan);
+  if (!sessionPlan) return toast("\u4ECA\u5929\u8FD9\u4E00\u7EC4\u5DF2\u7ECF\u5B8C\u6210");
+  const session = createRetrySession(state, sessionPlan, "listen");
+  const id2 = pickNext(session);
+  if (!id2) return toast("\u5F53\u524D\u8BCD\u4E66\u5DF2\u7ECF\u5B8C\u6210");
+  plan.resumeWordId = id2;
+  persist();
+  listen = { plan, sessionPlan, session, currentEventId: null, result: null, answer: false, activityId: activityId || startActivity("listen", "\u4ECA\u65E5\u542C\u97F3", plan.books), historyView: null, segmentBook: sessionPlan.segmentBook || null };
   renderListen();
-  speak(wordById(id).en);
+  speak(wordById(id2).en);
 }
 function listenCurrentWord() {
-  const id = listen?.historyView?.wordId || listen?.session.current?.wordId;
-  return wordById(id);
+  const id2 = listen?.historyView?.wordId || listen?.session.current?.wordId;
+  return wordById(id2);
 }
 function renderListen() {
   const w = listenCurrentWord();
@@ -2600,9 +3015,10 @@ function renderListen() {
   const reviewing = Boolean(listen.historyView);
   const result = reviewing ? listen.historyView.result : listen.result;
   const answer = reviewing || listen.answer;
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">\u65B0\u8BCD ${p.newDone} / ${p.newTotal}\u3000\u590D\u4E60 ${p.reviewDone} / ${p.reviewTotal}${p.retry ? `\u3000\u5F85\u5DE9\u56FA ${p.retry}` : ""}</div>${!reviewing ? '<button id="retireWord" class="retire">\u9000\u51FA\u5FAA\u73AF</button>' : ""}</div><div class="studybody"><button id="speakWord" class="speaker">\u25D6))</button>${answer ? `<div class="word ${result === "good" ? "good" : result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div>` : '<div class="small">\u542C\u5230\u4EE5\u540E\uFF0C\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div>'}<div class="judges"><button id="judgeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="judgeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div>${answer ? `<div class="move"><button id="prevWord" class="soft" ${listen.session.history.length ? "" : "disabled"}>\u4E0A\u4E00\u8BCD</button><button id="nextWord" class="primary">${reviewing ? "\u56DE\u5230\u5F53\u524D\u8BCD" : "\u4E0B\u4E00\u8BCD"}</button></div>` : ""}<div class="statusline">${reviewing ? "\u4FEE\u6539\u5386\u53F2\u5224\u65AD\u540E\u4F1A\u91CD\u65B0\u8BA1\u7B97\u5F53\u5929\u961F\u5217\u548C FSRS \u72B6\u6001\u3002" : "\u5F53\u5929\u7B2C\u4E00\u6B21\u5224\u65AD\u51B3\u5B9A\u8DE8\u5929\u8C03\u5EA6\uFF1B\u540E\u7EED\u91CD\u8BD5\u53EA\u8D1F\u8D23\u4ECA\u5929\u5B66\u4F1A\u3002"}</div></div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">${listen.segmentBook ? `${esc(listen.segmentBook)} \xB7 ` : ""}\u65B0\u8BCD ${p.newDone} / ${p.newTotal}\u3000\u590D\u4E60 ${p.reviewDone} / ${p.reviewTotal}${p.retry ? `\u3000\u5F85\u5DE9\u56FA ${p.retry}` : ""}</div>${!reviewing ? '<button id="retireWord" class="retire">\u9000\u51FA\u5FAA\u73AF</button>' : ""}</div><div class="studybody"><button id="speakWord" class="speaker">\u25D6))</button>${answer ? `<div class="word ${result === "good" ? "good" : result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div>` : '<div class="small">\u542C\u5230\u4EE5\u540E\uFF0C\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div>'}<div class="judges"><button id="judgeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="judgeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div>${answer ? `<div class="move"><button id="prevWord" class="soft" ${listen.session.history.length ? "" : "disabled"}>\u4E0A\u4E00\u8BCD</button><button id="nextWord" class="primary">${reviewing ? "\u56DE\u5230\u5F53\u524D\u8BCD" : "\u4E0B\u4E00\u8BCD"}</button></div>` : ""}<div class="statusline">${reviewing ? "\u4FEE\u6539\u5386\u53F2\u5224\u65AD\u540E\u4F1A\u91CD\u65B0\u8BA1\u7B97\u5F53\u5929\u961F\u5217\u548C FSRS \u72B6\u6001\u3002" : "\u53EA\u64AD\u653E\u4F46\u6CA1\u5224\u65AD\u7684\u8BCD\u4E0D\u4EA7\u751F\u5B66\u4E60\u8BB0\u5F55\uFF1B\u9000\u51FA\u540E\u4F1A\u5C3D\u91CF\u4ECE\u5B83\u7EE7\u7EED\u3002"}</div></div></main>`;
   document.getElementById("listenBack").onclick = () => {
     touchActivity(listen.activityId);
+    persist();
     listen = null;
     view = "today";
     renderToday();
@@ -2618,14 +3034,7 @@ function renderListen() {
     listen.currentEventId = null;
     listen.result = null;
     listen.answer = false;
-    if (!pickNext(listen.session)) {
-      listen = null;
-      view = "today";
-      renderToday();
-    } else {
-      renderListen();
-      speak(listenCurrentWord().en);
-    }
+    advanceListen();
   };
   document.getElementById("judgeGood").onclick = () => judgeListen("good");
   document.getElementById("judgeBad").onclick = () => judgeListen("bad");
@@ -2644,7 +3053,7 @@ function judgeListen(result) {
     return;
   }
   if (!listen.currentEventId) {
-    const ev = recordAttempt(state, w, "listen", result);
+    const ev = recordAttempt(state, w, "listen", result, { date: listen.plan.date });
     listen.currentEventId = ev.id;
     listen.session.current.eventId = ev.id;
   } else editAttempt(state, listen.currentEventId, result);
@@ -2661,19 +3070,33 @@ function nextListen() {
   listen.result = null;
   listen.answer = false;
   touchActivity(listen.activityId);
-  const id = pickNext(listen.session);
-  if (!id) {
-    const p = sessionProgress(state, listen.plan, listen.session);
-    root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>\u4ECA\u65E5\u542C\u97F3\u5B8C\u6210</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.newDone}/${p.newTotal}</b><span>\u65B0\u8BCD</span></div><div class="statbox"><b>${p.reviewDone}/${p.reviewTotal}</b><span>\u590D\u4E60</span></div><div class="statbox"><b>${p.retry}</b><span>\u5F85\u5DE9\u56FA</span></div></div><button id="finishListen" class="primary">\u56DE\u5230\u4ECA\u65E5</button></div></div></main>`;
-    document.getElementById("finishListen").onclick = () => {
-      listen = null;
-      view = "today";
-      renderToday();
-    };
+  advanceListen();
+}
+function advanceListen() {
+  let id2 = pickNext(listen.session);
+  if (id2) {
+    listen.plan.resumeWordId = id2;
+    persist();
+    renderListen();
+    speak(wordById(id2).en);
     return;
   }
-  renderListen();
-  speak(wordById(id).en);
+  if (listen.plan.mode === "sequential" && currentSequentialSegment(state, listen.plan)) {
+    const activityId = listen.activityId;
+    const plan = listen.plan;
+    listen = null;
+    startListen(plan, activityId);
+    return;
+  }
+  listen.plan.resumeWordId = null;
+  persist();
+  const p = sessionProgress(state, listen.plan, listen.session);
+  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>\u4ECA\u65E5\u542C\u97F3\u5B8C\u6210</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.newDone}/${p.newTotal}</b><span>\u65B0\u8BCD</span></div><div class="statbox"><b>${p.reviewDone}/${p.reviewTotal}</b><span>\u590D\u4E60</span></div><div class="statbox"><b>${p.retry}</b><span>\u5F85\u5DE9\u56FA</span></div></div><button id="finishListen" class="primary">\u56DE\u5230\u4ECA\u65E5</button></div></div></main>`;
+  document.getElementById("finishListen").onclick = () => {
+    listen = null;
+    view = "today";
+    renderToday();
+  };
 }
 function showPreviousListen() {
   const h = listen.session.history[listen.session.history.length - 1];
@@ -2682,18 +3105,10 @@ function showPreviousListen() {
   renderListen();
 }
 function returnFromHistory() {
-  const plan = ensureDailyPlan(state);
+  const plan = ensureDailyPlan(state, { date: listen.plan.date });
   const activityId = listen.activityId;
-  listen = { plan, session: createRetrySession(state, plan, "listen"), currentEventId: null, result: null, answer: false, activityId, historyView: null };
-  const id = pickNext(listen.session);
-  if (!id) {
-    listen = null;
-    view = "today";
-    renderToday();
-  } else {
-    renderListen();
-    speak(wordById(id).en);
-  }
+  listen = null;
+  startListen(plan, activityId);
 }
 function typeCandidates() {
   const books = state.settings.typeBooks || [];
@@ -2732,7 +3147,7 @@ function renderType() {
   document.getElementById("typeStartAuto").onclick = () => startType(auto.slice(0, 30), "\u5EFA\u8BAE\u5F3A\u5316");
   document.querySelectorAll("[data-type-preset]").forEach((b) => b.onclick = () => startType(typePreset(b.dataset.typePreset).slice(0, 50), b.textContent.trim().replace(/\d+/, "").slice(0, 20)));
   const inputs = ["typeDate", "typeMode", "typeMin", "typeLimit"];
-  inputs.forEach((id) => document.getElementById(id).onchange = renderTypeCustom);
+  inputs.forEach((id2) => document.getElementById(id2).onchange = renderTypeCustom);
   renderTypeCustom();
 }
 function customTypeIds() {
@@ -2745,7 +3160,7 @@ function customTypeIds() {
     if (e.date !== date || e.result !== "bad" || !allowed.has(e.wordId) || mode !== "all" && e.mode !== mode) continue;
     groups.set(e.wordId, (groups.get(e.wordId) || 0) + 1);
   }
-  return [...groups.entries()].filter(([, n]) => n >= min).sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  return [...groups.entries()].filter(([, n]) => n >= min).sort((a, b) => b[1] - a[1]).map(([id2]) => id2);
 }
 function renderTypeCustom() {
   const box = document.getElementById("customTypePreview");
@@ -2753,28 +3168,28 @@ function renderTypeCustom() {
   const ids = customTypeIds();
   const limit = Number(document.getElementById("typeLimit")?.value || 50);
   const q = limit ? ids.slice(0, limit) : ids;
-  box.innerHTML = `<div class="space"><div><b>${ids.length} \u4E2A\u8BCD\u5339\u914D</b><div class="small">${q.slice(0, 8).map((id) => esc(wordById(id)?.en)).join(" \xB7 ")}</div></div><button id="startCustomType" class="soft" ${q.length ? "" : "disabled"}>\u5F00\u59CB\u8FD9\u7EC4${q.length ? ` \xB7 ${q.length}` : ""}</button></div>`;
+  box.innerHTML = `<div class="space"><div><b>${ids.length} \u4E2A\u8BCD\u5339\u914D</b><div class="small">${q.slice(0, 8).map((id2) => esc(wordById(id2)?.en)).join(" \xB7 ")}</div></div><button id="startCustomType" class="soft" ${q.length ? "" : "disabled"}>\u5F00\u59CB\u8FD9\u7EC4${q.length ? ` \xB7 ${q.length}` : ""}</button></div>`;
   document.getElementById("startCustomType").onclick = () => startType(q, "\u81EA\u5B9A\u4E49\u5F3A\u5316");
 }
 function startType(ids, label) {
-  ids = [...new Set(ids)].filter((id2) => wordById(id2) && !wordById(id2).retired);
+  ids = [...new Set(ids)].filter((id3) => wordById(id3) && !wordById(id3).retired);
   if (!ids.length) return toast("\u8FD9\u7EC4\u6682\u65F6\u6CA1\u6709\u5F85\u5F3A\u5316\u8BCD");
   const fakePlan = { date: currentDayKey(), newIds: ids, reviewIds: [] };
   const session = createRetrySession(state, fakePlan, "type", ids);
-  const id = pickNext(session);
-  if (!id) return toast("\u8FD9\u4E9B\u8BCD\u4ECA\u5929\u5DF2\u7ECF\u624B\u6253\u719F\u6089\u4E86");
+  const id2 = pickNext(session);
+  if (!id2) return toast("\u8FD9\u4E9B\u8BCD\u4ECA\u5929\u5DF2\u7ECF\u624B\u6253\u719F\u6089\u4E86");
   typeRun = { ids, label, session, answer: false, input: "", currentEventId: null, result: null, skipped: 0, activityId: startActivity("type", label, state.settings.typeBooks || []) };
   renderTypeRun();
-  speak(wordById(id).en);
+  speak(wordById(id2).en);
 }
 function typeProgress() {
-  const done = typeRun.ids.filter((id) => latestEventOnDay(state, id, currentDayKey(), "type")?.result === "good").length;
-  const bad = typeRun.ids.filter((id) => latestEventOnDay(state, id, currentDayKey(), "type")?.result === "bad").length;
+  const done = typeRun.ids.filter((id2) => latestEventOnDay(state, id2, currentDayKey(), "type")?.result === "good").length;
+  const bad = typeRun.ids.filter((id2) => latestEventOnDay(state, id2, currentDayKey(), "type")?.result === "bad").length;
   return { done, total: typeRun.ids.length, bad };
 }
 function renderTypeRun() {
-  const id = typeRun.session.current?.wordId;
-  const w = wordById(id);
+  const id2 = typeRun.session.current?.wordId;
+  const w = wordById(id2);
   if (!w) return finishType();
   const p = typeProgress();
   root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">${p.done} / ${p.total}${p.bad ? `\u3000\u5F85\u5DE9\u56FA ${p.bad}` : ""} \xB7 ${esc(typeRun.label)}</div></div><div class="studybody"><button id="typeSpeak" class="speaker">\u25D6))</button>${!typeRun.answer ? `<div class="small">\u542C\u97F3\u540E\u5199\u51FA\u4F60\u76F4\u63A5\u60F3\u5230\u7684\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="typeAnswer" style="font-size:21px;text-align:center" placeholder="\u5199\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u2026" autocomplete="off"><div class="grid2" style="margin-top:10px"><button id="typeSubmit" class="primary">\u63D0\u4EA4</button><button id="typeReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${typeRun.result === "good" ? "good" : typeRun.result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div><div class="typed"><b>\u4F60\u521A\u624D\u5199\u7684\u662F</b><div>${esc(typeRun.input || "\uFF08\u76F4\u63A5\u770B\u4E86\u7B54\u6848\uFF09")}</div></div><div class="judges"><button id="typeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="typeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div><div class="move"><button id="typeReplay" class="soft">\u91CD\u542C</button><button id="typeNext" class="primary" ${typeRun.result ? "" : "disabled"}>\u4E0B\u4E00\u8BCD</button></div><div class="statusline">\u4E0D\u81EA\u52A8\u5224\u4E2D\u6587\u540C\u4E49\u8BCD\u5BF9\u9519\uFF1B\u719F\u6089/\u4E0D\u719F\u6089\u4ECD\u7136\u4F5C\u7528\u4E8E\u540C\u4E00\u4E2A\u5355\u8BCD\u5386\u53F2\u3002</div>`}</div></main>`;
@@ -2841,7 +3256,7 @@ function nextType() {
 }
 function finishType() {
   const p = typeProgress();
-  const bad = typeRun.ids.filter((id) => latestEventOnDay(state, id, currentDayKey(), "type")?.result === "bad");
+  const bad = typeRun.ids.filter((id2) => latestEventOnDay(state, id2, currentDayKey(), "type")?.result === "bad");
   root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>${esc(typeRun.label)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.total}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="good">${p.done}</b><span>\u6700\u7EC8\u719F\u6089</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u4ECD\u4E0D\u719F</span></div></div><div class="small">\u76F4\u63A5\u770B\u7B54\u6848 ${typeRun.skipped} \u6B21</div><div class="row" style="justify-content:center;margin-top:18px">${bad.length ? `<button id="redoType" class="primary">\u518D\u7EC3\u4E0D\u719F \xB7 ${bad.length}</button>` : ""}<button id="finishType" class="soft">\u8FD4\u56DE\u624B\u6253</button></div></div></div></main>`;
   const copy = [...bad];
   if (document.getElementById("redoType")) document.getElementById("redoType").onclick = () => {
@@ -2860,9 +3275,15 @@ function splitSentences(body) {
 }
 function renderText() {
   if (textReaderId) return renderTextReader();
+  ensureSentenceBooks(state);
   const cols = [...new Set(state.texts.map((t) => t.collection || "\u672A\u5206\u7C7B"))].sort();
   const editing = textEditId ? state.texts.find((t) => t.id === textEditId) : null;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u4FDD\u5B58 transcript \u548C\u6587\u7AE0\uFF0C\u4E4B\u540E\u76F4\u63A5\u7EE7\u7EED\u542C\uFF0C\u4E0D\u7528\u91CD\u65B0\u7C98\u8D34\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div><div class="grid3" style="margin-top:13px"><div class="statbox"><b>${state.texts.length}</b><span>\u7BC7\u6587\u672C</span></div><div class="statbox"><b>${cols.length}</b><span>\u4E2A\u6587\u672C\u5E93</span></div><div class="statbox"><b>${state.texts.reduce((n, t) => n + (t.body.match(/[A-Za-z]+/g)?.length || 0), 0)}</b><span>\u82F1\u6587\u8BCD\u91CF</span></div></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u62C6\u8BCD\u542C\u5199</h2><div class="small">\u7C98\u4E00\u53E5\u82F1\u6587\uFF0C\u81EA\u52A8\u6309\u5B9E\u9645\u8BCD\u5F62\u62C6\u5F00\u3002\u8FD9\u91CC\u662F\u62FC\u5199\u542C\u5199\uFF0C\u4E0D\u6539 FSRS \u719F\u7EC3\u5EA6\u3002</div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u542C\u5199</label><button id="startSentenceDictation" class="primary">\u5F00\u59CB\u62C6\u8BCD\u542C\u5199</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section>${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6309\u5E93\u7B5B\u9009\u6216\u641C\u7D22\u6807\u9898/\u6B63\u6587\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
+  const sentenceBookNames = state.sentenceBooks.map((b) => b.name);
+  const sentenceBookRows = state.sentenceBooks.map((book) => {
+    const problems = allSentenceProblemTokens(book).length;
+    return `<div class="bookrow"><b>${esc(book.name)}</b><span>${book.entries?.length || 0} \u53E5</span><span class="bad">${problems} \u4E2A\u9519\u8BCD</span><span class="small">\u72EC\u7ACB\u4E8E\u6B63\u5F0F\u8BCD\u5E93</span></div>`;
+  }).join("");
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u4FDD\u5B58 transcript\u3001\u6587\u7AE0\u548C\u53E5\u5B50\u542C\u5199\u3002\u53E5\u5B50\u542C\u5199\u5148\u653E\u72EC\u7ACB\u53E5\u5B50\u8BCD\u5E93\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u6C61\u67D3\u6B63\u5F0F\u8BCD\u5E93\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div><div class="grid3" style="margin-top:13px"><div class="statbox"><b>${state.texts.length}</b><span>\u7BC7\u6587\u672C</span></div><div class="statbox"><b>${state.sentenceBooks.length}</b><span>\u4E2A\u53E5\u5B50\u8BCD\u5E93</span></div><div class="statbox"><b>${state.texts.reduce((n, t) => n + (t.body.match(/[A-Za-z]+/g)?.length || 0), 0)}</b><span>\u82F1\u6587\u8BCD\u91CF</span></div></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u62C6\u8BCD\u542C\u5199</h2><div class="small">\u53E5\u5B50\u548C\u6BCF\u4E2A\u8BCD\u7684\u719F\u6089 / \u4E0D\u719F\u6089 / \u4E0D\u8BA4\u8BC6\u6807\u8BB0\u90FD\u4F1A\u4FDD\u5B58\u5230\u72EC\u7ACB\u53E5\u5B50\u8BCD\u5E93\u3002\u4E4B\u540E\u53EF\u4E00\u952E\u628A\u9519\u8BCD\u8F6C\u8FDB\u666E\u901A\u8BCD\u4E66\uFF0C\u6216\u5BFC\u51FA TSV\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u8BCD\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u542C\u5199</label><button id="startSentenceDictation" class="primary">\u4FDD\u5B58\u5E76\u5F00\u59CB\u542C\u5199</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u8BCD\u5E93</h2><div class="small">\u8FD9\u91CC\u4FDD\u5B58\u53E5\u5B50\u548C\u62C6\u8BCD\u6807\u8BB0\uFF1B\u6B63\u5F0F\u5355\u8BCD\u5E93\u4ECD\u4FDD\u6301\u5E72\u51C0\u3002</div><div style="margin-top:10px">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6309\u5E93\u7B5B\u9009\u6216\u641C\u7D22\u6807\u9898/\u6B63\u6587\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("newText").onclick = () => {
     textFormOpen = !textFormOpen;
     if (!textFormOpen) textEditId = null;
@@ -2879,38 +3300,49 @@ function renderText() {
   };
   sentenceBox.oninput = drawSentencePreview;
   unique.onchange = drawSentencePreview;
-  document.getElementById("startSentenceDictation").onclick = () => startSentenceDictation(sentenceBox.value, unique.checked);
+  document.getElementById("startSentenceDictation").onclick = () => startSentenceDictation(sentenceBox.value, unique.checked, document.getElementById("sentenceBookName").value);
   document.getElementById("textSearch").oninput = drawTextList;
   document.getElementById("textFilter").onchange = drawTextList;
   drawTextList();
 }
-function startSentenceDictation(text, unique) {
+function startSentenceDictation(text, unique, bookName) {
   const tokens = tokenizeEnglish(text, { unique });
   if (!tokens.length) return toast("\u8FD9\u53E5\u8BDD\u91CC\u6CA1\u6709\u8BC6\u522B\u5230\u82F1\u6587\u5355\u8BCD");
-  sentenceRun = { tokens, index: 0, input: "", result: null, revealed: false, lookups: 0, correct: 0 };
+  const saved = addSentenceEntry(state, { bookName: bookName || "\u53E5\u5B50\u8BCD\u5E93", text, tokens });
+  persist();
+  sentenceRun = { bookId: saved.book.id, entryId: saved.entry.id, index: 0, input: "", result: null, revealed: false, lookups: 0, correct: 0 };
   renderSentenceRun();
   speak(tokens[0]);
 }
+function sentenceRunData() {
+  return getSentenceEntry(state, sentenceRun.bookId, sentenceRun.entryId);
+}
 function renderSentenceRun() {
-  const token = sentenceRun.tokens[sentenceRun.index];
-  if (!token) return finishSentenceRun();
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="sentenceBack" class="back">\u2039</button><div class="studyprogress">${sentenceRun.index + 1} / ${sentenceRun.tokens.length} \xB7 \u53E5\u5B50\u62C6\u8BCD\u542C\u5199</div></div><div class="studybody"><button id="sentenceSpeak" class="speaker">\u25D6))</button>${!sentenceRun.revealed ? `<div class="small">\u542C\u5355\u8BCD\uFF0C\u5199\u51FA\u82F1\u6587\u62FC\u5199\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="sentenceAnswer" style="font-size:21px;text-align:center" placeholder="\u8F93\u5165\u82F1\u6587\u62FC\u5199\u2026" autocomplete="off" autocapitalize="off"><div class="grid2" style="margin-top:10px"><button id="sentenceSubmit" class="primary">\u63D0\u4EA4</button><button id="sentenceReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${sentenceRun.result === "good" ? "good" : "bad"}">${esc(token)}</div><div class="typed"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(sentenceRun.input || "\uFF08\u76F4\u63A5\u770B\u7B54\u6848\uFF09")}</div></div><div class="statusline">${sentenceRun.result === "good" ? "\u62FC\u5199\u6B63\u786E" : "\u5DF2\u663E\u793A\u6B63\u786E\u62FC\u5199"}</div><div class="move"><button id="sentenceReplay" class="soft">\u91CD\u542C</button><button id="sentenceNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>`}</div></main>`;
+  const { book, entry } = sentenceRunData();
+  const token = entry?.tokens?.[sentenceRun.index];
+  if (!book || !entry || !token) return finishSentenceRun();
+  const status = token.status;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="sentenceBack" class="back">\u2039</button><div class="studyprogress">${sentenceRun.index + 1} / ${entry.tokens.length} \xB7 ${esc(book.name)}</div></div><div class="studybody"><button id="sentenceSpeak" class="speaker">\u25D6))</button>${!sentenceRun.revealed ? `<div class="small">\u542C\u5355\u8BCD\uFF0C\u5199\u51FA\u82F1\u6587\u62FC\u5199\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="sentenceAnswer" style="font-size:21px;text-align:center" placeholder="\u8F93\u5165\u82F1\u6587\u62FC\u5199\u2026" autocomplete="off" autocapitalize="off"><div class="grid2" style="margin-top:10px"><button id="sentenceSubmit" class="primary">\u63D0\u4EA4</button><button id="sentenceReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${sentenceRun.result === "good" ? "good" : "bad"}">${esc(token.surface)}</div><div class="typed"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(sentenceRun.input || "\uFF08\u76F4\u63A5\u770B\u7B54\u6848\uFF09")}</div></div><div class="statusline">${sentenceRun.result === "good" ? "\u62FC\u5199\u6B63\u786E" : "\u5DF2\u663E\u793A\u6B63\u786E\u62FC\u5199"} \xB7 \u518D\u6807\u8BB0\u4F60\u5BF9\u8FD9\u4E2A\u8BCD\u7684\u771F\u5B9E\u719F\u6089\u5EA6</div><div class="judges" style="grid-template-columns:repeat(3,1fr)"><button id="sentenceFamiliar" class="${status === "familiar" ? "goodbtn" : "soft"}">\u719F\u6089</button><button id="sentenceUnfamiliar" class="${status === "unfamiliar" ? "badbtn" : "soft"}">\u4E0D\u719F\u6089</button><button id="sentenceUnknown" class="${status === "unknown" ? "badbtn" : "soft"}">\u4E0D\u8BA4\u8BC6</button></div><div class="move"><button id="sentenceReplay" class="soft">\u91CD\u542C</button><button id="sentenceNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>`}</div></main>`;
   document.getElementById("sentenceBack").onclick = () => {
+    persist();
     sentenceRun = null;
     view = "text";
     renderText();
   };
-  document.getElementById("sentenceSpeak").onclick = () => speak(token);
+  document.getElementById("sentenceSpeak").onclick = () => speak(token.surface);
   if (!sentenceRun.revealed) {
     const input = document.getElementById("sentenceAnswer");
     input.value = sentenceRun.input;
     input.focus();
     const reveal = (peek) => {
       sentenceRun.input = input.value.trim();
-      sentenceRun.result = !peek && spellingMatches(sentenceRun.input, token) ? "good" : "bad";
+      sentenceRun.result = !peek && spellingMatches(sentenceRun.input, token.surface) ? "good" : "bad";
       if (sentenceRun.result === "good") sentenceRun.correct++;
       else sentenceRun.lookups++;
+      const defaultStatus = sentenceRun.result === "good" ? "familiar" : peek ? "unknown" : "unfamiliar";
+      recordSentenceToken(entry, sentenceRun.index, { input: sentenceRun.input, spellingResult: sentenceRun.result, status: defaultStatus });
       sentenceRun.revealed = true;
+      persist();
       renderSentenceRun();
     };
     document.getElementById("sentenceSubmit").onclick = () => {
@@ -2925,23 +3357,44 @@ function renderSentenceRun() {
       }
     };
   } else {
-    document.getElementById("sentenceReplay").onclick = () => speak(token);
+    const mark = (x) => {
+      setSentenceTokenStatus(entry, sentenceRun.index, x);
+      persist();
+      renderSentenceRun();
+    };
+    document.getElementById("sentenceFamiliar").onclick = () => mark("familiar");
+    document.getElementById("sentenceUnfamiliar").onclick = () => mark("unfamiliar");
+    document.getElementById("sentenceUnknown").onclick = () => mark("unknown");
+    document.getElementById("sentenceReplay").onclick = () => speak(token.surface);
     document.getElementById("sentenceNext").onclick = () => {
       sentenceRun.index++;
       sentenceRun.input = "";
       sentenceRun.result = null;
       sentenceRun.revealed = false;
-      if (sentenceRun.index >= sentenceRun.tokens.length) finishSentenceRun();
+      if (sentenceRun.index >= entry.tokens.length) finishSentenceRun();
       else {
         renderSentenceRun();
-        speak(sentenceRun.tokens[sentenceRun.index]);
+        speak(entry.tokens[sentenceRun.index].surface);
       }
     };
   }
 }
+function importSentenceProblems(tokens, targetName, sentence) {
+  const target = String(targetName || "\u53E5\u5B50\u9519\u9898\u672C").trim() || "\u53E5\u5B50\u9519\u9898\u672C";
+  for (const token of tokens) upsertWord({ en: token.normalized || token.surface, source: target, example: token.sentence || sentence });
+  persist();
+  toast(`\u5DF2\u628A ${tokens.length} \u4E2A\u8BCD\u52A0\u5165\u300C${target}\u300D`);
+}
 function finishSentenceRun() {
   const run = sentenceRun;
-  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>\u53E5\u5B50\u62C6\u8BCD\u542C\u5199</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${run.tokens.length}</b><span>\u5355\u8BCD\u6570</span></div><div class="statbox"><b class="good">${run.correct}</b><span>\u4E00\u6B21\u62FC\u5BF9</span></div><div class="statbox"><b class="bad">${run.lookups}</b><span>\u9519\u8BEF/\u770B\u7B54\u6848</span></div></div><button id="finishSentence" class="primary">\u8FD4\u56DE\u6587\u672C</button></div></div></main>`;
+  const { book, entry } = sentenceRunData();
+  const problems = sentenceProblemTokens(entry);
+  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish" style="max-width:700px"><div class="small">\u672C\u8F6E\u5B8C\u6210 \xB7 \u5DF2\u4FDD\u5B58\u5230 ${esc(book?.name || "\u53E5\u5B50\u8BCD\u5E93")}</div><h2>\u53E5\u5B50\u62C6\u8BCD\u542C\u5199</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${entry?.tokens?.length || 0}</b><span>\u5355\u8BCD\u6570</span></div><div class="statbox"><b class="good">${run.correct}</b><span>\u4E00\u6B21\u62FC\u5BF9</span></div><div class="statbox"><b class="bad">${problems.length}</b><span>\u4E0D\u719F/\u4E0D\u8BA4\u8BC6</span></div></div><div class="field" style="text-align:left"><label>\u9519\u8BCD\u8F6C\u5165\u54EA\u4E2A\u666E\u901A\u8BCD\u4E66</label><input id="sentenceErrorBook" value="\u53E5\u5B50\u9519\u9898\u672C" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50\u9519\u9898\u672C"></div><div class="row" style="justify-content:center;margin-top:12px"><button id="importSentenceBad" class="primary" ${problems.length ? "" : "disabled"}>\u4E00\u952E\u52A0\u5165\u9519\u9898\u672C \xB7 ${problems.length}</button><button id="exportSentenceBad" class="soft" ${problems.length ? "" : "disabled"}>\u5BFC\u51FA TSV</button><button id="finishSentence" class="soft">\u8FD4\u56DE\u6587\u672C</button></div></div></div></main>`;
+  document.getElementById("importSentenceBad").onclick = () => importSentenceProblems(problems, document.getElementById("sentenceErrorBook").value, entry.text);
+  document.getElementById("exportSentenceBad").onclick = () => {
+    const name = document.getElementById("sentenceErrorBook").value.trim() || "\u53E5\u5B50\u9519\u9898\u672C";
+    download(`${name}-${currentDayKey()}.tsv`, problemTokensToTSV(problems, { source: name, sentence: entry.text }), "text/tab-separated-values;charset=utf-8");
+  };
   document.getElementById("finishSentence").onclick = () => {
     sentenceRun = null;
     view = "text";
@@ -3117,15 +3570,15 @@ function drawWordList() {
 }
 function parseWordFile(text, name) {
   const lines = String(text).replace(/^\uFEFF/, "").split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  const source = name.replace(/\.(csv|txt|tsv)$/i, "") || "\u5BFC\u5165\u8BCD\u5E93";
+  const fileSource = name.replace(/\.(csv|txt|tsv)$/i, "") || "\u5BFC\u5165\u8BCD\u5E93";
   let count = 0;
   for (let i = 0; i < lines.length; i++) {
     const sep = lines[i].includes("	") ? "	" : ",";
     const parts = lines[i].split(sep).map((x) => x.trim().replace(/^"|"$/g, ""));
     if (i === 0 && /^(en|english|word|单词)$/i.test(parts[0])) continue;
-    const [en, zh, pos, def] = parts;
+    const [en, zh, pos, def, rowSource, example] = parts;
     if (!en) continue;
-    upsertWord({ en, zh, pos, def, source });
+    upsertWord({ en, zh, pos, def, source: rowSource || fileSource, example: example || "" });
     count++;
   }
   persist();
@@ -3198,8 +3651,8 @@ function bindCalendar() {
 }
 function dayDetailHtml() {
   const ev = state.events.filter((e) => e.date === statDay).sort((a, b) => a.ts - b.ts), ids = [...new Set(ev.map((e) => e.wordId))];
-  const rows = ids.map((id) => {
-    const w = wordById(id), a = ev.filter((e) => e.wordId === id), first = a.find((e) => e.cold) || a[0], bad = a.filter((e) => e.result === "bad").length, l = a.filter((e) => e.mode === "listen").length, t = a.filter((e) => e.mode === "type").length;
+  const rows = ids.map((id2) => {
+    const w = wordById(id2), a = ev.filter((e) => e.wordId === id2), first = a.find((e) => e.cold) || a[0], bad = a.filter((e) => e.result === "bad").length, l = a.filter((e) => e.mode === "listen").length, t = a.filter((e) => e.mode === "type").length;
     return { w, a, first, bad, l, t };
   }).filter((x) => x.w).sort((a, b) => b.bad - a.bad || a.w.en.localeCompare(b.w.en));
   const cold = ev.filter((e) => e.cold), good = cold.filter((e) => e.result === "good").length;
@@ -3216,8 +3669,8 @@ function hardWordsHtml(E) {
       if (e.cold) g.coldBad++;
     }
   }
-  const hard = [...map.entries()].map(([id, g]) => {
-    const w = wordById(id);
+  const hard = [...map.entries()].map(([id2, g]) => {
+    const w = wordById(id2);
     if (!w) return null;
     const r = retrievability(w.card, Date.now(), state.settings.retention);
     return { w, g, score: g.coldBad * 5 + g.bad + (w.card?.reps ? (1 - r) * 2 : 0) };
