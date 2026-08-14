@@ -19,6 +19,7 @@ class FakeEl{
 }
 const els=new Map();
 const document={
+  body:new FakeEl('body'),
   activeElement:{tagName:'BODY'},
   getElementById(id){if(!els.has(id))els.set(id,new FakeEl(id));return els.get(id)},
   querySelectorAll(){return[]},
@@ -41,7 +42,7 @@ function baseState(words,set={}){return{words,events:[],activities:[],dailyPlans
 function dateOffset(n){const d=new Date();d.setDate(d.getDate()+n);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function reset(S){app.setS(S);app.setSess(null);app.setTs(null);app.ensureActivities()}
 
-// 1) Fixed plan denominators + isolated retry pool: 3 failures never create 3 extra tasks.
+// 1) Fixed plan denominators + isolated retry pool: repeated failures never create extra tasks.
 {
   const r=word('r','review'),n1=word('n1','alpha'),n2=word('n2','beta');
   const S=baseState([r,n1,n2]);
@@ -79,7 +80,7 @@ function reset(S){app.setS(S);app.setSess(null);app.setTs(null);app.ensureActivi
   const assigned=[...app.getS().dailyPlans[ss.planKey].newIds];
   assert(assigned.length===2,'daily plan should assign exactly target new words');
   app.judge('good');app.next(false);
-  app.setSess(null); // simulate leaving the learning screen / app state being rebuilt
+  app.setSess(null);
   app.start();ss=app.getSess();
   const assigned2=[...app.getS().dailyPlans[ss.planKey].newIds];
   assert(JSON.stringify(assigned2)===JSON.stringify(assigned),'re-entry changed the assigned daily plan');
