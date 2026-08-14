@@ -1,0 +1,216 @@
+import { dayKey, eventsOnDay, hasEventBefore, latestEventOnDay } from './engine.js';
+import { retrievability } from './scheduler.js';
+
+export function allBooks(state) {
+  const set = new Set();
+  for (const word of state.words) for (const source of word.sources || []) set.add(source);
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+export function matchesBooks(word, books = []) {
+  return !books.length || (word.sources || []).some((source) => books.includes(source));
+}
+
+export function planForDate(state, date = dayKey()) {
+  return state.dailyPlans[date] || null;
+}
+
+function endOfDay(date) {
+  const [y, m, d] = date.split('-').map(Number);
+  return new Date(y, m - 1, d + 1).getTime() - 1;
+}
+
+function seedTodayFromListenHistory(state, plan) {
+  const seen = new Set([...plan.newIds, ...plan.reviewIds]);
+  const listenedIds = [...new Set(state.events.filter((e) => e.date === plan.date && e.mode === 'listen').map((e) => e.wordId))];
+  for (const id of listenedIds) {
+    if (seen.has(id)) continue;
+    if (hasEventBefore(state, id, plan.date)) plan.reviewIds.push(id);
+    else plan.newIds.push(id);
+    seen.add(id);
+  }
+}
+
+export function ensureDailyPlan(state, options = {}) {
+  const date = options.date || dayKey();
+  let plan = state.dailyPlans[date];
+  if (!plan) {
+    plan = state.dailyPlans[date] = {
+      date,
+      books: [...(options.books || state.settings.todayBooks || [])],
+      newTarget: Number(options.newTarget ?? state.settings.newTarget) || 0,
+      reviewTarget: Number(options.reviewTarget ?? state.settings.reviewTarget) || 0,
+      newIds: [],
+      reviewIds: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+  }
+  if (options.books) plan.books = [...options.books];
+  if (options.newTarget != null) plan.newTarget = Math.max(0, Number(options.newTarget) || 0);
+  if (options.reviewTarget != null) plan.reviewTarget = Math.max(0, Number(options.reviewTarget) || 0);
+  seedTodayFromListenHistory(state, plan);
+  fillDailyPlan(state, plan);
+  plan.updatedAt = Date.now();
+  return plan;
+}
+
+export function fillDailyPlan(state, plan) {
+  const assigned = new Set([...plan.newIds, ...plan.reviewIds]);
+  const pool = state.words.filter((w) => !w.retired && matchesBooks(w, plan.books));
+  const dueCutoff = endOfDay(plan.date);
+  const now = Date.now();
+
+  const review = pool.filter((w) => !assigned.has(w.id) && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= dueCutoff);
+  review.sort((a, b) => {
+    const ra = retrievability(a.card, now, state.settings.retention);
+    const rb = retrievability(b.card, now, state.settings.retention);
+    if (ra !== rb) return ra - rb;
+    return Number(a.card?.due || 0) - Number(b.card?.due || 0);
+  });
+
+  const fresh = pool.filter((w) => !assigned.has(w.id) && !(w.card?.reps || 0));
+  fresh.sort((a, b) => (b.sources?.length || 0) - (a.sources?.length || 0) || a.en.localeCompare(b.en));
+
+  const needReview = Math.max(0, plan.reviewTarget - plan.reviewIds.length);
+  const needNew = Math.max(0, plan.newTarget - plan.newIds.length);
+  for (const w of review.slice(0, needReview)) { plan.reviewIds.push(w.id); assigned.add(w.id); }
+  for (const w of fresh.slice(0, needNew)) { plan.newIds.push(w.id); assigned.add(w.id); }
+  return plan;
+}
+
+export function latestListenResult(state, wordId, date = dayKey()) {
+  return latestEventOnDay(state, wordId, date, 'listen');
+}
+
+export function planStatus(state, plan) {
+  const wordMap = new Map(state.words.map((w) => [w.id, w]));
+  const statusFor = (ids) => {
+    let done = 0, retry = 0, pending = 0;
+    const doneIds = [], retryIds = [], pendingIds = [];
+    for (const id of ids) {
+      const word = wordMap.get(id);
+      if (!word) continue;
+      if (word.retired) { done++; doneIds.push(id); continue; }
+      const last = latestListenResult(state, id, plan.date);
+      if (!last) { pending++; pendingIds.push(id); }
+      else if (last.result === 'good') { done++; doneIds.push(id); }
+      else { retry++; retryIds.push(id); }
+    }
+    return { done, retry, pending, doneIds, retryIds, pendingIds };
+  };
+  return { new: statusFor(plan.newIds), review: statusFor(plan.reviewIds) };
+}
+
+export function todayListeningStats(state, books = [], date = dayKey()) {
+  const allowed = new Set(state.words.filter((w) => matchesBooks(w, books)).map((w) => w.id));
+  const events = state.events.filter((e) => e.date === date && e.mode === 'listen' && allowed.has(e.wordId));
+  const ids = [...new Set(events.map((e) => e.wordId))];
+  let newCount = 0, reviewCount = 0, firstGood = 0, firstBad = 0;
+  for (const id of ids) {
+    if (hasEventBefore(state, id, date)) reviewCount++; else newCount++;
+    const first = eventsOnDay(state, id, date, 'listen')[0];
+    if (first?.result === 'good') firstGood++; else if (first) firstBad++;
+  }
+  return { events, ids, newCount, reviewCount, firstGood, firstBad };
+}
+
+export function createRetrySession(state, plan, mode = 'listen', explicitIds = null) {
+  const planIds = explicitIds || [...plan.reviewIds, ...plan.newIds];
+  const wordMap = new Map(state.words.map((w) => [w.id, w]));
+  const pendingBase = [];
+  const retry = [];
+  for (const id of planIds) {
+    const word = wordMap.get(id);
+    if (!word || word.retired) continue;
+    const last = latestEventOnDay(state, id, plan.date, mode);
+    if (!last) pendingBase.push(id);
+    else if (last.result === 'bad') retry.push({ wordId: id, attempt: eventsOnDay(state, id, plan.date, mode).length, eligibleTurn: 0, addedAt: last.ts });
+  }
+  return {
+    mode,
+    date: plan.date,
+    fixedIds: [...new Set(planIds)],
+    pendingBase,
+    retry,
+    turn: 0,
+    current: null,
+    history: [],
+  };
+}
+
+function retryGap(attempt) {
+  if (attempt <= 1) return 4;
+  if (attempt === 2) return 6;
+  return 8;
+}
+
+export function pickNext(session) {
+  if (session.current) return session.current.wordId;
+  const due = session.retry
+    .filter((x) => x.eligibleTurn <= session.turn)
+    .sort((a, b) => a.eligibleTurn - b.eligibleTurn || a.addedAt - b.addedAt)[0];
+  if (due) {
+    session.retry = session.retry.filter((x) => x !== due);
+    session.current = { wordId: due.wordId, source: 'retry', attempt: due.attempt + 1 };
+    return due.wordId;
+  }
+  const baseId = session.pendingBase.shift();
+  if (baseId) {
+    session.current = { wordId: baseId, source: 'base', attempt: 1 };
+    return baseId;
+  }
+  const nextRetry = session.retry.sort((a, b) => a.eligibleTurn - b.eligibleTurn || a.addedAt - b.addedAt).shift();
+  if (nextRetry) {
+    session.current = { wordId: nextRetry.wordId, source: 'retry', attempt: nextRetry.attempt + 1 };
+    return nextRetry.wordId;
+  }
+  return null;
+}
+
+export function finishCurrent(session, result) {
+  if (!session.current) return;
+  const current = session.current;
+  session.history.push({ ...current, result, turn: session.turn });
+  session.turn += 1;
+  session.retry = session.retry.filter((x) => x.wordId !== current.wordId);
+  if (result === 'bad') {
+    session.retry.push({
+      wordId: current.wordId,
+      attempt: current.attempt,
+      eligibleTurn: session.turn + retryGap(current.attempt),
+      addedAt: Date.now(),
+    });
+  }
+  session.current = null;
+}
+
+export function sessionProgress(state, plan, session) {
+  const status = planStatus(state, plan);
+  return {
+    newDone: status.new.done,
+    newTotal: plan.newIds.length,
+    reviewDone: status.review.done,
+    reviewTotal: plan.reviewIds.length,
+    retry: status.new.retry + status.review.retry,
+    remaining: status.new.pending + status.review.pending + status.new.retry + status.review.retry,
+    turn: session?.turn || 0,
+  };
+}
+
+export function dueForecast(state, days = 7) {
+  const out = [];
+  const now = new Date();
+  for (let i = 0; i < days; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+    out.push({ date: dayKey(d.getTime()), count: 0 });
+  }
+  for (const word of state.words) {
+    if (word.retired || !(word.card?.reps || 0)) continue;
+    const key = dayKey(Number(word.card.due));
+    const row = out.find((x) => x.date === key);
+    if (row) row.count++;
+    else if (Number(word.card.due) < new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) out[0].count++;
+  }
+  return out;
+}
