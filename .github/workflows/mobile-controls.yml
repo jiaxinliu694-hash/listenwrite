@@ -1,0 +1,70 @@
+name: Add mobile learning controls
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch mobile controls
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('index.html')
+          s = p.read_text(encoding='utf-8')
+          if 'mobileMove' in s:
+              print('Mobile controls already present')
+              raise SystemExit(0)
+
+          s = s.replace(
+              '@media(max-width:560px){.grid{grid-template-columns:1fr}.wrap{padding-top:20px}}',
+              '.mobileMove{display:none;width:100%;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.mobileMove button{width:100%;padding:13px 10px}.mobileMove button:disabled{opacity:.38} @media(max-width:560px){.grid{grid-template-columns:1fr}.wrap{padding-top:20px}.mobileMove{display:grid}}'
+          )
+
+          old = "<div class=\"hint\">'+(sess.show?'再点 1/2 可修改 · Enter 下一词':'判断后自动显示答案')+'</div></div>';$('sp').onclick=function(){speak(w.en)};$('good').onclick=function(){judge('good')};$('bad').onclick=function(){judge('bad')};$('ret').onclick=function(){w.ret=true;save();next(true)}}function judge"
+          new = "<div class=\"hint\">'+(sess.show?'再点 1/2 可修改':'判断后自动显示答案')+'</div>'+(sess.show?'<div class=\"mobileMove\"><button id=\"prev\" class=\"soft\" '+(sess.i===0?'disabled':'')+'>上一词</button><button id=\"nxt\" class=\"primary\">下一词</button></div>':'')+'</div>';$('sp').onclick=function(){speak(w.en)};$('good').onclick=function(){judge('good')};$('bad').onclick=function(){judge('bad')};$('ret').onclick=function(){w.ret=true;save();next(true)};if(sess.show){if($('prev'))$('prev').onclick=prev;if($('nxt'))$('nxt').onclick=function(){next(false)}}}function judge"
+          if old not in s:
+              raise SystemExit('Study control target not found')
+          s = s.replace(old, new)
+
+          old = "function next(skip){var w=cw();if(!skip&&sess.res==='bad')sess.q.push(w);sess.i++;sess.show=false;sess.res=null;study();var n=cw();if(n)setTimeout(function(){speak(n.en)},60)}"
+          new = old + "function prev(){if(!sess||sess.i<=0)return;sess.i--;var w=cw(),a=S.events.filter(function(e){return e.wordId===w.id&&e.date===day()&&e.mode==='listen'});var last=a.length?a[a.length-1]:null;sess.show=!!last;sess.res=last?last.res:null;study()}"
+          if old not in s:
+              raise SystemExit('Previous-word insertion target not found')
+          s = s.replace(old, new)
+
+          old = "<input id=\"ti\" style=\"width:100%;font-size:21px;margin-top:18px\" placeholder=\"输入中文意思…\"></div>';$('tsp').onclick=function(){speak(w.en)};$('ti').focus();$('ti').onkeydown=function(e){if(e.key==='Enter'){ts.input=this.value.trim();ts.show=true;typeCard()}}}else{"
+          new = "<input id=\"ti\" style=\"width:100%;font-size:21px;margin-top:18px\" placeholder=\"输入中文意思…\"><div class=\"row\" style=\"margin-top:12px;width:100%;justify-content:center\"><button id=\"treveal\" class=\"soft\">提交 / 看答案</button></div></div>';$('tsp').onclick=function(){speak(w.en)};$('ti').focus();function revealType(){ts.input=$('ti').value.trim();ts.show=true;typeCard()}$('treveal').onclick=revealType;$('ti').onkeydown=function(e){if(e.key==='Enter')revealType()}}else{"
+          if old not in s:
+              raise SystemExit('Typing submit target not found')
+          s = s.replace(old, new)
+
+          old = "<div class=\"hint\">判断后 Enter 下一词</div></div>';$('tsp').onclick=function(){speak(w.en)};$('tg').onclick=function(){ts.res='good';ev(w,'type','good');typeCard()};$('tb2').onclick=function(){ts.res='bad';ev(w,'type','bad');typeCard()}}}function typeNext()"
+          new = "<div class=\"hint\">判断后可直接点下一词</div><div class=\"mobileMove\"><button id=\"tprev\" class=\"soft\" '+(ts.i===0?'disabled':'')+'>上一词</button><button id=\"tnext\" class=\"primary\" '+(!ts.res?'disabled':'')+'>下一词</button></div></div>';$('tsp').onclick=function(){speak(w.en)};$('tg').onclick=function(){ts.res='good';ev(w,'type','good');typeCard()};$('tb2').onclick=function(){ts.res='bad';ev(w,'type','bad');typeCard()};if($('tprev'))$('tprev').onclick=typePrev;if($('tnext'))$('tnext').onclick=typeNext}}function typeNext()"
+          if old not in s:
+              raise SystemExit('Typing navigation target not found')
+          s = s.replace(old, new)
+
+          old = "function typeNext(){if(!ts||!ts.show||!ts.res)return;var w=ts.q[ts.i];if(ts.res==='bad')ts.q.push(w);ts.i++;ts.show=false;ts.res=null;ts.input='';typeCard();var n=ts.q[ts.i];if(n)speak(n.en)}"
+          new = old + "function typePrev(){if(!ts||ts.i<=0)return;ts.i--;var w=ts.q[ts.i],a=S.events.filter(function(e){return e.wordId===w.id&&e.date===day()&&e.mode==='type'}),last=a.length?a[a.length-1]:null;ts.show=true;ts.res=last?last.res:null;ts.input='';typeCard()}"
+          if old not in s:
+              raise SystemExit('Typing previous insertion target not found')
+          s = s.replace(old, new)
+
+          p.write_text(s, encoding='utf-8')
+          print('Patched index.html')
+          PY
+      - name: Commit patch
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "listenwrite-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add index.html
+          git commit -m "Add tap controls for mobile learning"
+          git push
