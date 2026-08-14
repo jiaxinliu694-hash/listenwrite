@@ -1884,6 +1884,47 @@ function retrievability(card, now = Date.now(), retention = 0.9) {
   }
 }
 
+// src/studyday.js
+var STUDY_UTC_OFFSET_HOURS = 8;
+var STUDY_DAY_CUTOFF_HOUR = 2;
+var SHIFT_MS = (STUDY_UTC_OFFSET_HOURS - STUDY_DAY_CUTOFF_HOUR) * 36e5;
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function studyDayKey(ts = Date.now()) {
+  const shifted = new Date(Number(ts) + SHIFT_MS);
+  return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}`;
+}
+function studyDayParts(key = studyDayKey()) {
+  const [year, month, day] = String(key).split("-").map(Number);
+  return { year, month, day };
+}
+function formatDayKey(year, month, day) {
+  return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+function addStudyDays(key, amount) {
+  const { year, month, day } = studyDayParts(key);
+  const d = new Date(Date.UTC(year, month - 1, day + Number(amount || 0), 12));
+  return formatDayKey(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+}
+function studyDayStart(key = studyDayKey()) {
+  const { year, month, day } = studyDayParts(key);
+  return Date.UTC(year, month - 1, day, STUDY_DAY_CUTOFF_HOUR - STUDY_UTC_OFFSET_HOURS, 0, 0, 0);
+}
+function studyDayEnd(key = studyDayKey()) {
+  return studyDayStart(addStudyDays(key, 1)) - 1;
+}
+function calendarDate(key = studyDayKey()) {
+  const { year, month, day } = studyDayParts(key);
+  return new Date(Date.UTC(year, month - 1, day, 12));
+}
+function calendarKey(date) {
+  return formatDayKey(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
+}
+function studyDayLabel() {
+  return `\u4E1C\u516B\u533A \xB7 \u51CC\u6668 ${pad2(STUDY_DAY_CUTOFF_HOUR)}:00 \u6362\u65E5`;
+}
+
 // src/storage.js
 var DB_NAME = "listenwrite-v3";
 var DB_VERSION = 1;
@@ -1921,7 +1962,22 @@ async function dbSet(key, value) {
   });
 }
 function defaultState() {
-  return { version: 3, words: [], events: [], texts: [], dailyPlans: {}, activities: [], settings: { newTarget: 30, reviewTarget: 80, retention: 0.9, speechRate: 0.92, todayBooks: [], typeBooks: [] } };
+  return {
+    version: 4,
+    words: [],
+    events: [],
+    texts: [],
+    dailyPlans: {},
+    activities: [],
+    settings: {
+      defaultNewTarget: 30,
+      defaultReviewTarget: 80,
+      retention: 0.9,
+      speechRate: 0.92,
+      todayBooks: [],
+      typeBooks: []
+    }
+  };
 }
 function sampleWords() {
   return [["distribution", "\u5206\u5E03\uFF1B\u5206\u914D", "n.", "the way something is spread or shared"], ["rural", "\u4E61\u6751\u7684\uFF1B\u519C\u6751\u7684", "adj.", "connected with the countryside"], ["decline", "\u4E0B\u964D\uFF1B\u51CF\u5C11", "n./v.", "to become smaller, fewer or less"], ["agriculture", "\u519C\u4E1A", "n.", "the practice of farming"], ["significant", "\u663E\u8457\u7684\uFF1B\u91CD\u8981\u7684", "adj.", "large or important enough to be noticed"]].map(([en, zh, pos, def], i) => ({ id: `sample_${i + 1}`, en, zh, pos, def, sources: ["\u793A\u4F8B\u8BCD\u5E93"], examples: [], retired: false, card: emptyCard() }));
@@ -1930,35 +1986,59 @@ function normalizeWord(word, index) {
   return { id: word.id || `w_${Date.now().toString(36)}_${index}`, en: String(word.en || "").trim().toLowerCase(), zh: String(word.zh || ""), pos: String(word.pos || ""), def: String(word.def || ""), sources: Array.isArray(word.sources) ? [...new Set(word.sources)] : Array.isArray(word.src) ? [...new Set(word.src)] : [], examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [], retired: Boolean(word.retired ?? word.ret), card: word.card || null };
 }
 function normalizeEvent(event, index) {
-  return { id: event.id || `legacy_ev_${index}`, wordId: event.wordId, date: event.date, ts: Number(event.ts) || Date.now(), mode: event.mode === "type" ? "type" : "listen", result: event.result || event.res || "bad", originalResult: event.originalResult || event.result || event.res || "bad", cold: Boolean(event.cold), attempt: Number(event.attempt) || 1, source: event.source || null, sentence: event.sentence || null, editedAt: event.editedAt || null };
+  const ts = Number(event.ts) || Date.now();
+  return { id: event.id || `legacy_ev_${index}`, wordId: event.wordId, date: studyDayKey(ts), ts, mode: event.mode === "type" ? "type" : "listen", result: event.result || event.res || "bad", originalResult: event.originalResult || event.result || event.res || "bad", cold: false, attempt: 1, source: event.source || null, sentence: event.sentence || null, editedAt: event.editedAt || null };
 }
 function normalizePlan(plan, key) {
   return { date: plan.date || key, books: Array.isArray(plan.books) ? plan.books : [], newTarget: Number(plan.newTarget) || 0, reviewTarget: Number(plan.reviewTarget) || 0, newIds: Array.isArray(plan.newIds) ? plan.newIds : [], reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [], createdAt: Number(plan.createdAt) || Date.now(), updatedAt: Number(plan.updatedAt) || Date.now() };
 }
+function reindexEvents(events) {
+  const firstByWordDay = /* @__PURE__ */ new Set(), attempts = /* @__PURE__ */ new Map();
+  events.sort((a, b) => a.ts - b.ts);
+  for (const e of events) {
+    e.date = studyDayKey(e.ts);
+    const coldKey = `${e.wordId}|${e.date}`;
+    e.cold = !firstByWordDay.has(coldKey);
+    firstByWordDay.add(coldKey);
+    const attemptKey = `${coldKey}|${e.mode}`;
+    const n = (attempts.get(attemptKey) || 0) + 1;
+    attempts.set(attemptKey, n);
+    e.attempt = n;
+  }
+  return events;
+}
+function normalizeActivities(list) {
+  return (Array.isArray(list) ? list : []).map((a) => ({ ...a, date: studyDayKey(Number(a.start) || Number(a.lastTouch) || Date.now()) }));
+}
 function normalizeState(input) {
-  const base = defaultState(), legacy = Boolean(input?.set && !input?.settings), state2 = { ...base, ...input || {} };
-  state2.settings = { ...base.settings, ...input?.settings || input?.set || {} };
+  const base = defaultState(), oldSettings = input?.settings || input?.set || {}, state2 = { ...base, ...input || {} };
+  const oldNew = Number(oldSettings.defaultNewTarget ?? oldSettings.newTarget ?? oldSettings.newN ?? base.settings.defaultNewTarget);
+  const oldReview = Number(oldSettings.defaultReviewTarget ?? oldSettings.reviewTarget ?? oldSettings.reviewN ?? base.settings.defaultReviewTarget);
+  state2.settings = { ...base.settings, ...oldSettings, defaultNewTarget: Math.max(0, oldNew || 0), defaultReviewTarget: Math.max(0, oldReview || 0) };
   if (input?.set) {
-    state2.settings.newTarget = Number(input.set.newN ?? state2.settings.newTarget);
-    state2.settings.reviewTarget = Number(input.set.reviewN ?? state2.settings.reviewTarget);
     state2.settings.speechRate = Number(input.set.rate ?? state2.settings.speechRate);
     state2.settings.todayBooks = Array.isArray(input.set.todayBooks) ? input.set.todayBooks : [];
     state2.settings.typeBooks = Array.isArray(input.set.typeBooks) ? input.set.typeBooks : [];
   }
+  delete state2.settings.newTarget;
+  delete state2.settings.reviewTarget;
+  delete state2.settings.newN;
+  delete state2.settings.reviewN;
+  delete state2.settings.rate;
   state2.settings.retention = Math.min(0.97, Math.max(0.75, Number(state2.settings.retention) || 0.9));
   state2.words = (input?.words || []).map(normalizeWord).filter((w) => w.en);
-  state2.events = (input?.events || []).map(normalizeEvent).filter((e) => e.wordId);
+  state2.events = reindexEvents((input?.events || []).map(normalizeEvent).filter((e) => e.wordId));
   state2.texts = Array.isArray(input?.texts) ? input.texts : [];
-  state2.activities = Array.isArray(input?.activities) ? input.activities : [];
+  state2.activities = normalizeActivities(input?.activities);
   state2.dailyPlans = {};
-  if (!legacy && input?.dailyPlans && typeof input.dailyPlans === "object" && !Array.isArray(input.dailyPlans)) {
+  if (Number(input?.version) >= 4 && input?.dailyPlans && typeof input.dailyPlans === "object" && !Array.isArray(input.dailyPlans)) {
     for (const [key, plan] of Object.entries(input.dailyPlans)) state2.dailyPlans[key] = normalizePlan(plan, key);
   }
   for (const word of state2.words) {
     const evs = state2.events.filter((e) => e.wordId === word.id && e.cold).sort((a, b) => a.ts - b.ts);
     word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : word.card || emptyCard();
   }
-  state2.version = 3;
+  state2.version = 4;
   return state2;
 }
 async function parseLocal(key) {
@@ -1993,7 +2073,7 @@ async function loadState() {
   }
 }
 async function saveState(state2) {
-  state2.version = 3;
+  state2.version = 4;
   try {
     await dbSet(STATE_KEY, state2);
     localStorage.removeItem(FALLBACK_KEY);
@@ -2011,10 +2091,7 @@ function exportState(state2) {
 }
 
 // src/engine.js
-function dayKey(ts = Date.now()) {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
+var dayKey = studyDayKey;
 function uid(prefix = "id") {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -2080,15 +2157,14 @@ function allBooks(state2) {
 function matchesBooks(word, books = []) {
   return !books.length || (word.sources || []).some((source) => books.includes(source));
 }
-function endOfDay(date) {
-  const [y, m, d] = date.split("-").map(Number);
-  return new Date(y, m - 1, d + 1).getTime() - 1;
-}
 function sameBooks(a = [], b = []) {
   return JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 }
 function listenedToday(state2, id, date) {
   return state2.events.some((e) => e.wordId === id && e.date === date && e.mode === "listen");
+}
+function attemptedCount(state2, ids, date) {
+  return ids.filter((id) => listenedToday(state2, id, date)).length;
 }
 function seedTodayFromListenHistory(state2, plan) {
   const seen = /* @__PURE__ */ new Set([...plan.newIds, ...plan.reviewIds]);
@@ -2118,12 +2194,15 @@ function ensureDailyPlan(state2, options = {}) {
   const date = options.date || dayKey();
   let plan = state2.dailyPlans[date];
   if (!plan) {
-    plan = state2.dailyPlans[date] = { date, books: [...options.books || state2.settings.todayBooks || []], newTarget: Number(options.newTarget ?? state2.settings.newTarget) || 0, reviewTarget: Number(options.reviewTarget ?? state2.settings.reviewTarget) || 0, newIds: [], reviewIds: [], createdAt: Date.now(), updatedAt: Date.now() };
+    plan = state2.dailyPlans[date] = { date, books: [...options.books ?? state2.settings.todayBooks ?? []], newTarget: Math.max(0, Number(state2.settings.defaultNewTarget) || 0), reviewTarget: Math.max(0, Number(state2.settings.defaultReviewTarget) || 0), newIds: [], reviewIds: [], createdAt: Date.now(), updatedAt: Date.now() };
   }
-  if (options.books) reconcileScope(state2, plan, options.books);
-  if (options.newTarget != null) plan.newTarget = Math.max(0, Number(options.newTarget) || 0);
-  if (options.reviewTarget != null) plan.reviewTarget = Math.max(0, Number(options.reviewTarget) || 0);
+  if (Object.prototype.hasOwnProperty.call(options, "books")) reconcileScope(state2, plan, options.books || []);
   seedTodayFromListenHistory(state2, plan);
+  const minNew = attemptedCount(state2, plan.newIds, plan.date), minReview = attemptedCount(state2, plan.reviewIds, plan.date);
+  if (options.newTarget != null) plan.newTarget = Math.max(minNew, Math.max(0, Number(options.newTarget) || 0));
+  else plan.newTarget = Math.max(minNew, Number(plan.newTarget) || 0);
+  if (options.reviewTarget != null) plan.reviewTarget = Math.max(minReview, Math.max(0, Number(options.reviewTarget) || 0));
+  else plan.reviewTarget = Math.max(minReview, Number(plan.reviewTarget) || 0);
   trimToTarget(state2, plan, "newIds", plan.newTarget);
   trimToTarget(state2, plan, "reviewIds", plan.reviewTarget);
   fillDailyPlan(state2, plan);
@@ -2133,7 +2212,7 @@ function ensureDailyPlan(state2, options = {}) {
 function fillDailyPlan(state2, plan) {
   const assigned = /* @__PURE__ */ new Set([...plan.newIds, ...plan.reviewIds]);
   const pool = state2.words.filter((w) => !w.retired && matchesBooks(w, plan.books));
-  const cutoff = endOfDay(plan.date), now = Date.now();
+  const cutoff = studyDayEnd(plan.date), now = Date.now();
   const review = pool.filter((w) => !assigned.has(w.id) && hasEventBefore(state2, w.id, plan.date) && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff);
   review.sort((a, b) => {
     const ra = retrievability(a.card, now, state2.settings.retention), rb = retrievability(b.card, now, state2.settings.retention);
@@ -2255,19 +2334,33 @@ function sessionProgress(state2, plan, session) {
   return { newDone: status.new.done, newTotal: plan.newIds.length, reviewDone: status.review.done, reviewTotal: plan.reviewIds.length, retry: status.new.retry + status.review.retry, remaining: status.new.pending + status.review.pending + status.new.retry + status.review.retry, turn: session?.turn || 0 };
 }
 function dueForecast(state2, days = 7) {
-  const out = [], now = /* @__PURE__ */ new Date();
-  for (let i = 0; i < days; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
-    out.push({ date: dayKey(d.getTime()), count: 0 });
-  }
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const today = dayKey(), out = Array.from({ length: days }, (_, i) => ({ date: addStudyDays(today, i), count: 0 })), start = studyDayStart(today);
   for (const word of state2.words) {
     if (word.retired || !(word.card?.reps || 0)) continue;
     const due = Number(word.card.due), key = dayKey(due), row = out.find((x) => x.date === key);
     if (row) row.count++;
-    else if (due < todayStart) out[0].count++;
+    else if (due < start) out[0].count++;
   }
   return out;
+}
+
+// src/tokenizer.js
+var WORD_RE = /[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
+function tokenizeEnglish(text, options = {}) {
+  const words = String(text || "").match(WORD_RE) || [];
+  const normalized = words.map((word) => word.replace(/’/g, "'"));
+  if (!options.unique) return normalized;
+  const seen = /* @__PURE__ */ new Set();
+  return normalized.filter((word) => {
+    const key = word.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function spellingMatches(input, answer) {
+  const normalize = (value) => String(value || "").trim().toLowerCase().replace(/’/g, "'");
+  return normalize(input) === normalize(answer);
 }
 
 // src/app.js
@@ -2282,9 +2375,10 @@ var typeRun = null;
 var textReaderId = null;
 var textEditId = null;
 var textFormOpen = false;
+var sentenceRun = null;
 var statRange = 30;
 var statDay = dayKey();
-var statMonth = new Date((/* @__PURE__ */ new Date()).getFullYear(), (/* @__PURE__ */ new Date()).getMonth(), 1);
+var statMonth = calendarDate(statDay);
 var labels = {
   home: ["\u9996\u9875", "\u542C\u8BCD"],
   today: ["\u4ECA\u65E5", "\u4ECA\u65E5\u5B66\u4E60"],
@@ -2313,10 +2407,6 @@ function wordById(id) {
 }
 function pct(a, b) {
   return b ? `${Math.round(a * 100 / b)}%` : "\u2014";
-}
-function dateObj(key) {
-  const [y, m, d] = key.split("-").map(Number);
-  return new Date(y, m - 1, d);
 }
 function download(name, text, type = "application/json") {
   const a = document.createElement("a");
@@ -2368,6 +2458,7 @@ function go(next) {
   view = next;
   listen = null;
   typeRun = null;
+  sentenceRun = null;
   textReaderId = null;
   render();
 }
@@ -2405,9 +2496,8 @@ function renderHome() {
 }
 function renderToday() {
   const books = state.settings.todayBooks || [];
-  const plan = ensureDailyPlan(state, { books, newTarget: state.settings.newTarget, reviewTarget: state.settings.reviewTarget });
+  const plan = ensureDailyPlan(state, { books });
   persist();
-  const status = planStatus(state, plan);
   const prog = sessionProgress(state, plan, null);
   const td = todayListeningStats(state, books);
   const mins = activityMinutes("listen");
@@ -2416,17 +2506,31 @@ function renderToday() {
     const x = todayListeningStats(state, [b]);
     return `<div class="bookrow"><b>${esc(b)}</b><span>${x.newCount} \u65B0</span><span>${x.reviewCount} \u590D\u4E60</span><span class="mobilehide good">${x.firstGood} \u719F\u6089</span><span class="mobilehide bad">${x.firstBad} \u4E0D\u719F</span></div>`;
   }).join("");
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)}</div></div><span class="tag">FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div><div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u5B66\u4E60\u8BBE\u7F6E\u4E0E\u8BCD\u4E66\u8303\u56F4</summary><div style="margin-top:12px"><div class="small">\u5DF2\u5B89\u6392\u8FDB\u4ECA\u5929\u8BA1\u5212\u7684\u8BCD\u4E0D\u4F1A\u56E0\u4E3A\u5207\u6362\u8BCD\u4E66\u6D88\u5931\uFF1B\u65B0\u7684\u8865\u5165\u4EFB\u52A1\u4F1A\u6309\u5F53\u524D\u8303\u56F4\u9009\u62E9\u3002</div>${bookChips(books, "today")}<div class="grid2" style="margin-top:12px"><div class="field"><label>\u6BCF\u65E5\u65B0\u8BCD\u76EE\u6807</label><input id="newTarget" type="number" min="0" value="${state.settings.newTarget}"></div><div class="field"><label>\u6BCF\u65E5\u590D\u4E60\u76EE\u6807</label><input id="reviewTarget" type="number" min="0" value="${state.settings.reviewTarget}"></div></div></div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div><div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="small">\u8FD9\u91CC\u53EA\u6539\u4ECA\u5929\u3002\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\uFF0C\u4E5F\u4E0D\u4F1A\u51FA\u73B0 36 / 30\u3002</div>${bookChips(books, "today")}<div class="grid2" style="margin-top:12px"><div class="field"><label>\u4ECA\u5929\u65B0\u8BCD\u76EE\u6807</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>\u4ECA\u5929\u590D\u4E60\u76EE\u6807</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div></div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u4FEE\u6539\u8FD9\u91CC\u4E0D\u4F1A\u6539\u53D8\u4ECA\u5929\u5DF2\u7ECF\u751F\u6210\u7684\u8BA1\u5212\uFF0C\u4ECE\u4E0B\u4E00\u4E2A\u5B66\u4E60\u65E5\u5F00\u59CB\u4F7F\u7528\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
   bindBookChips("today", renderToday);
-  document.getElementById("newTarget").onchange = (e) => {
-    state.settings.newTarget = Math.max(0, Number(e.target.value) || 0);
+  document.getElementById("todayNewTarget").onchange = (e) => {
+    const requested = Math.max(0, Number(e.target.value) || 0);
+    const updated = ensureDailyPlan(state, { newTarget: requested });
     persist();
+    if (updated.newTarget !== requested) toast(`\u4ECA\u5929\u5DF2\u7ECF\u505A\u8FC7 ${updated.newTarget} \u4E2A\u65B0\u8BCD\uFF0C\u76EE\u6807\u4E0D\u80FD\u518D\u964D`);
     renderToday();
   };
-  document.getElementById("reviewTarget").onchange = (e) => {
-    state.settings.reviewTarget = Math.max(0, Number(e.target.value) || 0);
+  document.getElementById("todayReviewTarget").onchange = (e) => {
+    const requested = Math.max(0, Number(e.target.value) || 0);
+    const updated = ensureDailyPlan(state, { reviewTarget: requested });
     persist();
+    if (updated.reviewTarget !== requested) toast(`\u4ECA\u5929\u5DF2\u7ECF\u505A\u8FC7 ${updated.reviewTarget} \u4E2A\u590D\u4E60\u8BCD\uFF0C\u76EE\u6807\u4E0D\u80FD\u518D\u964D`);
     renderToday();
+  };
+  document.getElementById("defaultNewTarget").onchange = (e) => {
+    state.settings.defaultNewTarget = Math.max(0, Number(e.target.value) || 0);
+    persist();
+    toast("\u5DF2\u4FEE\u6539\u4EE5\u540E\u6BCF\u5929\u7684\u65B0\u8BCD\u9ED8\u8BA4\u503C");
+  };
+  document.getElementById("defaultReviewTarget").onchange = (e) => {
+    state.settings.defaultReviewTarget = Math.max(0, Number(e.target.value) || 0);
+    persist();
+    toast("\u5DF2\u4FEE\u6539\u4EE5\u540E\u6BCF\u5929\u7684\u590D\u4E60\u9ED8\u8BA4\u503C");
   };
   document.getElementById("startListen").onclick = () => {
     if (!prog.remaining) return toast("\u4ECA\u5929\u8FD9\u4E00\u7EC4\u5DF2\u7ECF\u5B8C\u6210");
@@ -2557,9 +2661,7 @@ function typeCandidates() {
   return state.words.filter((w) => !w.retired && matchesBooks(w, books));
 }
 function eventsSince(days) {
-  const d = /* @__PURE__ */ new Date();
-  d.setDate(d.getDate() - days + 1);
-  const key = dayKey(d.getTime());
+  const key = addStudyDays(dayKey(), -days + 1);
   return state.events.filter((e) => e.date >= key);
 }
 function typePreset(kind) {
@@ -2721,7 +2823,7 @@ function renderText() {
   if (textReaderId) return renderTextReader();
   const cols = [...new Set(state.texts.map((t) => t.collection || "\u672A\u5206\u7C7B"))].sort();
   const editing = textEditId ? state.texts.find((t) => t.id === textEditId) : null;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u4FDD\u5B58 transcript \u548C\u6587\u7AE0\uFF0C\u4E4B\u540E\u76F4\u63A5\u7EE7\u7EED\u542C\uFF0C\u4E0D\u7528\u91CD\u65B0\u7C98\u8D34\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div><div class="grid3" style="margin-top:13px"><div class="statbox"><b>${state.texts.length}</b><span>\u7BC7\u6587\u672C</span></div><div class="statbox"><b>${cols.length}</b><span>\u4E2A\u6587\u672C\u5E93</span></div><div class="statbox"><b>${state.texts.reduce((n, t) => n + (t.body.match(/[A-Za-z]+/g)?.length || 0), 0)}</b><span>\u82F1\u6587\u8BCD\u91CF</span></div></div></section>${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6309\u5E93\u7B5B\u9009\u6216\u641C\u7D22\u6807\u9898/\u6B63\u6587\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u4FDD\u5B58 transcript \u548C\u6587\u7AE0\uFF0C\u4E4B\u540E\u76F4\u63A5\u7EE7\u7EED\u542C\uFF0C\u4E0D\u7528\u91CD\u65B0\u7C98\u8D34\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div><div class="grid3" style="margin-top:13px"><div class="statbox"><b>${state.texts.length}</b><span>\u7BC7\u6587\u672C</span></div><div class="statbox"><b>${cols.length}</b><span>\u4E2A\u6587\u672C\u5E93</span></div><div class="statbox"><b>${state.texts.reduce((n, t) => n + (t.body.match(/[A-Za-z]+/g)?.length || 0), 0)}</b><span>\u82F1\u6587\u8BCD\u91CF</span></div></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u62C6\u8BCD\u542C\u5199</h2><div class="small">\u7C98\u4E00\u53E5\u82F1\u6587\uFF0C\u81EA\u52A8\u6309\u5B9E\u9645\u8BCD\u5F62\u62C6\u5F00\u3002\u8FD9\u91CC\u662F\u62FC\u5199\u542C\u5199\uFF0C\u4E0D\u6539 FSRS \u719F\u7EC3\u5EA6\u3002</div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u542C\u5199</label><button id="startSentenceDictation" class="primary">\u5F00\u59CB\u62C6\u8BCD\u542C\u5199</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section>${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6309\u5E93\u7B5B\u9009\u6216\u641C\u7D22\u6807\u9898/\u6B63\u6587\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("newText").onclick = () => {
     textFormOpen = !textFormOpen;
     if (!textFormOpen) textEditId = null;
@@ -2731,9 +2833,81 @@ function renderText() {
     document.getElementById("saveText").onclick = saveTextItem;
     document.getElementById("importTextFile").onclick = () => textInput.click();
   }
+  const sentenceBox = document.getElementById("sentenceDictationText"), unique = document.getElementById("sentenceUnique"), preview = document.getElementById("sentencePreview");
+  const drawSentencePreview = () => {
+    const tokens = tokenizeEnglish(sentenceBox.value, { unique: unique.checked });
+    preview.innerHTML = tokens.slice(0, 30).map((x) => `<span class="tag">${esc(x)}</span>`).join("") + (tokens.length > 30 ? `<span class="tag">\u2026 \u5171 ${tokens.length} \u4E2A</span>` : "");
+  };
+  sentenceBox.oninput = drawSentencePreview;
+  unique.onchange = drawSentencePreview;
+  document.getElementById("startSentenceDictation").onclick = () => startSentenceDictation(sentenceBox.value, unique.checked);
   document.getElementById("textSearch").oninput = drawTextList;
   document.getElementById("textFilter").onchange = drawTextList;
   drawTextList();
+}
+function startSentenceDictation(text, unique) {
+  const tokens = tokenizeEnglish(text, { unique });
+  if (!tokens.length) return toast("\u8FD9\u53E5\u8BDD\u91CC\u6CA1\u6709\u8BC6\u522B\u5230\u82F1\u6587\u5355\u8BCD");
+  sentenceRun = { tokens, index: 0, input: "", result: null, revealed: false, lookups: 0, correct: 0 };
+  renderSentenceRun();
+  speak(tokens[0]);
+}
+function renderSentenceRun() {
+  const token = sentenceRun.tokens[sentenceRun.index];
+  if (!token) return finishSentenceRun();
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="sentenceBack" class="back">\u2039</button><div class="studyprogress">${sentenceRun.index + 1} / ${sentenceRun.tokens.length} \xB7 \u53E5\u5B50\u62C6\u8BCD\u542C\u5199</div></div><div class="studybody"><button id="sentenceSpeak" class="speaker">\u25D6))</button>${!sentenceRun.revealed ? `<div class="small">\u542C\u5355\u8BCD\uFF0C\u5199\u51FA\u82F1\u6587\u62FC\u5199\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="sentenceAnswer" style="font-size:21px;text-align:center" placeholder="\u8F93\u5165\u82F1\u6587\u62FC\u5199\u2026" autocomplete="off" autocapitalize="off"><div class="grid2" style="margin-top:10px"><button id="sentenceSubmit" class="primary">\u63D0\u4EA4</button><button id="sentenceReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${sentenceRun.result === "good" ? "good" : "bad"}">${esc(token)}</div><div class="typed"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(sentenceRun.input || "\uFF08\u76F4\u63A5\u770B\u7B54\u6848\uFF09")}</div></div><div class="statusline">${sentenceRun.result === "good" ? "\u62FC\u5199\u6B63\u786E" : "\u5DF2\u663E\u793A\u6B63\u786E\u62FC\u5199"}</div><div class="move"><button id="sentenceReplay" class="soft">\u91CD\u542C</button><button id="sentenceNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>`}</div></main>`;
+  document.getElementById("sentenceBack").onclick = () => {
+    sentenceRun = null;
+    view = "text";
+    renderText();
+  };
+  document.getElementById("sentenceSpeak").onclick = () => speak(token);
+  if (!sentenceRun.revealed) {
+    const input = document.getElementById("sentenceAnswer");
+    input.value = sentenceRun.input;
+    input.focus();
+    const reveal = (peek) => {
+      sentenceRun.input = input.value.trim();
+      sentenceRun.result = !peek && spellingMatches(sentenceRun.input, token) ? "good" : "bad";
+      if (sentenceRun.result === "good") sentenceRun.correct++;
+      else sentenceRun.lookups++;
+      sentenceRun.revealed = true;
+      renderSentenceRun();
+    };
+    document.getElementById("sentenceSubmit").onclick = () => {
+      if (!input.value.trim()) return toast("\u6CA1\u5199\u7684\u8BDD\u53EF\u4EE5\u70B9\u300C\u770B\u7B54\u6848\u300D");
+      reveal(false);
+    };
+    document.getElementById("sentenceReveal").onclick = () => reveal(true);
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        input.value.trim() ? reveal(false) : reveal(true);
+      }
+    };
+  } else {
+    document.getElementById("sentenceReplay").onclick = () => speak(token);
+    document.getElementById("sentenceNext").onclick = () => {
+      sentenceRun.index++;
+      sentenceRun.input = "";
+      sentenceRun.result = null;
+      sentenceRun.revealed = false;
+      if (sentenceRun.index >= sentenceRun.tokens.length) finishSentenceRun();
+      else {
+        renderSentenceRun();
+        speak(sentenceRun.tokens[sentenceRun.index]);
+      }
+    };
+  }
+}
+function finishSentenceRun() {
+  const run = sentenceRun;
+  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>\u53E5\u5B50\u62C6\u8BCD\u542C\u5199</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${run.tokens.length}</b><span>\u5355\u8BCD\u6570</span></div><div class="statbox"><b class="good">${run.correct}</b><span>\u4E00\u6B21\u62FC\u5BF9</span></div><div class="statbox"><b class="bad">${run.lookups}</b><span>\u9519\u8BEF/\u770B\u7B54\u6848</span></div></div><button id="finishSentence" class="primary">\u8FD4\u56DE\u6587\u672C</button></div></div></main>`;
+  document.getElementById("finishSentence").onclick = () => {
+    sentenceRun = null;
+    view = "text";
+    renderText();
+  };
 }
 function drawTextList() {
   const box = document.getElementById("textList");
@@ -2924,9 +3098,7 @@ function backup() {
 }
 function filteredEvents() {
   if (!statRange) return state.events;
-  const d = /* @__PURE__ */ new Date();
-  d.setDate(d.getDate() - statRange + 1);
-  const key = dayKey(d.getTime());
+  const key = addStudyDays(dayKey(), -statRange + 1);
   return state.events.filter((e) => e.date >= key);
 }
 function renderStats() {
@@ -2945,44 +3117,43 @@ function renderStats() {
 function calendarHtml() {
   const activity = {};
   state.events.forEach((e) => activity[e.date] = (activity[e.date] || 0) + 1);
-  const first = new Date(statMonth.getFullYear(), statMonth.getMonth(), 1), last = new Date(statMonth.getFullYear(), statMonth.getMonth() + 1, 0), offset = (first.getDay() + 6) % 7, start = new Date(first);
-  start.setDate(first.getDate() - offset);
-  const tail = 6 - (last.getDay() + 6) % 7, end = new Date(last);
-  end.setDate(last.getDate() + tail);
+  const first = new Date(Date.UTC(statMonth.getUTCFullYear(), statMonth.getUTCMonth(), 1, 12)), last = new Date(Date.UTC(statMonth.getUTCFullYear(), statMonth.getUTCMonth() + 1, 0, 12)), offset = (first.getUTCDay() + 6) % 7, start = new Date(first);
+  start.setUTCDate(first.getUTCDate() - offset);
+  const tail = 6 - (last.getUTCDay() + 6) % 7, end = new Date(last);
+  end.setUTCDate(last.getUTCDate() + tail);
   const cells = [];
   let max = 1;
-  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-    const key = dayKey(d.getTime()), n = activity[key] || 0;
+  for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    const key = calendarKey(d), n = activity[key] || 0;
     max = Math.max(max, n);
-    cells.push({ key, n, date: new Date(d), same: d.getMonth() === first.getMonth() });
+    cells.push({ key, n, date: new Date(d), same: d.getUTCMonth() === first.getUTCMonth() });
   }
-  return `<section class="card"><div class="space"><div><h2 class="section-title">\u5B66\u4E60\u65E5\u5386</h2><div class="small">\u53EF\u4EE5\u4E00\u76F4\u5F80\u524D\u7FFB\uFF0C\u70B9\u65E5\u671F\u770B\u5177\u4F53\u8BB0\u5F55\u3002</div></div></div><div class="calendarbar"><button id="calPrev">\u2039</button><div><b>${first.getFullYear()} \u5E74 ${first.getMonth() + 1} \u6708</b></div><button id="calNext">\u203A</button></div><div class="week"><span>\u4E00</span><span>\u4E8C</span><span>\u4E09</span><span>\u56DB</span><span>\u4E94</span><span>\u516D</span><span>\u65E5</span></div><div class="calgrid">${cells.map((c) => {
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u5B66\u4E60\u65E5\u5386</h2><div class="small">${studyDayLabel()}\u3002\u53EF\u4EE5\u4E00\u76F4\u5F80\u524D\u7FFB\uFF0C\u70B9\u65E5\u671F\u770B\u5177\u4F53\u8BB0\u5F55\u3002</div></div></div><div class="calendarbar"><button id="calPrev">\u2039</button><div><b>${first.getUTCFullYear()} \u5E74 ${first.getUTCMonth() + 1} \u6708</b></div><button id="calNext">\u203A</button></div><div class="week"><span>\u4E00</span><span>\u4E8C</span><span>\u4E09</span><span>\u56DB</span><span>\u4E94</span><span>\u516D</span><span>\u65E5</span></div><div class="calgrid">${cells.map((c) => {
     const future = c.key > dayKey(), op = c.n ? 0.14 + 0.62 * c.n / max : 0.04;
-    return `<button class="day ${c.key === statDay ? "sel " : ""}${c.same ? "" : "other "}${future ? "future" : ""}" data-stat-day="${c.key}" ${future ? "disabled" : ""} style="background:rgba(93,119,99,${op.toFixed(2)})"><span>${c.date.getDate()}</span>${c.n ? `<strong>${c.n}</strong>` : ""}</button>`;
+    return `<button class="day ${c.key === statDay ? "sel " : ""}${c.same ? "" : "other "}${future ? "future" : ""}" data-stat-day="${c.key}" ${future ? "disabled" : ""} style="background:rgba(93,119,99,${op.toFixed(2)})"><span>${c.date.getUTCDate()}</span>${c.n ? `<strong>${c.n}</strong>` : ""}</button>`;
   }).join("")}</div><div style="text-align:center;margin-top:8px"><button id="calToday" class="ghost">\u56DE\u5230\u672C\u6708</button></div></section>`;
 }
 function bindCalendar() {
   document.getElementById("calPrev").onclick = () => {
-    statMonth = new Date(statMonth.getFullYear(), statMonth.getMonth() - 1, 1);
+    statMonth = new Date(Date.UTC(statMonth.getUTCFullYear(), statMonth.getUTCMonth() - 1, 1, 12));
     renderStats();
   };
   document.getElementById("calNext").onclick = () => {
-    const n = new Date(statMonth.getFullYear(), statMonth.getMonth() + 1, 1), now = /* @__PURE__ */ new Date(), cur = new Date(now.getFullYear(), now.getMonth(), 1);
+    const n = new Date(Date.UTC(statMonth.getUTCFullYear(), statMonth.getUTCMonth() + 1, 1, 12)), cur = calendarDate(dayKey());
+    cur.setUTCDate(1);
     if (n <= cur) {
       statMonth = n;
       renderStats();
     }
   };
   document.getElementById("calToday").onclick = () => {
-    const n = /* @__PURE__ */ new Date();
-    statMonth = new Date(n.getFullYear(), n.getMonth(), 1);
     statDay = dayKey();
+    statMonth = calendarDate(statDay);
     renderStats();
   };
   document.querySelectorAll("[data-stat-day]").forEach((b) => b.onclick = () => {
     statDay = b.dataset.statDay;
-    const d = dateObj(statDay);
-    statMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+    statMonth = calendarDate(statDay);
     renderStats();
   });
 }
@@ -3030,6 +3201,7 @@ function render() {
   try {
     if (listen) return renderListen();
     if (typeRun) return renderTypeRun();
+    if (sentenceRun) return renderSentenceRun();
     if (textReaderId) return renderTextReader();
     if (view === "home") renderHome();
     else if (view === "today") renderToday();
