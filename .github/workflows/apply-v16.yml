@@ -1,0 +1,37 @@
+name: Apply v16 reinforcement changes
+on:
+  push:
+    branches: [v16-reinforcement-steps]
+    paths:
+      - tools/apply-v16.mjs
+      - tests/v16.test.js
+      - src/reinforcement.js
+      - .github/workflows/apply-v16.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v16-reinforcement-steps
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: node tools/apply-v16.mjs
+      - run: node --check src/reinforcement.js
+      - run: node --check src/queue.js
+      - run: node --check src/engine.js
+      - run: node --check src/app.js
+      - run: npm test
+      - run: npm run build
+      - name: Commit patched source and bundle
+        run: |
+          rm -f tools/apply-v16.mjs .github/workflows/apply-v16.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add three-step same-day reinforcement and preserve target progress"
+          git push origin HEAD:v16-reinforcement-steps
