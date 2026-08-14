@@ -1,0 +1,31 @@
+name: Apply v20 mixed study order
+on:
+  push:
+    branches: [v20-mix-new-review]
+    paths:
+      - 'tools/apply-v20.mjs'
+      - '.github/workflows/apply-v20.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: node tools/apply-v20.mjs
+      - run: node --check src/queue.js
+      - run: node --check src/app.js
+      - run: npm test
+      - run: npm run build
+      - name: Commit v20 changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/queue.js src/app.js tests/v20.test.js app.bundle.js
+          git rm -f .github/workflows/apply-v20.yml tools/apply-v20.mjs
+          git commit -m "Mix new and review study cards" || exit 0
+          git push
