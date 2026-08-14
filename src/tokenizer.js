@@ -1,4 +1,4 @@
-const TOKEN_RE = /(?:[$£€¥]\s*)?\d+(?::\d{1,2})?(?:[.,]\d+)?(?:%|(?:st|nd|rd|th))?|[A-Za-z]+\d+[A-Za-z0-9-]*|\d+[A-Za-z]+(?:-[A-Za-z0-9]+)*|[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
+const TOKEN_RE = /[A-Za-z]+\d+[A-Za-z0-9-]*|\d+[A-Za-z]+(?:-[A-Za-z0-9]+)*|(?:[$£€¥]\s*)?\d+(?::\d{1,2})?(?:[.,]\d+)?(?:%|(?:st|nd|rd|th))?|[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
 
 function normalizeToken(value) {
   return String(value || '').trim().toLowerCase().replace(/’/g, "'").replace(/\s+/g, ' ');
