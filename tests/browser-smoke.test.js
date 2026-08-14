@@ -28,17 +28,14 @@ test('browser shell renders Home, Today and immersive listening without blank-sc
   const speechSynthesis = { cancel() {}, speak(utterance) { queueMicrotask(() => utterance.onend?.()); } };
   class SpeechSynthesisUtterance { constructor(text) { this.text = text; this.lang = ''; this.rate = 1; this.onend = null; } }
 
-  Object.assign(globalThis, {
-    window,
-    document: window.document,
-    navigator: window.navigator,
-    localStorage: window.localStorage,
-    indexedDB,
-    IDBKeyRange,
-    speechSynthesis,
-    SpeechSynthesisUtterance,
-    confirm: () => true,
-  });
+  globalThis.window = window;
+  globalThis.document = window.document;
+  globalThis.localStorage = window.localStorage;
+  globalThis.indexedDB = indexedDB;
+  globalThis.IDBKeyRange = IDBKeyRange;
+  globalThis.speechSynthesis = speechSynthesis;
+  globalThis.SpeechSynthesisUtterance = SpeechSynthesisUtterance;
+  globalThis.confirm = () => true;
   window.speechSynthesis = speechSynthesis;
   window.SpeechSynthesisUtterance = SpeechSynthesisUtterance;
   window.getSelection = () => ({ toString: () => '' });
@@ -67,8 +64,7 @@ test('browser shell renders Home, Today and immersive listening without blank-sc
 
   document.getElementById('judgeBad').click();
   await waitFor(() => document.querySelector('#nextWord'));
-  const answerText = document.getElementById('app').textContent;
-  assert.match(answerText, /不熟悉/);
+  assert.match(document.getElementById('app').textContent, /不熟悉/);
   assert.ok(document.querySelector('.word'), 'answer must reveal the current English word');
   assert.ok(document.querySelector('#nextWord'), 'mobile Next button must be visible after judging');
 
