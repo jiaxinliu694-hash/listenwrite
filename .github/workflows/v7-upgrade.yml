@@ -16,7 +16,9 @@ jobs:
         with:
           node-version: 22
       - name: Apply v7 UI changes
-        run: python3 scripts/apply_v7.py
+        run: |
+          python3 scripts/apply_v7.py
+          python3 scripts/finalize_v7.py
       - name: Install
         run: npm install
       - name: Syntax checks
