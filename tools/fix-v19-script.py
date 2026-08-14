@@ -42,5 +42,23 @@ if start < 0 or end < 0:
     raise SystemExit('could not locate pending meaning helper block')
 s = s[:start] + pending_replacement + '\n' + s[end:]
 
+# Align legacy tests that encoded the old millisecond retry implementation.
+compat_js = r'''
+// Align legacy retry tests with intervening-word gap semantics.
+let v11=read('tests/v11.test.js');
+v11=v11.replace("assert.equal(session.retry[0].eligibleAt, 31000);","assert.equal(session.retry[0].eligibleTurn, 8);");
+write('tests/v11.test.js',v11);
+
+v16=read('tests/v16.test.js');
+v16=v16.replaceAll('reinforcementDelayMs','reinforcementGapWords');
+v16=v16.replace("test('reinforcement intervals increase across the three recovery steps'", "test('reinforcement word gaps increase across the three recovery steps'");
+const oldRetryTest=`test('retry cannot reappear before its minimum word gap', () => {\n  const s=makeState(1); const date='2026-08-14';\n  const p=ensureDailyPlan(s,{date,books:['A'],newTarget:1,reviewTarget:0});\n  const session=createRetrySession(s,p,'listen');\n  const id=pickNext(session,1000);\n  recordAttempt(s,s.words[0],'listen','bad',{date,ts:1000});\n  finishCurrent(session,'bad',s);\n  assert.equal(pickNext(session,1001),null);\n  assert.equal(pickNext(session,31_001),id);\n});`;
+const newRetryTest=`test('retry waits for its minimum intervening-word gap when enough words exist', () => {\n  const s=makeState(7); const date='2026-08-14';\n  const p=ensureDailyPlan(s,{date,books:['A'],newTarget:7,reviewTarget:0});\n  const session=createRetrySession(s,p,'listen');\n  const id=pickNext(session);\n  recordAttempt(s,s.words.find(w=>w.id===id),'listen','bad',{date,ts:1000});\n  finishCurrent(session,'bad',s);\n  const seen=[];\n  for(let i=0;i<5;i++){const other=pickNext(session);assert.notEqual(other,id);seen.push(other);recordAttempt(s,s.words.find(w=>w.id===other),'listen','good',{date,ts:2000+i});finishCurrent(session,'good',s);}\n  assert.equal(new Set(seen).size,5);\n  assert.equal(pickNext(session),id);\n});`;
+if(!v16.includes(oldRetryTest)) throw new Error('legacy v16 retry test not found');
+v16=v16.replace(oldRetryTest,newRetryTest);
+write('tests/v16.test.js',v16);
+'''
+s += '\n' + compat_js
+
 p.write_text(s)
-# v19f
+# v19g
