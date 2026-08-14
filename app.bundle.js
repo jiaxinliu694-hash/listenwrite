@@ -2198,13 +2198,21 @@ function todayListeningStats(state2, books = [], date = dayKey()) {
   return { events, ids, newCount, reviewCount, firstGood, firstBad };
 }
 function createRetrySession(state2, plan, mode = "listen", explicitIds = null) {
-  const planIds = explicitIds || [...plan.reviewIds, ...plan.newIds], wordMap = new Map(state2.words.map((w) => [w.id, w])), pendingBase = [], retry = [];
-  for (const id of planIds) {
-    const word = wordMap.get(id);
-    if (!word || word.retired) continue;
-    const last = latestEventOnDay(state2, id, plan.date, mode);
-    if (!last) pendingBase.push(id);
-    else if (last.result === "bad") retry.push({ wordId: id, attempt: eventsOnDay(state2, id, plan.date, mode).length, eligibleTurn: 0, addedAt: last.ts });
+  const planIds = explicitIds || [...plan.reviewIds, ...plan.newIds], wordMap = new Map(state2.words.map((w) => [w.id, w]));
+  const pendingBase = [], retry = [];
+  if (explicitIds) {
+    for (const id of [...new Set(planIds)]) {
+      const word = wordMap.get(id);
+      if (word && !word.retired) pendingBase.push(id);
+    }
+  } else {
+    for (const id of planIds) {
+      const word = wordMap.get(id);
+      if (!word || word.retired) continue;
+      const last = latestEventOnDay(state2, id, plan.date, mode);
+      if (!last) pendingBase.push(id);
+      else if (last.result === "bad") retry.push({ wordId: id, attempt: eventsOnDay(state2, id, plan.date, mode).length, eligibleTurn: 0, addedAt: last.ts });
+    }
   }
   return { mode, date: plan.date, fixedIds: [...new Set(planIds)], pendingBase, retry, turn: 0, current: null, history: [] };
 }
