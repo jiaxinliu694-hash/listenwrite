@@ -1,6 +1,6 @@
 import { emptyCard, rebuildCard } from './scheduler.js';
 import { calendarDayKey } from './studyday.js';
-import { normalizeSentenceBooks } from './sentencebooks.js';
+import { normalizeSentenceBooks, ensureSimpleWords, normalizeLexeme } from './sentencebooks.js';
 
 const DB_NAME = 'listenwrite-v3';
 const DB_VERSION = 1;
@@ -43,11 +43,12 @@ async function dbSet(key, value) {
 
 export function defaultState() {
   return {
-    version: 6,
+    version: 7,
     words: [],
     events: [],
     texts: [],
     sentenceBooks: [],
+    simpleWords: [],
     dailyPlans: {},
     activities: [],
     settings: {
@@ -78,7 +79,7 @@ function sampleWords() {
 function normalizeWord(word, index) {
   return {
     id: word.id || `w_${Date.now().toString(36)}_${index}`,
-    en: String(word.en || '').trim().toLowerCase(),
+    en: normalizeLexeme(word.en),
     zh: String(word.zh || ''),
     pos: String(word.pos || ''),
     def: String(word.def || ''),
@@ -188,16 +189,19 @@ export function normalizeState(input) {
   state.events = reindexEvents((input?.events || []).map((e, i) => normalizeEvent(e, i, preserveDates)).filter((e) => e.wordId));
   state.texts = Array.isArray(input?.texts) ? input.texts : [];
   state.sentenceBooks = normalizeSentenceBooks(input?.sentenceBooks);
+  state.simpleWords = Array.isArray(input?.simpleWords) ? [...new Set(input.simpleWords.map(normalizeLexeme).filter(Boolean))] : [];
+  ensureSimpleWords(state);
   state.activities = normalizeActivities(input?.activities, preserveDates);
   state.dailyPlans = {};
   if (Number(input?.version) >= 4 && input?.dailyPlans && typeof input.dailyPlans === 'object' && !Array.isArray(input.dailyPlans)) {
     for (const [key, plan] of Object.entries(input.dailyPlans)) state.dailyPlans[key] = normalizePlan(plan, key);
   }
   for (const word of state.words) {
+    if (state.simpleWords.includes(word.en)) word.retired = true;
     const evs = state.events.filter((e) => e.wordId === word.id && e.cold).sort((a, b) => a.ts - b.ts);
     word.card = evs.length ? rebuildCard(evs, state.settings.retention) : (word.card || emptyCard());
   }
-  state.version = 6;
+  state.version = 7;
   return state;
 }
 
@@ -220,19 +224,20 @@ export async function loadState() {
     const state = legacy || defaultState();
     if (!state.words.length) state.words = sampleWords();
     await dbSet(STATE_KEY, state);
-    return state;
+    return normalizeState(state);
   } catch {
     const fallback = await parseLocal(FALLBACK_KEY);
     if (fallback) return fallback;
     const legacy = await parseLocal(LEGACY_KEY);
     const state = legacy || defaultState();
     if (!state.words.length) state.words = sampleWords();
-    return state;
+    return normalizeState(state);
   }
 }
 
 export async function saveState(state) {
-  state.version = 6;
+  state.version = 7;
+  ensureSimpleWords(state);
   try {
     await dbSet(STATE_KEY, state);
     localStorage.removeItem(FALLBACK_KEY);
