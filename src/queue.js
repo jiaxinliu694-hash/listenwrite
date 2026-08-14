@@ -1,24 +1,30 @@
 import { dayKey, eventsOnDay, hasEventBefore, latestEventOnDay } from './engine.js';
 import { retrievability } from './scheduler.js';
+import { addStudyDays, studyDayEnd, studyDayStart } from './studyday.js';
 
 export function allBooks(state){const set=new Set();for(const word of state.words)for(const source of word.sources||[])set.add(source);return[...set].sort((a,b)=>a.localeCompare(b));}
 export function matchesBooks(word,books=[]){return!books.length||(word.sources||[]).some(source=>books.includes(source));}
 export function planForDate(state,date=dayKey()){return state.dailyPlans[date]||null;}
-function endOfDay(date){const[y,m,d]=date.split('-').map(Number);return new Date(y,m-1,d+1).getTime()-1;}
 function sameBooks(a=[],b=[]){return JSON.stringify([...a].sort())===JSON.stringify([...b].sort());}
 function listenedToday(state,id,date){return state.events.some(e=>e.wordId===id&&e.date===date&&e.mode==='listen');}
+function attemptedCount(state,ids,date){return ids.filter(id=>listenedToday(state,id,date)).length;}
 
 function seedTodayFromListenHistory(state,plan){const seen=new Set([...plan.newIds,...plan.reviewIds]);const listenedIds=[...new Set(state.events.filter(e=>e.date===plan.date&&e.mode==='listen').map(e=>e.wordId))];for(const id of listenedIds){if(seen.has(id))continue;if(hasEventBefore(state,id,plan.date))plan.reviewIds.push(id);else plan.newIds.push(id);seen.add(id);}}
 function reconcileScope(state,plan,books){if(sameBooks(plan.books,books))return;const keep=id=>listenedToday(state,id,plan.date)||matchesBooks(state.words.find(w=>w.id===id)||{},books);plan.newIds=plan.newIds.filter(keep);plan.reviewIds=plan.reviewIds.filter(keep);plan.books=[...books];}
 function trimToTarget(state,plan,key,target){const ids=plan[key];const attempted=ids.filter(id=>listenedToday(state,id,plan.date));const untouched=ids.filter(id=>!listenedToday(state,id,plan.date));const keepUntouched=Math.max(0,target-attempted.length);plan[key]=[...attempted,...untouched.slice(0,keepUntouched)];}
 
-export function ensureDailyPlan(state,options={}){const date=options.date||dayKey();let plan=state.dailyPlans[date];if(!plan){plan=state.dailyPlans[date]={date,books:[...(options.books||state.settings.todayBooks||[])],newTarget:Number(options.newTarget??state.settings.newTarget)||0,reviewTarget:Number(options.reviewTarget??state.settings.reviewTarget)||0,newIds:[],reviewIds:[],createdAt:Date.now(),updatedAt:Date.now()};}
-  if(options.books)reconcileScope(state,plan,options.books);
-  if(options.newTarget!=null)plan.newTarget=Math.max(0,Number(options.newTarget)||0);
-  if(options.reviewTarget!=null)plan.reviewTarget=Math.max(0,Number(options.reviewTarget)||0);
-  seedTodayFromListenHistory(state,plan);trimToTarget(state,plan,'newIds',plan.newTarget);trimToTarget(state,plan,'reviewIds',plan.reviewTarget);fillDailyPlan(state,plan);plan.updatedAt=Date.now();return plan;}
+export function ensureDailyPlan(state,options={}){
+  const date=options.date||dayKey();let plan=state.dailyPlans[date];
+  if(!plan){plan=state.dailyPlans[date]={date,books:[...(options.books??state.settings.todayBooks??[])],newTarget:Math.max(0,Number(state.settings.defaultNewTarget)||0),reviewTarget:Math.max(0,Number(state.settings.defaultReviewTarget)||0),newIds:[],reviewIds:[],createdAt:Date.now(),updatedAt:Date.now()};}
+  if(Object.prototype.hasOwnProperty.call(options,'books'))reconcileScope(state,plan,options.books||[]);
+  seedTodayFromListenHistory(state,plan);
+  const minNew=attemptedCount(state,plan.newIds,plan.date),minReview=attemptedCount(state,plan.reviewIds,plan.date);
+  if(options.newTarget!=null)plan.newTarget=Math.max(minNew,Math.max(0,Number(options.newTarget)||0));else plan.newTarget=Math.max(minNew,Number(plan.newTarget)||0);
+  if(options.reviewTarget!=null)plan.reviewTarget=Math.max(minReview,Math.max(0,Number(options.reviewTarget)||0));else plan.reviewTarget=Math.max(minReview,Number(plan.reviewTarget)||0);
+  trimToTarget(state,plan,'newIds',plan.newTarget);trimToTarget(state,plan,'reviewIds',plan.reviewTarget);fillDailyPlan(state,plan);plan.updatedAt=Date.now();return plan;
+}
 
-export function fillDailyPlan(state,plan){const assigned=new Set([...plan.newIds,...plan.reviewIds]);const pool=state.words.filter(w=>!w.retired&&matchesBooks(w,plan.books));const cutoff=endOfDay(plan.date),now=Date.now();
+export function fillDailyPlan(state,plan){const assigned=new Set([...plan.newIds,...plan.reviewIds]);const pool=state.words.filter(w=>!w.retired&&matchesBooks(w,plan.books));const cutoff=studyDayEnd(plan.date),now=Date.now();
   const review=pool.filter(w=>!assigned.has(w.id)&&hasEventBefore(state,w.id,plan.date)&&(w.card?.reps||0)>0&&Number(w.card?.due||0)<=cutoff);review.sort((a,b)=>{const ra=retrievability(a.card,now,state.settings.retention),rb=retrievability(b.card,now,state.settings.retention);if(ra!==rb)return ra-rb;return Number(a.card?.due||0)-Number(b.card?.due||0);});
   const fresh=pool.filter(w=>!assigned.has(w.id)&&!hasEventBefore(state,w.id,plan.date));fresh.sort((a,b)=>(b.sources?.length||0)-(a.sources?.length||0)||a.en.localeCompare(b.en));
   const needReview=Math.max(0,plan.reviewTarget-plan.reviewIds.length),needNew=Math.max(0,plan.newTarget-plan.newIds.length);for(const w of review.slice(0,needReview)){plan.reviewIds.push(w.id);assigned.add(w.id);}for(const w of fresh.slice(0,needNew)){plan.newIds.push(w.id);assigned.add(w.id);}return plan;}
@@ -35,4 +41,4 @@ function retryGap(attempt){if(attempt<=1)return 4;if(attempt===2)return 6;return
 export function pickNext(session){if(session.current)return session.current.wordId;const due=session.retry.filter(x=>x.eligibleTurn<=session.turn).sort((a,b)=>a.eligibleTurn-b.eligibleTurn||a.addedAt-b.addedAt)[0];if(due){session.retry=session.retry.filter(x=>x!==due);session.current={wordId:due.wordId,source:'retry',attempt:due.attempt+1};return due.wordId;}const baseId=session.pendingBase.shift();if(baseId){session.current={wordId:baseId,source:'base',attempt:1};return baseId;}const nextRetry=session.retry.sort((a,b)=>a.eligibleTurn-b.eligibleTurn||a.addedAt-b.addedAt).shift();if(nextRetry){session.current={wordId:nextRetry.wordId,source:'retry',attempt:nextRetry.attempt+1};return nextRetry.wordId;}return null;}
 export function finishCurrent(session,result){if(!session.current)return;const current=session.current;session.history.push({...current,result,turn:session.turn});session.turn+=1;session.retry=session.retry.filter(x=>x.wordId!==current.wordId);if(result==='bad')session.retry.push({wordId:current.wordId,attempt:current.attempt,eligibleTurn:session.turn+retryGap(current.attempt),addedAt:Date.now()});session.current=null;}
 export function sessionProgress(state,plan,session){const status=planStatus(state,plan);return{newDone:status.new.done,newTotal:plan.newIds.length,reviewDone:status.review.done,reviewTotal:plan.reviewIds.length,retry:status.new.retry+status.review.retry,remaining:status.new.pending+status.review.pending+status.new.retry+status.review.retry,turn:session?.turn||0};}
-export function dueForecast(state,days=7){const out=[],now=new Date();for(let i=0;i<days;i++){const d=new Date(now.getFullYear(),now.getMonth(),now.getDate()+i);out.push({date:dayKey(d.getTime()),count:0});}const todayStart=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();for(const word of state.words){if(word.retired||!(word.card?.reps||0))continue;const due=Number(word.card.due),key=dayKey(due),row=out.find(x=>x.date===key);if(row)row.count++;else if(due<todayStart)out[0].count++;}return out;}
+export function dueForecast(state,days=7){const today=dayKey(),out=Array.from({length:days},(_,i)=>({date:addStudyDays(today,i),count:0})),start=studyDayStart(today);for(const word of state.words){if(word.retired||!(word.card?.reps||0))continue;const due=Number(word.card.due),key=dayKey(due),row=out.find(x=>x.date===key);if(row)row.count++;else if(due<start)out[0].count++;}return out;}
