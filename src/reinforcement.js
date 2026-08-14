@@ -25,12 +25,14 @@ export function reinforcementState(events = []) {
   };
 }
 
-export function reinforcementDelayMs(events = []) {
+export const REINFORCEMENT_GAPS = [5, 8, 12];
+
+export function reinforcementGapWords(events = []) {
   const state = reinforcementState(events);
   if (!state.started || state.passed || !state.hadBad) return 0;
-  if (state.last?.result === 'bad') return 30_000;
-  if (state.goodStreak === 1) return 90_000;
-  if (state.goodStreak === 2) return 180_000;
+  if (state.last?.result === 'bad') return REINFORCEMENT_GAPS[0];
+  if (state.goodStreak === 1) return REINFORCEMENT_GAPS[1];
+  if (state.goodStreak === 2) return REINFORCEMENT_GAPS[2];
   return 0;
 }
 

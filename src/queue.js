@@ -1,7 +1,7 @@
 import { activeStudyDayKey, dayKey, eventsOnDay, hasEventBefore, latestEventOnDay } from './engine.js';
 import { retrievability } from './scheduler.js';
 import { addStudyDays, studyDayEnd, studyDayStart } from './studyday.js';
-import { reinforcementState, reinforcementDelayMs } from './reinforcement.js';
+import { reinforcementState, reinforcementGapWords } from './reinforcement.js';
 import { isReviewHinted, wordPassedOnDay, wordStudyKind } from './studyidentity.js';
 
 export function allBooks(state) {
@@ -377,82 +377,117 @@ export function todayListeningStats(state, books = [], date = activeStudyDayKey(
   return { events, ids, newCount, reviewCount, firstGood, firstBad };
 }
 
+function persistedInterveningTurns(state, wordId, date, mode, afterTs = 0) {
+  return (state.events || []).filter((e) =>
+    e.date === date &&
+    e.mode === mode &&
+    e.wordId !== wordId &&
+    Number(e.ts || 0) > Number(afterTs || 0)
+  ).length;
+}
+
 export function createRetrySession(state, plan, mode = 'listen', explicitIds = null) {
-  const planIds = explicitIds || [...plan.reviewIds, ...plan.newIds];
+  const planIds = [...new Set(explicitIds || [...plan.reviewIds, ...plan.newIds])];
   const wordMap = new Map(state.words.map((w) => [w.id, w]));
   const pendingBase = [];
   const retry = [];
-  if (explicitIds) {
-    for (const id of [...new Set(planIds)]) {
-      const word = wordMap.get(id);
-      if (word && !word.retired) pendingBase.push(id);
-    }
-  } else {
-    for (const id of planIds) {
-      const word = wordMap.get(id);
-      if (!word || word.retired) continue;
-      const events = eventsOnDay(state, id, plan.date, mode);
-      const reinforce = reinforcementState(events);
-      if (!reinforce.started) pendingBase.push(id);
-      else if (!reinforce.passed) {
-        retry.push({
-          wordId: id,
-          attempt: events.length,
-          eligibleAt: Number(reinforce.last?.ts || 0) + reinforcementDelayMs(events),
-          addedAt: reinforce.last?.ts || 0,
-        });
-      }
-    }
-    if (plan.resumeWordId) {
-      const i = pendingBase.indexOf(plan.resumeWordId);
-      if (i > 0) pendingBase.unshift(pendingBase.splice(i, 1)[0]);
+  const completedIds = [];
+  for (const id of planIds) {
+    const word = wordMap.get(id);
+    if (!word || word.retired) continue;
+    const events = eventsOnDay(state, id, plan.date, mode);
+    const reinforce = reinforcementState(events);
+    if (!reinforce.started) pendingBase.push(id);
+    else if (reinforce.passed) completedIds.push(id);
+    else {
+      const requiredGap = reinforcementGapWords(events);
+      const earnedGap = persistedInterveningTurns(state, id, plan.date, mode, reinforce.last?.ts);
+      retry.push({
+        wordId:id,
+        attempt:events.length,
+        eligibleTurn:Math.max(0, requiredGap - earnedGap),
+        addedTurn:0,
+      });
     }
   }
-  return { mode, date: plan.date, fixedIds: [...new Set(planIds)], pendingBase, retry, turn: 0, current: null, history: [] };
+  if (!explicitIds && plan.resumeWordId) {
+    const i = pendingBase.indexOf(plan.resumeWordId);
+    if (i > 0) pendingBase.unshift(pendingBase.splice(i, 1)[0]);
+  }
+  return { mode, date:plan.date, fixedIds:planIds, pendingBase, retry, completedIds, turn:0, current:null, history:[], bufferCursor:0, lastWordId:null };
 }
 
-export function pickNext(session, now = Date.now()) {
+function retryDue(session) {
+  return (session.retry || [])
+    .filter((x) => Number(x.eligibleTurn || 0) <= session.turn)
+    .sort((a,b) => Number(a.eligibleTurn||0)-Number(b.eligibleTurn||0) || Number(a.addedTurn||0)-Number(b.addedTurn||0))[0] || null;
+}
+
+function pickBufferWord(session) {
+  const blocked = new Set((session.retry || []).map((x) => x.wordId));
+  const pool = (session.completedIds || []).filter((id) => !blocked.has(id) && id !== session.lastWordId);
+  if (!pool.length) return null;
+  const id = pool[session.bufferCursor % pool.length];
+  session.bufferCursor = (session.bufferCursor + 1) % Math.max(1, pool.length);
+  return id;
+}
+
+export function pickNext(session) {
   if (session.current) return session.current.wordId;
-  const due = session.retry
-    .filter((x) => Number(x.eligibleAt || 0) <= now)
-    .sort((a, b) => Number(a.eligibleAt || 0) - Number(b.eligibleAt || 0) || a.addedAt - b.addedAt)[0];
+  const due = retryDue(session);
   if (due) {
     session.retry = session.retry.filter((x) => x !== due);
-    session.current = { wordId: due.wordId, source: 'retry', attempt: due.attempt + 1 };
+    session.current = { wordId:due.wordId, source:'retry', attempt:due.attempt + 1 };
     return due.wordId;
   }
   const baseId = session.pendingBase.shift();
   if (baseId) {
-    session.current = { wordId: baseId, source: 'base', attempt: 1 };
+    session.current = { wordId:baseId, source:'base', attempt:1 };
     return baseId;
+  }
+  if (session.retry?.length) {
+    const bufferId = pickBufferWord(session);
+    if (bufferId) {
+      session.current = { wordId:bufferId, source:'buffer', attempt:0 };
+      return bufferId;
+    }
+    // Tiny tail groups cannot satisfy a 5/8/12-card gap. We never auto-pass them:
+    // present the earliest blocked retry and still require a real judgment.
+    const tail = [...session.retry].sort((a,b) => Number(a.eligibleTurn||0)-Number(b.eligibleTurn||0))[0];
+    session.retry = session.retry.filter((x) => x !== tail);
+    session.current = { wordId:tail.wordId, source:'tail-retry', attempt:tail.attempt + 1, gapShortfall:Math.max(0, Number(tail.eligibleTurn||0)-session.turn) };
+    return tail.wordId;
   }
   return null;
 }
 
-export function nextRetryDelayMs(session, now = Date.now()) {
+export function nextRetryGap(session) {
   if (!session?.retry?.length) return 0;
-  return Math.max(0, Math.min(...session.retry.map((x) => Number(x.eligibleAt || 0))) - now);
+  return Math.max(0, Math.min(...session.retry.map((x) => Number(x.eligibleTurn || 0))) - Number(session.turn || 0));
 }
 
 export function finishCurrent(session, result, state = null) {
   if (!session.current) return;
   const current = session.current;
-  session.history.push({ ...current, result, turn: session.turn });
+  session.history.push({ ...current, result, turn:session.turn });
   session.turn += 1;
-  session.retry = session.retry.filter((x) => x.wordId !== current.wordId);
+  session.lastWordId = current.wordId;
+  session.retry = (session.retry || []).filter((x) => x.wordId !== current.wordId);
+  if (current.source === 'buffer') { session.current = null; return; }
   if (state) {
     const events = eventsOnDay(state, current.wordId, session.date, session.mode);
     const reinforce = reinforcementState(events);
-    if (!reinforce.passed) {
+    session.completedIds = (session.completedIds || []).filter((id) => id !== current.wordId);
+    if (reinforce.passed) {
+      if (!session.completedIds.includes(current.wordId)) session.completedIds.push(current.wordId);
+    } else {
       session.retry.push({
-        wordId: current.wordId,
-        attempt: events.length,
-        eligibleAt: Number(reinforce.last?.ts || Date.now()) + reinforcementDelayMs(events),
-        addedAt: reinforce.last?.ts || Date.now(),
+        wordId:current.wordId,
+        attempt:events.length,
+        eligibleTurn:session.turn + reinforcementGapWords(events),
+        addedTurn:session.turn,
       });
     }
-  } else if (result === 'bad') {
-    session.retry.push({ wordId: current.wordId, attempt: current.attempt, eligibleAt: Date.now() + 30_000, addedAt: Date.now() });
   }
   session.current = null;
 }
@@ -460,16 +495,13 @@ export function finishCurrent(session, result, state = null) {
 export function resyncRetryForWord(session, state, wordId, date = session?.date, mode = session?.mode || 'listen') {
   if (!session || !wordId) return;
   session.retry = (session.retry || []).filter((x) => x.wordId !== wordId);
+  session.completedIds = (session.completedIds || []).filter((id) => id !== wordId);
   if (session.current?.wordId === wordId || (session.pendingBase || []).includes(wordId)) return;
   const events = eventsOnDay(state, wordId, date, mode);
   const reinforce = reinforcementState(events);
-  if (!reinforce.started || reinforce.passed) return;
-  session.retry.push({
-    wordId,
-    attempt: events.length,
-    eligibleAt: Number(reinforce.last?.ts || 0) + reinforcementDelayMs(events),
-    addedAt: reinforce.last?.ts || 0,
-  });
+  if (!reinforce.started) return;
+  if (reinforce.passed) { session.completedIds.push(wordId); return; }
+  session.retry.push({ wordId, attempt:events.length, eligibleTurn:session.turn + reinforcementGapWords(events), addedTurn:session.turn });
 }
 
 export function sessionProgress(state, plan, session) {

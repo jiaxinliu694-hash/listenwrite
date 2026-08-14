@@ -4,7 +4,7 @@ function unique(values) {
 
 export function updateWordFields(word, patch = {}) {
   if (!word) return null;
-  if ('zh' in patch) word.zh = String(patch.zh || '').trim();
+  if ('zh' in patch) { word.zh = String(patch.zh || '').trim(); if (word.zh) word.needsMeaning = false; }
   if ('pos' in patch) word.pos = String(patch.pos || '').trim();
   if ('def' in patch) word.def = String(patch.def || '').trim();
   if ('sources' in patch) word.sources = unique(patch.sources);
