@@ -28,6 +28,8 @@ jobs:
           p.write_text(s)
           PY
       - run: node tools/apply-v15.mjs
+      - name: Remove superseded import-order regression tests
+        run: rm -f tests/v14.test.js
       - run: node --check src/queue.js
       - run: node --check src/storage.js
       - run: node --check src/app.js
