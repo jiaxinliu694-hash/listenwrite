@@ -42,9 +42,18 @@ function reviewCandidates(state, pool, assigned, date) {
 }
 
 function freshCandidates(state, pool, assigned, date) {
-  return pool
-    .filter((w) => !assigned.has(w.id) && !hasEventBefore(state, w.id, date))
-    .sort((a, b) => (b.sources?.length || 0) - (a.sources?.length || 0) || a.en.localeCompare(b.en));
+  // state.words preserves the order in which a word first entered the library.
+  // For new words, respect that source/import order instead of alphabetizing.
+  return pool.filter((w) => !assigned.has(w.id) && !hasEventBefore(state, w.id, date));
+}
+
+function restoreUntouchedNewOrder(state, ids, date) {
+  const wordOrder = new Map(state.words.map((w, index) => [w.id, index]));
+  const attempted = ids.filter((id) => listenedToday(state, id, date));
+  const untouched = ids
+    .filter((id) => !listenedToday(state, id, date))
+    .sort((a, b) => (wordOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (wordOrder.get(b) ?? Number.MAX_SAFE_INTEGER));
+  return [...attempted, ...untouched];
 }
 
 function seedTodayFromListenHistory(state, plan) {
@@ -124,6 +133,7 @@ export function ensureDailyPlan(state, options = {}) {
   else plan.newTarget = Math.max(minNew, Number(plan.newTarget) || 0);
   if (options.reviewTarget != null) plan.reviewTarget = Math.max(minReview, Math.max(0, Number(options.reviewTarget) || 0));
   else plan.reviewTarget = Math.max(minReview, Number(plan.reviewTarget) || 0);
+  plan.newIds = restoreUntouchedNewOrder(state, plan.newIds, plan.date);
   plan.newIds = trimIdsToTarget(state, plan.newIds, plan.date, plan.newTarget);
   plan.reviewIds = trimIdsToTarget(state, plan.reviewIds, plan.date, plan.reviewTarget);
   fillDailyPlan(state, plan);
@@ -180,6 +190,7 @@ export function fillSequentialPlan(state, plan) {
     const minReview = attemptedCount(state, segment.reviewIds, plan.date);
     segment.newTarget = Math.max(minNew, Math.max(0, Number(segment.newTarget) || 0));
     segment.reviewTarget = Math.max(minReview, Math.max(0, Number(segment.reviewTarget) || 0));
+    segment.newIds = restoreUntouchedNewOrder(state, segment.newIds, plan.date);
     segment.newIds = trimIdsToTarget(state, segment.newIds, plan.date, segment.newTarget);
     segment.reviewIds = trimIdsToTarget(state, segment.reviewIds, plan.date, segment.reviewTarget);
     segment.newIds.forEach((id) => assigned.add(id));
