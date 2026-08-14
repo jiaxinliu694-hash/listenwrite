@@ -3450,6 +3450,37 @@ function deleteWordEverywhere(state2, wordId) {
   }
   return true;
 }
+function deleteWordbook(state2, book, { purgeExclusive = false } = {}) {
+  const name = String(book || "").trim();
+  if (!name) return { affected: 0, removedWords: 0, sharedWords: 0 };
+  const matched = state2.words.filter((w) => (w.sources || []).includes(name));
+  let removedWords = 0;
+  let sharedWords = 0;
+  for (const word of [...matched]) {
+    const otherSources = (word.sources || []).filter((source) => source !== name);
+    if (purgeExclusive && otherSources.length === 0) {
+      deleteWordEverywhere(state2, word.id);
+      removedWords += 1;
+    } else {
+      word.sources = otherSources;
+      if (otherSources.length) sharedWords += 1;
+    }
+  }
+  state2.settings = state2.settings || {};
+  state2.settings.todayBooks = (state2.settings.todayBooks || []).filter((x) => x !== name);
+  state2.settings.typeBooks = (state2.settings.typeBooks || []).filter((x) => x !== name);
+  if (state2.settings.freeListenProgress && typeof state2.settings.freeListenProgress === "object") delete state2.settings.freeListenProgress[name];
+  state2.errorBooks = (state2.errorBooks || []).filter((x) => x !== name);
+  for (const plan of Object.values(state2.dailyPlans || {})) {
+    plan.books = (plan.books || []).filter((x) => x !== name);
+    if (plan.mode === "sequential") {
+      plan.bookSegments = (plan.bookSegments || []).filter((segment) => segment.book !== name);
+      plan.newIds = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.newIds || []))];
+      plan.reviewIds = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.reviewIds || []))];
+    }
+  }
+  return { affected: matched.length, removedWords, sharedWords };
+}
 
 // src/usepolish.js
 function freeListenCandidates(state2, book, { scope = "all", limit = 0 } = {}) {
@@ -4923,9 +4954,38 @@ function bindFreeListenSetup() {
   draw();
   document.getElementById("startFreeListen").onclick = () => startFreeListen(select.value, { scope: document.getElementById("freeListenScope").value, limit: Number(document.getElementById("freeListenLimit").value) || 0, resume: document.getElementById("freeListenResume").checked });
 }
+function wordbookManageHtml(books) {
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u8BCD\u4E66\u7BA1\u7406</h2><div class="small">\u5220\u9664\u8BCD\u4E66\u65F6\u53EF\u4EE5\u53EA\u79FB\u9664\u8BCD\u4E66\u5F52\u5C5E\uFF0C\u4E5F\u53EF\u4EE5\u540C\u65F6\u5F7B\u5E95\u5220\u9664\u53EA\u5C5E\u4E8E\u8FD9\u672C\u4E66\u7684\u5355\u8BCD\u548C\u5B66\u4E60\u8BB0\u5F55\uFF1B\u5171\u4EAB\u8BCD\u4E0D\u4F1A\u8BEF\u5220\u3002</div></div></div><div class="error-compact" style="margin-top:10px">${books.map((book) => {
+    const words = state.words.filter((w) => (w.sources || []).includes(book));
+    const exclusive = words.filter((w) => (w.sources || []).length === 1).length;
+    const shared = words.length - exclusive;
+    return `<div class="error-row"><span><b>${esc(book)}</b><div class="small">${words.length} \u8BCD \xB7 \u72EC\u5360 ${exclusive} \xB7 \u5171\u4EAB ${shared}</div></span><span></span><button class="danger" data-delete-book="${esc(book)}">\u5220\u9664\u8BCD\u4E66</button></div>`;
+  }).join("") || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section>`;
+}
+function bindWordbookManage() {
+  document.querySelectorAll("[data-delete-book]").forEach((button) => button.onclick = () => {
+    const book = button.dataset.deleteBook;
+    const words = state.words.filter((w) => (w.sources || []).includes(book));
+    const exclusive = words.filter((w) => (w.sources || []).length === 1).length;
+    const shared = words.length - exclusive;
+    const purge = confirm(`\u5220\u9664\u8BCD\u4E66\u300C${book}\u300D\uFF1F
+
+\u786E\u5B9A\uFF1A\u5220\u9664\u8BCD\u4E66\uFF0C\u5E76\u5F7B\u5E95\u5220\u9664\u5176\u4E2D ${exclusive} \u4E2A\u72EC\u5360\u5355\u8BCD\u53CA\u5176\u5B66\u4E60\u8BB0\u5F55\u3002
+\u53D6\u6D88\uFF1A\u4E0B\u4E00\u6B65\u53EF\u9009\u62E9\u4EC5\u79FB\u9664\u8BCD\u4E66\u5E76\u4FDD\u7559\u5168\u90E8\u5B66\u4E60\u6570\u636E\u3002
+
+\u5171\u4EAB\u8BCD ${shared} \u4E2A\u53EA\u4F1A\u79FB\u9664\u8FD9\u672C\u4E66\u7684\u5F52\u5C5E\uFF0C\u4E0D\u4F1A\u5220\u9664\u5176\u4ED6\u8BCD\u4E66\u4E2D\u7684\u5355\u8BCD\u548C\u5386\u53F2\u3002`);
+    if (!purge) {
+      if (!confirm(`\u4EC5\u79FB\u9664\u8BCD\u4E66\u300C${book}\u300D\uFF0C\u4FDD\u7559\u5355\u8BCD\u548C\u5168\u90E8\u5B66\u4E60\u6570\u636E\uFF1F`)) return;
+    }
+    const result = deleteWordbook(state, book, { purgeExclusive: purge });
+    persist();
+    toast(purge ? `\u5DF2\u5220\u9664\u8BCD\u4E66\uFF1A\u5F7B\u5E95\u5220\u9664 ${result.removedWords} \u4E2A\u72EC\u5360\u8BCD` : "\u5DF2\u79FB\u9664\u8BCD\u4E66\uFF0C\u5B66\u4E60\u6570\u636E\u5DF2\u4FDD\u7559");
+    renderLibrary();
+  });
+}
 function renderLibrary() {
   const books = allBooks(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${freeListenSetupHtml(books)}${errorBookSectionHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${wordbookManageHtml(books)}${freeListenSetupHtml(books)}${errorBookSectionHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("importWords").onclick = () => importInput.click();
   document.getElementById("backupWords").onclick = backup;
   document.getElementById("restoreWords").onclick = () => restoreInput.click();
@@ -4947,6 +5007,7 @@ function renderLibrary() {
     state.settings.speechRate = Math.min(1.5, Math.max(0.5, Number(e.target.value) || 0.92));
     persist();
   };
+  bindWordbookManage();
   bindFreeListenSetup();
   drawWordList();
   bindWordEditor();

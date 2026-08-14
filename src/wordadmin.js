@@ -39,3 +39,35 @@ export function replaceWordSources(word, sources) {
   word.sources = unique(sources);
   return word.sources;
 }
+
+export function deleteWordbook(state, book, { purgeExclusive = false } = {}) {
+  const name = String(book || '').trim();
+  if (!name) return { affected: 0, removedWords: 0, sharedWords: 0 };
+  const matched = state.words.filter((w) => (w.sources || []).includes(name));
+  let removedWords = 0;
+  let sharedWords = 0;
+  for (const word of [...matched]) {
+    const otherSources = (word.sources || []).filter((source) => source !== name);
+    if (purgeExclusive && otherSources.length === 0) {
+      deleteWordEverywhere(state, word.id);
+      removedWords += 1;
+    } else {
+      word.sources = otherSources;
+      if (otherSources.length) sharedWords += 1;
+    }
+  }
+  state.settings = state.settings || {};
+  state.settings.todayBooks = (state.settings.todayBooks || []).filter((x) => x !== name);
+  state.settings.typeBooks = (state.settings.typeBooks || []).filter((x) => x !== name);
+  if (state.settings.freeListenProgress && typeof state.settings.freeListenProgress === 'object') delete state.settings.freeListenProgress[name];
+  state.errorBooks = (state.errorBooks || []).filter((x) => x !== name);
+  for (const plan of Object.values(state.dailyPlans || {})) {
+    plan.books = (plan.books || []).filter((x) => x !== name);
+    if (plan.mode === 'sequential') {
+      plan.bookSegments = (plan.bookSegments || []).filter((segment) => segment.book !== name);
+      plan.newIds = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.newIds || []))];
+      plan.reviewIds = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.reviewIds || []))];
+    }
+  }
+  return { affected: matched.length, removedWords, sharedWords };
+}
