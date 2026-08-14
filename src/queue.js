@@ -28,12 +28,48 @@ function attemptedCount(state, ids, date) {
   return ids.filter((id) => listenedToday(state, id, date)).length;
 }
 
-function reviewCandidates(state, pool, assigned, date) {
+function reviewHinted(word) {
+  return Boolean(word?.reviewHint) || (word?.sources || []).some((source) => /错题|错词|error/i.test(source));
+}
+
+function reviewKnown(state, word, date) {
+  return Boolean(word) && (hasEventBefore(state, word.id, date) || reviewHinted(word));
+}
+
+function hash32(value) {
+  let h = 2166136261;
+  for (const ch of String(value || '')) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function drawSeed(date, books = [], nonce = 0) {
+  const scope = books.length ? [...books].sort().join('|') : '__all__';
+  return `${date}|${scope}|${Number(nonce) || 0}`;
+}
+
+function randomRank(wordId, seed) {
+  return hash32(`${seed}|${wordId}`);
+}
+
+function reviewCandidates(state, pool, assigned, date, books = [], nonce = 0) {
   const cutoff = studyDayEnd(date);
   const now = Date.now();
+  const seed = drawSeed(date, books, nonce);
   return pool
-    .filter((w) => !assigned.has(w.id) && hasEventBefore(state, w.id, date) && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff)
+    .filter((w) => {
+      if (assigned.has(w.id)) return false;
+      const formal = hasEventBefore(state, w.id, date);
+      const hinted = !formal && reviewHinted(w);
+      return hinted || (formal && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff);
+    })
     .sort((a, b) => {
+      const ah = !hasEventBefore(state, a.id, date) && reviewHinted(a);
+      const bh = !hasEventBefore(state, b.id, date) && reviewHinted(b);
+      if (ah !== bh) return ah ? -1 : 1;
+      if (ah && bh) return randomRank(a.id, seed) - randomRank(b.id, seed);
       const ra = retrievability(a.card, now, state.settings.retention);
       const rb = retrievability(b.card, now, state.settings.retention);
       if (ra !== rb) return ra - rb;
@@ -41,18 +77,19 @@ function reviewCandidates(state, pool, assigned, date) {
     });
 }
 
-function freshCandidates(state, pool, assigned, date) {
-  // state.words preserves the order in which a word first entered the library.
-  // For new words, respect that source/import order instead of alphabetizing.
-  return pool.filter((w) => !assigned.has(w.id) && !hasEventBefore(state, w.id, date));
+function freshCandidates(state, pool, assigned, date, books = [], nonce = 0) {
+  const seed = drawSeed(date, books, nonce);
+  return pool
+    .filter((w) => !assigned.has(w.id) && !reviewKnown(state, w, date))
+    .sort((a, b) => randomRank(a.id, seed) - randomRank(b.id, seed));
 }
 
-function restoreUntouchedNewOrder(state, ids, date) {
-  const wordOrder = new Map(state.words.map((w, index) => [w.id, index]));
+function restoreUntouchedNewRandomOrder(state, ids, date, books = [], nonce = 0) {
+  const seed = drawSeed(date, books, nonce);
   const attempted = ids.filter((id) => listenedToday(state, id, date));
   const untouched = ids
     .filter((id) => !listenedToday(state, id, date))
-    .sort((a, b) => (wordOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (wordOrder.get(b) ?? Number.MAX_SAFE_INTEGER));
+    .sort((a, b) => randomRank(a, seed) - randomRank(b, seed));
   return [...attempted, ...untouched];
 }
 
@@ -62,18 +99,39 @@ function seedTodayFromListenHistory(state, plan) {
   const listenedIds = [...new Set(state.events.filter((e) => e.date === plan.date && e.mode === 'listen').map((e) => e.wordId))];
   for (const id of listenedIds) {
     if (seen.has(id)) continue;
-    if (hasEventBefore(state, id, plan.date)) plan.reviewIds.push(id);
+    const word = state.words.find((w) => w.id === id);
+    if (!word || !matchesBooks(word, plan.books)) continue;
+    if (reviewKnown(state, word, plan.date)) plan.reviewIds.push(id);
     else plan.newIds.push(id);
     seen.add(id);
   }
 }
 
+function moveHintedNewWordsToReview(state, plan) {
+  const moved = [];
+  plan.newIds = plan.newIds.filter((id) => {
+    const word = state.words.find((w) => w.id === id);
+    if (!word || !reviewHinted(word)) return true;
+    moved.push(id);
+    return false;
+  });
+  for (const id of moved) if (!plan.reviewIds.includes(id)) plan.reviewIds.push(id);
+  if (moved.length) plan.reviewTarget = Math.max(Number(plan.reviewTarget) || 0, plan.reviewIds.length);
+}
+
 function reconcileScope(state, plan, books) {
   if (sameBooks(plan.books, books)) return;
-  const keep = (id) => listenedToday(state, id, plan.date) || matchesBooks(state.words.find((w) => w.id === id) || {}, books);
-  plan.newIds = plan.newIds.filter(keep);
-  plan.reviewIds = plan.reviewIds.filter(keep);
+  // Changing today's book scope redraws untouched tasks. Events/history stay intact.
+  // Touched words are kept only when they still belong to the newly selected scope.
+  const keepTouchedInScope = (id) => {
+    const word = state.words.find((w) => w.id === id);
+    return Boolean(word) && listenedToday(state, id, plan.date) && matchesBooks(word, books);
+  };
+  plan.newIds = plan.newIds.filter(keepTouchedInScope);
+  plan.reviewIds = plan.reviewIds.filter(keepTouchedInScope);
+  plan.resumeWordId = keepTouchedInScope(plan.resumeWordId) ? plan.resumeWordId : null;
   plan.books = [...books];
+  plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
 }
 
 function trimIdsToTarget(state, ids, date, target) {
@@ -111,6 +169,7 @@ export function ensureDailyPlan(state, options = {}) {
       reviewIds: [],
       bookSegments: [],
       resumeWordId: null,
+      drawNonce: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -127,13 +186,14 @@ export function ensureDailyPlan(state, options = {}) {
 
   if (Object.prototype.hasOwnProperty.call(options, 'books')) reconcileScope(state, plan, options.books || []);
   seedTodayFromListenHistory(state, plan);
+  moveHintedNewWordsToReview(state, plan);
   const minNew = attemptedCount(state, plan.newIds, plan.date);
   const minReview = attemptedCount(state, plan.reviewIds, plan.date);
   if (options.newTarget != null) plan.newTarget = Math.max(minNew, Math.max(0, Number(options.newTarget) || 0));
   else plan.newTarget = Math.max(minNew, Number(plan.newTarget) || 0);
   if (options.reviewTarget != null) plan.reviewTarget = Math.max(minReview, Math.max(0, Number(options.reviewTarget) || 0));
   else plan.reviewTarget = Math.max(minReview, Number(plan.reviewTarget) || 0);
-  plan.newIds = restoreUntouchedNewOrder(state, plan.newIds, plan.date);
+  plan.newIds = restoreUntouchedNewRandomOrder(state, plan.newIds, plan.date, plan.books, plan.drawNonce);
   plan.newIds = trimIdsToTarget(state, plan.newIds, plan.date, plan.newTarget);
   plan.reviewIds = trimIdsToTarget(state, plan.reviewIds, plan.date, plan.reviewTarget);
   fillDailyPlan(state, plan);
@@ -145,8 +205,8 @@ export function fillDailyPlan(state, plan) {
   if (plan.mode === 'sequential') return fillSequentialPlan(state, plan);
   const assigned = new Set([...plan.newIds, ...plan.reviewIds]);
   const pool = state.words.filter((w) => !w.retired && matchesBooks(w, plan.books));
-  const review = reviewCandidates(state, pool, assigned, plan.date);
-  const fresh = freshCandidates(state, pool, assigned, plan.date);
+  const review = reviewCandidates(state, pool, assigned, plan.date, plan.books, plan.drawNonce);
+  const fresh = freshCandidates(state, pool, assigned, plan.date, plan.books, plan.drawNonce);
   const needReview = Math.max(0, plan.reviewTarget - plan.reviewIds.length);
   const needNew = Math.max(0, plan.newTarget - plan.newIds.length);
   for (const w of review.slice(0, needReview)) { plan.reviewIds.push(w.id); assigned.add(w.id); }
@@ -190,18 +250,18 @@ export function fillSequentialPlan(state, plan) {
     const minReview = attemptedCount(state, segment.reviewIds, plan.date);
     segment.newTarget = Math.max(minNew, Math.max(0, Number(segment.newTarget) || 0));
     segment.reviewTarget = Math.max(minReview, Math.max(0, Number(segment.reviewTarget) || 0));
-    segment.newIds = restoreUntouchedNewOrder(state, segment.newIds, plan.date);
+    segment.newIds = restoreUntouchedNewRandomOrder(state, segment.newIds, plan.date, [segment.book], plan.drawNonce);
     segment.newIds = trimIdsToTarget(state, segment.newIds, plan.date, segment.newTarget);
     segment.reviewIds = trimIdsToTarget(state, segment.reviewIds, plan.date, segment.reviewTarget);
     segment.newIds.forEach((id) => assigned.add(id));
     segment.reviewIds.forEach((id) => assigned.add(id));
 
-    const review = reviewCandidates(state, pool, assigned, plan.date);
+    const review = reviewCandidates(state, pool, assigned, plan.date, [segment.book], plan.drawNonce);
     for (const w of review.slice(0, Math.max(0, segment.reviewTarget - segment.reviewIds.length))) {
       segment.reviewIds.push(w.id);
       assigned.add(w.id);
     }
-    const fresh = freshCandidates(state, pool, assigned, plan.date);
+    const fresh = freshCandidates(state, pool, assigned, plan.date, [segment.book], plan.drawNonce);
     for (const w of fresh.slice(0, Math.max(0, segment.newTarget - segment.newIds.length))) {
       segment.newIds.push(w.id);
       assigned.add(w.id);
@@ -216,6 +276,7 @@ export function convertPlanToMixed(state, plan, books = []) {
   const attemptedReview = plan.reviewIds.filter((id) => listenedToday(state, id, plan.date));
   plan.mode = 'mixed';
   plan.bookSegments = [];
+  plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
   plan.books = [...books];
   plan.newTarget = Math.max(attemptedNew.length, Number(state.settings.defaultNewTarget) || 0);
   plan.reviewTarget = Math.max(attemptedReview.length, Number(state.settings.defaultReviewTarget) || 0);
@@ -275,7 +336,8 @@ export function todayListeningStats(state, books = [], date = activeStudyDayKey(
   const ids = [...new Set(events.map((e) => e.wordId))];
   let newCount = 0, reviewCount = 0, firstGood = 0, firstBad = 0;
   for (const id of ids) {
-    if (hasEventBefore(state, id, date)) reviewCount++;
+    const word = state.words.find((w) => w.id === id);
+    if (reviewKnown(state, word, date)) reviewCount++;
     else newCount++;
     const first = eventsOnDay(state, id, date, 'listen')[0];
     if (first?.result === 'good') firstGood++;

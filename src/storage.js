@@ -96,6 +96,7 @@ function normalizeWord(word, index) {
     sources: Array.isArray(word.sources) ? [...new Set(word.sources)] : Array.isArray(word.src) ? [...new Set(word.src)] : [],
     examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [],
     retired: Boolean(word.retired ?? word.ret),
+    reviewHint: Boolean(word.reviewHint ?? word.priorExposure),
     card: word.card || null,
   };
 }
@@ -141,6 +142,7 @@ function normalizePlan(plan, key) {
     reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [],
     bookSegments: segments,
     resumeWordId: plan.resumeWordId || null,
+    drawNonce: Math.max(0, Number(plan.drawNonce) || 0),
     createdAt: Number(plan.createdAt) || Date.now(),
     updatedAt: Number(plan.updatedAt) || Date.now(),
   };

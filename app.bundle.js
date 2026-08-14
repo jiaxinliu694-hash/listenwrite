@@ -2538,6 +2538,7 @@ function normalizeWord(word, index) {
     sources: Array.isArray(word.sources) ? [...new Set(word.sources)] : Array.isArray(word.src) ? [...new Set(word.src)] : [],
     examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [],
     retired: Boolean(word.retired ?? word.ret),
+    reviewHint: Boolean(word.reviewHint ?? word.priorExposure),
     card: word.card || null
   };
 }
@@ -2580,6 +2581,7 @@ function normalizePlan(plan, key) {
     reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [],
     bookSegments: segments,
     resumeWordId: plan.resumeWordId || null,
+    drawNonce: Math.max(0, Number(plan.drawNonce) || 0),
     createdAt: Number(plan.createdAt) || Date.now(),
     updatedAt: Number(plan.updatedAt) || Date.now()
   };
@@ -2809,23 +2811,55 @@ function listenedToday(state2, id3, date) {
 function attemptedCount(state2, ids, date) {
   return ids.filter((id3) => listenedToday(state2, id3, date)).length;
 }
-function reviewCandidates(state2, pool, assigned, date) {
+function reviewHinted(word) {
+  return Boolean(word?.reviewHint) || (word?.sources || []).some((source) => /错题|错词|error/i.test(source));
+}
+function reviewKnown(state2, word, date) {
+  return Boolean(word) && (hasEventBefore(state2, word.id, date) || reviewHinted(word));
+}
+function hash32(value) {
+  let h = 2166136261;
+  for (const ch of String(value || "")) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function drawSeed(date, books = [], nonce = 0) {
+  const scope = books.length ? [...books].sort().join("|") : "__all__";
+  return `${date}|${scope}|${Number(nonce) || 0}`;
+}
+function randomRank(wordId, seed) {
+  return hash32(`${seed}|${wordId}`);
+}
+function reviewCandidates(state2, pool, assigned, date, books = [], nonce = 0) {
   const cutoff = studyDayEnd(date);
   const now = Date.now();
-  return pool.filter((w) => !assigned.has(w.id) && hasEventBefore(state2, w.id, date) && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff).sort((a, b) => {
+  const seed = drawSeed(date, books, nonce);
+  return pool.filter((w) => {
+    if (assigned.has(w.id)) return false;
+    const formal = hasEventBefore(state2, w.id, date);
+    const hinted = !formal && reviewHinted(w);
+    return hinted || formal && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff;
+  }).sort((a, b) => {
+    const ah = !hasEventBefore(state2, a.id, date) && reviewHinted(a);
+    const bh = !hasEventBefore(state2, b.id, date) && reviewHinted(b);
+    if (ah !== bh) return ah ? -1 : 1;
+    if (ah && bh) return randomRank(a.id, seed) - randomRank(b.id, seed);
     const ra = retrievability(a.card, now, state2.settings.retention);
     const rb = retrievability(b.card, now, state2.settings.retention);
     if (ra !== rb) return ra - rb;
     return Number(a.card?.due || 0) - Number(b.card?.due || 0);
   });
 }
-function freshCandidates(state2, pool, assigned, date) {
-  return pool.filter((w) => !assigned.has(w.id) && !hasEventBefore(state2, w.id, date));
+function freshCandidates(state2, pool, assigned, date, books = [], nonce = 0) {
+  const seed = drawSeed(date, books, nonce);
+  return pool.filter((w) => !assigned.has(w.id) && !reviewKnown(state2, w, date)).sort((a, b) => randomRank(a.id, seed) - randomRank(b.id, seed));
 }
-function restoreUntouchedNewOrder(state2, ids, date) {
-  const wordOrder = new Map(state2.words.map((w, index) => [w.id, index]));
+function restoreUntouchedNewRandomOrder(state2, ids, date, books = [], nonce = 0) {
+  const seed = drawSeed(date, books, nonce);
   const attempted = ids.filter((id3) => listenedToday(state2, id3, date));
-  const untouched = ids.filter((id3) => !listenedToday(state2, id3, date)).sort((a, b) => (wordOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (wordOrder.get(b) ?? Number.MAX_SAFE_INTEGER));
+  const untouched = ids.filter((id3) => !listenedToday(state2, id3, date)).sort((a, b) => randomRank(a, seed) - randomRank(b, seed));
   return [...attempted, ...untouched];
 }
 function seedTodayFromListenHistory(state2, plan) {
@@ -2834,17 +2868,35 @@ function seedTodayFromListenHistory(state2, plan) {
   const listenedIds = [...new Set(state2.events.filter((e) => e.date === plan.date && e.mode === "listen").map((e) => e.wordId))];
   for (const id3 of listenedIds) {
     if (seen.has(id3)) continue;
-    if (hasEventBefore(state2, id3, plan.date)) plan.reviewIds.push(id3);
+    const word = state2.words.find((w) => w.id === id3);
+    if (!word || !matchesBooks(word, plan.books)) continue;
+    if (reviewKnown(state2, word, plan.date)) plan.reviewIds.push(id3);
     else plan.newIds.push(id3);
     seen.add(id3);
   }
 }
+function moveHintedNewWordsToReview(state2, plan) {
+  const moved = [];
+  plan.newIds = plan.newIds.filter((id3) => {
+    const word = state2.words.find((w) => w.id === id3);
+    if (!word || !reviewHinted(word)) return true;
+    moved.push(id3);
+    return false;
+  });
+  for (const id3 of moved) if (!plan.reviewIds.includes(id3)) plan.reviewIds.push(id3);
+  if (moved.length) plan.reviewTarget = Math.max(Number(plan.reviewTarget) || 0, plan.reviewIds.length);
+}
 function reconcileScope(state2, plan, books) {
   if (sameBooks(plan.books, books)) return;
-  const keep = (id3) => listenedToday(state2, id3, plan.date) || matchesBooks(state2.words.find((w) => w.id === id3) || {}, books);
-  plan.newIds = plan.newIds.filter(keep);
-  plan.reviewIds = plan.reviewIds.filter(keep);
+  const keepTouchedInScope = (id3) => {
+    const word = state2.words.find((w) => w.id === id3);
+    return Boolean(word) && listenedToday(state2, id3, plan.date) && matchesBooks(word, books);
+  };
+  plan.newIds = plan.newIds.filter(keepTouchedInScope);
+  plan.reviewIds = plan.reviewIds.filter(keepTouchedInScope);
+  plan.resumeWordId = keepTouchedInScope(plan.resumeWordId) ? plan.resumeWordId : null;
   plan.books = [...books];
+  plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
 }
 function trimIdsToTarget(state2, ids, date, target) {
   const attempted = ids.filter((id3) => listenedToday(state2, id3, date));
@@ -2879,6 +2931,7 @@ function ensureDailyPlan(state2, options = {}) {
       reviewIds: [],
       bookSegments: [],
       resumeWordId: null,
+      drawNonce: 0,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -2893,13 +2946,14 @@ function ensureDailyPlan(state2, options = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(options, "books")) reconcileScope(state2, plan, options.books || []);
   seedTodayFromListenHistory(state2, plan);
+  moveHintedNewWordsToReview(state2, plan);
   const minNew = attemptedCount(state2, plan.newIds, plan.date);
   const minReview = attemptedCount(state2, plan.reviewIds, plan.date);
   if (options.newTarget != null) plan.newTarget = Math.max(minNew, Math.max(0, Number(options.newTarget) || 0));
   else plan.newTarget = Math.max(minNew, Number(plan.newTarget) || 0);
   if (options.reviewTarget != null) plan.reviewTarget = Math.max(minReview, Math.max(0, Number(options.reviewTarget) || 0));
   else plan.reviewTarget = Math.max(minReview, Number(plan.reviewTarget) || 0);
-  plan.newIds = restoreUntouchedNewOrder(state2, plan.newIds, plan.date);
+  plan.newIds = restoreUntouchedNewRandomOrder(state2, plan.newIds, plan.date, plan.books, plan.drawNonce);
   plan.newIds = trimIdsToTarget(state2, plan.newIds, plan.date, plan.newTarget);
   plan.reviewIds = trimIdsToTarget(state2, plan.reviewIds, plan.date, plan.reviewTarget);
   fillDailyPlan(state2, plan);
@@ -2910,8 +2964,8 @@ function fillDailyPlan(state2, plan) {
   if (plan.mode === "sequential") return fillSequentialPlan(state2, plan);
   const assigned = /* @__PURE__ */ new Set([...plan.newIds, ...plan.reviewIds]);
   const pool = state2.words.filter((w) => !w.retired && matchesBooks(w, plan.books));
-  const review = reviewCandidates(state2, pool, assigned, plan.date);
-  const fresh = freshCandidates(state2, pool, assigned, plan.date);
+  const review = reviewCandidates(state2, pool, assigned, plan.date, plan.books, plan.drawNonce);
+  const fresh = freshCandidates(state2, pool, assigned, plan.date, plan.books, plan.drawNonce);
   const needReview = Math.max(0, plan.reviewTarget - plan.reviewIds.length);
   const needNew = Math.max(0, plan.newTarget - plan.newIds.length);
   for (const w of review.slice(0, needReview)) {
@@ -2958,17 +3012,17 @@ function fillSequentialPlan(state2, plan) {
     const minReview = attemptedCount(state2, segment.reviewIds, plan.date);
     segment.newTarget = Math.max(minNew, Math.max(0, Number(segment.newTarget) || 0));
     segment.reviewTarget = Math.max(minReview, Math.max(0, Number(segment.reviewTarget) || 0));
-    segment.newIds = restoreUntouchedNewOrder(state2, segment.newIds, plan.date);
+    segment.newIds = restoreUntouchedNewRandomOrder(state2, segment.newIds, plan.date, [segment.book], plan.drawNonce);
     segment.newIds = trimIdsToTarget(state2, segment.newIds, plan.date, segment.newTarget);
     segment.reviewIds = trimIdsToTarget(state2, segment.reviewIds, plan.date, segment.reviewTarget);
     segment.newIds.forEach((id3) => assigned.add(id3));
     segment.reviewIds.forEach((id3) => assigned.add(id3));
-    const review = reviewCandidates(state2, pool, assigned, plan.date);
+    const review = reviewCandidates(state2, pool, assigned, plan.date, [segment.book], plan.drawNonce);
     for (const w of review.slice(0, Math.max(0, segment.reviewTarget - segment.reviewIds.length))) {
       segment.reviewIds.push(w.id);
       assigned.add(w.id);
     }
-    const fresh = freshCandidates(state2, pool, assigned, plan.date);
+    const fresh = freshCandidates(state2, pool, assigned, plan.date, [segment.book], plan.drawNonce);
     for (const w of fresh.slice(0, Math.max(0, segment.newTarget - segment.newIds.length))) {
       segment.newIds.push(w.id);
       assigned.add(w.id);
@@ -2982,6 +3036,7 @@ function convertPlanToMixed(state2, plan, books = []) {
   const attemptedReview = plan.reviewIds.filter((id3) => listenedToday(state2, id3, plan.date));
   plan.mode = "mixed";
   plan.bookSegments = [];
+  plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
   plan.books = [...books];
   plan.newTarget = Math.max(attemptedNew.length, Number(state2.settings.defaultNewTarget) || 0);
   plan.reviewTarget = Math.max(attemptedReview.length, Number(state2.settings.defaultReviewTarget) || 0);
@@ -3046,7 +3101,8 @@ function todayListeningStats(state2, books = [], date = activeStudyDayKey(state2
   const ids = [...new Set(events.map((e) => e.wordId))];
   let newCount = 0, reviewCount = 0, firstGood = 0, firstBad = 0;
   for (const id3 of ids) {
-    if (hasEventBefore(state2, id3, date)) reviewCount++;
+    const word = state2.words.find((w) => w.id === id3);
+    if (reviewKnown(state2, word, date)) reviewCount++;
     else newCount++;
     const first = eventsOnDay(state2, id3, date, "listen")[0];
     if (first?.result === "good") firstGood++;
@@ -4401,7 +4457,7 @@ function importSentenceProblems(tokens, targetName, sentence) {
       zh = String(window.prompt?.(`\u7ED9 ${en} \u8865\u4E00\u4E2A\u4E2D\u6587\u6838\u5FC3\u4E49\uFF08\u53EF\u7559\u7A7A\uFF0C\u4E4B\u540E\u53EF\u5728\u8BCD\u5E93\u7F16\u8F91\uFF09`, "") || "").trim();
       if (!zh) missing++;
     }
-    upsertWord({ en, zh, source: target, example: token.sentence || sentence });
+    upsertWord({ en, zh, source: target, example: token.sentence || sentence, reviewHint: true });
   }
   persist();
   toast(`\u5DF2\u628A ${tokens.length} \u4E2A\u8BCD\u52A0\u5165\u300C${target}\u300D${missing ? ` \xB7 ${missing} \u4E2A\u5F85\u8865\u91CA\u4E49` : ""}`);
@@ -4577,14 +4633,15 @@ function addWordFromText(source, sentence) {
   document.getElementById("textZh").value = "";
   toast(`\u5DF2\u52A0\u5165 ${en}`);
 }
-function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = "", overwrite = false }) {
+function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = "", overwrite = false, reviewHint = false }) {
   en = String(en || "").trim().toLowerCase();
   if (!en) return null;
   let w = state.words.find((x) => x.en === en);
   if (!w) {
-    w = { id: uid("w"), en, zh, pos, def, sources: [], examples: [], retired: isSimpleLexeme(state, en), card: null };
+    w = { id: uid("w"), en, zh, pos, def, sources: [], examples: [], retired: isSimpleLexeme(state, en), reviewHint: Boolean(reviewHint), card: null };
     state.words.push(w);
   }
+  if (reviewHint) w.reviewHint = true;
   if (isSimpleLexeme(state, en)) w.retired = true;
   if (zh && (overwrite || !w.zh)) w.zh = zh;
   if (pos && (overwrite || !w.pos)) w.pos = pos;
@@ -4735,19 +4792,30 @@ function renderFreeListen() {
 function addFreeBadToToday(ids) {
   const date = currentDayKey();
   const books = state.settings.todayBooks || [];
-  const plan = ensureDailyPlan(state, planForTodayOptions(date, books));
+  let plan = ensureDailyPlan(state, planForTodayOptions(date, books));
   if (plan.mode === "sequential") return toast("\u5F53\u524D\u662F\u5206\u672C\u4F9D\u6B21\u8BA1\u5212\uFF0C\u8BF7\u5728\u4ECA\u65E5\u9875\u8C03\u6574\u540E\u518D\u52A0\u5165");
+  let marked = 0;
+  for (const id3 of ids) {
+    const w = wordById(id3);
+    if (!w || !matchesBooks(w, books)) continue;
+    w.reviewHint = true;
+    marked++;
+  }
+  plan = ensureDailyPlan(state, { date, books });
   let added = 0;
   for (const id3 of ids) {
-    if (plan.newIds.includes(id3) || plan.reviewIds.includes(id3)) continue;
-    (hasEventBefore(state, id3, date) ? plan.reviewIds : plan.newIds).push(id3);
-    added++;
+    const w = wordById(id3);
+    if (!w || !matchesBooks(w, books)) continue;
+    plan.newIds = plan.newIds.filter((x) => x !== id3);
+    if (!plan.reviewIds.includes(id3)) {
+      plan.reviewIds.push(id3);
+      added++;
+    }
   }
-  plan.newTarget = Math.max(plan.newTarget, plan.newIds.length);
   plan.reviewTarget = Math.max(plan.reviewTarget, plan.reviewIds.length);
   plan.updatedAt = Date.now();
   persist();
-  toast(`\u5DF2\u52A0\u5165\u4ECA\u65E5\u8BA1\u5212 ${added} \u4E2A`);
+  toast(marked ? `\u5DF2\u4F5C\u4E3A\u590D\u4E60\u8BCD\u52A0\u5165\u4ECA\u65E5\u8BA1\u5212 ${added} \u4E2A` : "\u8FD9\u4E9B\u4E0D\u719F\u8BCD\u4E0D\u5728\u5F53\u524D\u4ECA\u65E5\u8BCD\u4E66\u8303\u56F4");
 }
 function finishFreeListen() {
   if (!freeListen) return;
@@ -4777,7 +4845,7 @@ function bindFreeListenSetup() {
   if (!select) return;
   const draw = () => {
     const book = select.value, saved = freeProgressMap()[book];
-    hint.textContent = saved && Number(saved.index) > 0 ? `\u4E0A\u6B21\u505C\u5728\u7B2C ${Number(saved.index) + 1} \u4E2A\uFF1B\u52FE\u9009\u201C\u7EE7\u7EED\u201D\u5373\u53EF\u63A5\u7740\u542C\u3002` : "\u6309\u8BCD\u5E93\u987A\u5E8F\u64AD\u653E\uFF1B\u81EA\u7531\u542C\u7ED3\u679C\u53EA\u4FDD\u7559\u672C\u8F6E\u4E0D\u719F\u5217\u8868\u3002";
+    hint.textContent = saved && Number(saved.index) > 0 ? `\u4E0A\u6B21\u505C\u5728\u7B2C ${Number(saved.index) + 1} \u4E2A\uFF1B\u52FE\u9009\u201C\u7EE7\u7EED\u201D\u5373\u53EF\u63A5\u7740\u542C\u3002` : "\u81EA\u7531\u542C\u6309\u5F53\u524D\u8BCD\u5E93\u5019\u9009\u987A\u5E8F\u64AD\u653E\uFF1B\u672C\u8F6E\u4E0D\u719F\u53EF\u52A0\u5165\u4ECA\u65E5\u590D\u4E60\u3002";
   };
   select.onchange = draw;
   draw();
