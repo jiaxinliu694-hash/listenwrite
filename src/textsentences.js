@@ -26,6 +26,21 @@ function fallbackSegments(input) {
   }).filter(Boolean);
 }
 
+function mergeTitleAbbreviationSegments(rows) {
+  const out = [];
+  const titleOnly = /^(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St)\.$/i;
+  for (const row of rows) {
+    const previous = out[out.length - 1];
+    if (previous && titleOnly.test(previous.text)) {
+      previous.text = cleanSegment(`${previous.text} ${row.text}`);
+      previous.end = row.end;
+      continue;
+    }
+    out.push({ ...row });
+  }
+  return out;
+}
+
 export function segmentTextSentences(body, locale = 'en') {
   const input = String(body || '').replace(/\r/g, '');
   if (!input.trim()) return [];
@@ -37,7 +52,8 @@ export function segmentTextSentences(body, locale = 'en') {
         const text = cleanSegment(part.segment);
         if (text) rows.push({ text, start: Number(part.index) || 0, end: (Number(part.index) || 0) + String(part.segment || '').length });
       }
-      if (rows.length) return rows;
+      const merged = mergeTitleAbbreviationSegments(rows);
+      if (merged.length) return merged;
     } catch {}
   }
   return fallbackSegments(input).map((text, index) => ({ text, start: index, end: index + text.length }));
