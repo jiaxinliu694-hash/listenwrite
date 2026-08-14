@@ -1,4 +1,5 @@
 const VALID_STATUS = new Set(['familiar', 'unfamiliar', 'unknown']);
+const VALID_PRACTICE_STATUS = new Set(['unseen', 'repeat', 'done', 'ignored']);
 
 function id(prefix = 'id') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
@@ -55,7 +56,8 @@ export function ensureSentenceBook(state, name = '句子词库') {
   return book;
 }
 
-function sameSource(entry, sourceTextId, sentenceIndex) {
+function sameSource(entry, sourceTextId, sentenceIndex, sourceSentenceId = null) {
+  if (sourceSentenceId && entry.sourceSentenceId) return String(entry.sourceSentenceId) === String(sourceSentenceId);
   return String(entry.sourceTextId || '') === String(sourceTextId || '')
     && Number(entry.sentenceIndex ?? -1) === Number(sentenceIndex ?? -1);
 }
@@ -65,18 +67,20 @@ export function addSentenceEntry(state, {
   text,
   tokens = [],
   sourceTextId = null,
+  sourceSentenceId = null,
   sourceTitle = '',
   sourceCollection = '',
   sentenceIndex = null,
 } = {}) {
   const book = ensureSentenceBook(state, bookName);
   const cleanText = String(text || '').trim();
-  let entry = book.entries.find((candidate) => candidate.text === cleanText && sameSource(candidate, sourceTextId, sentenceIndex));
+  let entry = book.entries.find((candidate) => candidate.text === cleanText && sameSource(candidate, sourceTextId, sentenceIndex, sourceSentenceId));
   if (entry) {
     entry.updatedAt = Date.now();
     if (sourceTitle) entry.sourceTitle = String(sourceTitle);
     if (sourceCollection) entry.sourceCollection = String(sourceCollection);
     if (sourceTextId) entry.sourceTextId = sourceTextId;
+    if (sourceSentenceId) entry.sourceSentenceId = sourceSentenceId;
     if (sentenceIndex != null) entry.sentenceIndex = Number(sentenceIndex);
     return { book, entry, reused: true };
   }
@@ -84,11 +88,15 @@ export function addSentenceEntry(state, {
     id: id('sent'),
     text: cleanText,
     sourceTextId: sourceTextId || null,
+    sourceSentenceId: sourceSentenceId || null,
     sourceTitle: String(sourceTitle || ''),
     sourceCollection: String(sourceCollection || ''),
     sentenceIndex: sentenceIndex == null ? null : Number(sentenceIndex),
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    lastPracticedAt: 0,
+    practiceStatus: 'unseen',
+    wholeAttempts: [],
     tokens: tokens.map((surface, index) => ({
       id: id(`tok${index}`),
       surface: String(surface),
@@ -129,6 +137,48 @@ export function setSentenceTokenStatus(entry, tokenIndex, status) {
   token.status = status;
   entry.updatedAt = Date.now();
   return token;
+}
+
+export function deriveSentencePracticeStatus(entry) {
+  if (!entry) return 'unseen';
+  if (entry.practiceStatus === 'ignored') return 'ignored';
+  if (entry.practiceStatus === 'done' || entry.practiceStatus === 'repeat') return entry.practiceStatus;
+  const tokens = Array.isArray(entry.tokens) ? entry.tokens : [];
+  if (tokens.some((token) => token.status === 'unfamiliar' || token.status === 'unknown')) return 'repeat';
+  if ((Array.isArray(entry.wholeAttempts) && entry.wholeAttempts.length) || tokens.some((token) => Array.isArray(token.attempts) && token.attempts.length)) return 'done';
+  return 'unseen';
+}
+
+export function setSentencePracticeStatus(entry, status) {
+  if (!entry || !VALID_PRACTICE_STATUS.has(status)) return null;
+  entry.practiceStatus = status;
+  entry.lastPracticedAt = Date.now();
+  entry.updatedAt = Date.now();
+  return entry.practiceStatus;
+}
+
+export function recordWholeSentenceAttempt(entry, { input = '', alignment = null, revealed = false } = {}) {
+  if (!entry) return null;
+  entry.wholeAttempts = Array.isArray(entry.wholeAttempts) ? entry.wholeAttempts : [];
+  const attempt = {
+    ts: Date.now(),
+    input: String(input || ''),
+    revealed: Boolean(revealed),
+    correct: Boolean(!revealed && alignment?.correct),
+    distance: Number(alignment?.distance) || 0,
+    operations: Array.isArray(alignment?.operations) ? alignment.operations.map((op) => ({
+      type: op.type,
+      expected: op.expected || '',
+      actual: op.actual || '',
+      expectedIndex: Number.isInteger(op.expectedIndex) ? op.expectedIndex : null,
+      actualIndex: Number.isInteger(op.actualIndex) ? op.actualIndex : null,
+    })) : [],
+  };
+  entry.wholeAttempts.push(attempt);
+  entry.practiceStatus = attempt.correct ? 'done' : 'repeat';
+  entry.lastPracticedAt = attempt.ts;
+  entry.updatedAt = attempt.ts;
+  return attempt;
 }
 
 export function sentencePracticeIndexes(state, entry, {
@@ -202,6 +252,7 @@ export function findSentenceProblemEntries(state, { bookId = '', query = '' } = 
   for (const book of ensureSentenceBooks(state)) {
     if (bookId && book.id !== bookId) continue;
     for (const entry of book.entries || []) {
+      if (deriveSentencePracticeStatus(entry) === 'ignored') continue;
       const problems = sentenceProblemOccurrences(entry);
       if (!problems.length) continue;
       const haystack = [
@@ -259,11 +310,15 @@ export function normalizeSentenceBooks(value) {
       id: entry.id || `sent_legacy_${bi}_${ei}`,
       text: String(entry.text || ''),
       sourceTextId: entry.sourceTextId || null,
+      sourceSentenceId: entry.sourceSentenceId || null,
       sourceTitle: String(entry.sourceTitle || ''),
       sourceCollection: String(entry.sourceCollection || ''),
       sentenceIndex: entry.sentenceIndex == null ? null : Number(entry.sentenceIndex),
       createdAt: Number(entry.createdAt) || Date.now(),
       updatedAt: Number(entry.updatedAt) || Date.now(),
+      lastPracticedAt: Number(entry.lastPracticedAt) || 0,
+      practiceStatus: VALID_PRACTICE_STATUS.has(entry.practiceStatus) ? entry.practiceStatus : 'unseen',
+      wholeAttempts: Array.isArray(entry.wholeAttempts) ? entry.wholeAttempts : [],
       tokens: (Array.isArray(entry.tokens) ? entry.tokens : []).map((token, ti) => ({
         id: token.id || `tok_legacy_${bi}_${ei}_${ti}`,
         surface: String(token.surface || ''),

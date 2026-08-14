@@ -148,7 +148,8 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   await waitFor(() => document.querySelector('[data-open-text]'));
   document.querySelector('[data-open-text]').click();
   await waitFor(() => document.querySelector('#dictateSentence'));
-  assert.match(document.getElementById('dictateSentence').textContent, /拆词听写本句/);
+  assert.match(document.getElementById('dictateSentence').textContent, /拆词听写/);
+  assert.ok(document.querySelector('#dictateWholeSentence'), 'text sentence should also offer true whole-sentence dictation');
 
   dom.window.close();
 });

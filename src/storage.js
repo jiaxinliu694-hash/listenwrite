@@ -1,6 +1,7 @@
 import { emptyCard, rebuildCard } from './scheduler.js';
 import { calendarDayKey } from './studyday.js';
 import { normalizeSentenceBooks, ensureSimpleWords, normalizeLexeme } from './sentencebooks.js';
+import { normalizeTexts } from './textsentences.js';
 
 const DB_NAME = 'listenwrite-v3';
 const DB_VERSION = 1;
@@ -43,7 +44,7 @@ async function dbSet(key, value) {
 
 export function defaultState() {
   return {
-    version: 8,
+    version: 9,
     words: [],
     events: [],
     texts: [],
@@ -188,7 +189,7 @@ export function normalizeState(input) {
   const preserveDates = Number(input?.version) >= 4;
   state.words = (input?.words || []).map(normalizeWord).filter((w) => w.en);
   state.events = reindexEvents((input?.events || []).map((e, i) => normalizeEvent(e, i, preserveDates)).filter((e) => e.wordId));
-  state.texts = Array.isArray(input?.texts) ? input.texts : [];
+  state.texts = normalizeTexts(input?.texts);
   state.sentenceBooks = normalizeSentenceBooks(input?.sentenceBooks);
   state.simpleWords = Array.isArray(input?.simpleWords) ? [...new Set(input.simpleWords.map(normalizeLexeme).filter(Boolean))] : [];
   ensureSimpleWords(state);
@@ -205,7 +206,7 @@ export function normalizeState(input) {
     const evs = state.events.filter((e) => e.wordId === word.id && e.cold).sort((a, b) => a.ts - b.ts);
     word.card = evs.length ? rebuildCard(evs, state.settings.retention) : (word.card || emptyCard());
   }
-  state.version = 8;
+  state.version = 9;
   return state;
 }
 
@@ -240,7 +241,7 @@ export async function loadState() {
 }
 
 export async function saveState(state) {
-  state.version = 8;
+  state.version = 9;
   ensureSimpleWords(state);
   try {
     await dbSet(STATE_KEY, state);
