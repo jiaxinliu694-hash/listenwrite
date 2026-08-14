@@ -26,11 +26,13 @@ jobs:
         run: python3 scripts/patch_dashboard_today.py
       - name: Fix default home header
         run: python3 scripts/patch_default_header.py
+      - name: Fix fixed session progress
+        run: python3 scripts/patch_fixed_session_progress.py
       - name: Commit upgrade
         run: |
           if git diff --quiet; then exit 0; fi
           git config user.name "listenwrite-bot"
           git config user.email "actions@users.noreply.github.com"
           git add index.html
-          git commit -m "Add full multi-month learning calendar"
+          git commit -m "Fix fixed new and review denominators"
           git push
