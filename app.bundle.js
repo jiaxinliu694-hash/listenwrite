@@ -2111,7 +2111,7 @@ function recordWholeSentenceAttempt(entry, { input = "", alignment = null, revea
 }
 function sentencePracticeIndexes(state2, entry, {
   onlyProblems = false,
-  unique: unique2 = false,
+  unique: unique3 = false,
   skipSimple = true,
   statuses = ["unfamiliar", "unknown"]
 } = {}) {
@@ -2123,7 +2123,7 @@ function sentencePracticeIndexes(state2, entry, {
     const key = token.normalized || normalizeLexeme(token.surface);
     if (onlyProblems && !wanted.has(token.status)) continue;
     if (skipSimple && isSimpleLexeme(state2, key)) continue;
-    if (unique2 && seen.has(key)) continue;
+    if (unique3 && seen.has(key)) continue;
     seen.add(key);
     out.push(index);
   }
@@ -2244,22 +2244,24 @@ function normalizeSentenceBooks(value) {
 }
 
 // src/tokenizer.js
-var WORD_RE = /[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
+var TOKEN_RE = /[A-Za-z]+\d+[A-Za-z0-9-]*|\d+[A-Za-z]+(?:-[A-Za-z0-9]+)*|(?:[$£€¥]\s*)?\d+(?::\d{1,2})?(?:[.,]\d+)?(?:%|(?:st|nd|rd|th))?|[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
+function normalizeToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/’/g, "'").replace(/\s+/g, " ");
+}
 function tokenizeEnglish(text, options = {}) {
-  const words = String(text || "").match(WORD_RE) || [];
-  const normalized = words.map((word) => word.replace(/’/g, "'"));
+  const words = String(text || "").match(TOKEN_RE) || [];
+  const normalized = words.map((word) => word.replace(/’/g, "'").replace(/\s+/g, " "));
   if (!options.unique) return normalized;
   const seen = /* @__PURE__ */ new Set();
   return normalized.filter((word) => {
-    const key = word.toLowerCase();
+    const key = normalizeToken(word);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 }
 function spellingMatches(input, answer) {
-  const normalize = (value) => String(value || "").trim().toLowerCase().replace(/’/g, "'");
-  return normalize(input) === normalize(answer);
+  return normalizeToken(input) === normalizeToken(answer);
 }
 
 // src/textsentences.js
@@ -3179,6 +3181,155 @@ function customTypeIdsFromEvents(events, allowedIds, { date, mode = "all", min =
   return [...groups.entries()].filter(([, n]) => n >= Math.max(1, Number(min) || 1)).sort((a, b) => b[1] - a[1]).map(([id3]) => id3);
 }
 
+// src/importwords.js
+var FIELD_ALIASES = {
+  en: ["en", "english", "word", "\u5355\u8BCD", "\u82F1\u6587"],
+  zh: ["zh", "chinese", "meaning", "translation", "\u4E2D\u6587", "\u91CA\u4E49", "\u4E2D\u6587\u91CA\u4E49"],
+  pos: ["pos", "part of speech", "\u8BCD\u6027"],
+  def: ["def", "definition", "english definition", "\u82F1\u6587\u91CA\u4E49"],
+  source: ["source", "book", "wordbook", "\u6765\u6E90", "\u8BCD\u4E66"],
+  example: ["example", "sentence", "\u4F8B\u53E5"]
+};
+function cleanCell(value) {
+  return String(value ?? "").trim();
+}
+function delimiterScore(line, delimiter) {
+  let quoted = false;
+  let count = 0;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (quoted && line[i + 1] === '"') i += 1;
+      else quoted = !quoted;
+    } else if (!quoted && ch === delimiter) count += 1;
+  }
+  return count;
+}
+function detectDelimiter(text) {
+  const first = String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/).find((line) => line.trim()) || "";
+  return delimiterScore(first, "	") >= delimiterScore(first, ",") && delimiterScore(first, "	") > 0 ? "	" : ",";
+}
+function parseDelimited(text, delimiter = detectDelimiter(text)) {
+  const input = String(text || "").replace(/^\uFEFF/, "");
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch === '"') {
+      if (quoted && input[i + 1] === '"') {
+        cell += '"';
+        i += 1;
+      } else quoted = !quoted;
+      continue;
+    }
+    if (!quoted && ch === delimiter) {
+      row.push(cleanCell(cell));
+      cell = "";
+      continue;
+    }
+    if (!quoted && (ch === "\n" || ch === "\r")) {
+      if (ch === "\r" && input[i + 1] === "\n") i += 1;
+      row.push(cleanCell(cell));
+      cell = "";
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      continue;
+    }
+    cell += ch;
+  }
+  row.push(cleanCell(cell));
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+function normalizedHeader(value) {
+  return cleanCell(value).toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+}
+function inferFieldMap(rows) {
+  const first = rows[0] || [];
+  const map = { en: 0, zh: 1, pos: 2, def: 3, source: 4, example: 5 };
+  let matches = 0;
+  for (const [field, aliases] of Object.entries(FIELD_ALIASES)) {
+    const index = first.findIndex((cell) => aliases.includes(normalizedHeader(cell)));
+    if (index >= 0) {
+      map[field] = index;
+      matches += 1;
+    }
+  }
+  return { map, hasHeader: matches > 0 };
+}
+function buildImportDraft(text, fileName = "\u5BFC\u5165\u8BCD\u5E93") {
+  const delimiter = detectDelimiter(text);
+  const rows = parseDelimited(text, delimiter);
+  const { map, hasHeader } = inferFieldMap(rows);
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const width = Math.max(0, ...rows.map((row) => row.length));
+  return {
+    fileName,
+    sourceName: String(fileName || "").replace(/\.(csv|txt|tsv)$/i, "") || "\u5BFC\u5165\u8BCD\u5E93",
+    delimiter,
+    rows: dataRows,
+    header: hasHeader ? rows[0] : null,
+    width,
+    map
+  };
+}
+function recordsFromDraft(draft, map = draft?.map || {}) {
+  const rows = Array.isArray(draft?.rows) ? draft.rows : [];
+  return rows.map((row, rowIndex) => {
+    const value = (field) => {
+      const index = Number(map[field]);
+      return Number.isInteger(index) && index >= 0 ? cleanCell(row[index]) : "";
+    };
+    const en = value("en");
+    return {
+      rowIndex,
+      en,
+      zh: value("zh"),
+      pos: value("pos"),
+      def: value("def"),
+      source: value("source") || draft.sourceName || "\u5BFC\u5165\u8BCD\u5E93",
+      example: value("example"),
+      valid: Boolean(en)
+    };
+  });
+}
+
+// src/wordadmin.js
+function unique2(values) {
+  return [...new Set((Array.isArray(values) ? values : []).map((v) => String(v || "").trim()).filter(Boolean))];
+}
+function updateWordFields(word, patch = {}) {
+  if (!word) return null;
+  if ("zh" in patch) word.zh = String(patch.zh || "").trim();
+  if ("pos" in patch) word.pos = String(patch.pos || "").trim();
+  if ("def" in patch) word.def = String(patch.def || "").trim();
+  if ("sources" in patch) word.sources = unique2(patch.sources);
+  if ("examples" in patch) word.examples = unique2(patch.examples);
+  return word;
+}
+function removeId(list, wordId) {
+  return (Array.isArray(list) ? list : []).filter((id3) => id3 !== wordId);
+}
+function deleteWordEverywhere(state2, wordId) {
+  const word = state2.words.find((w) => w.id === wordId);
+  if (!word) return false;
+  state2.words = state2.words.filter((w) => w.id !== wordId);
+  state2.events = (state2.events || []).filter((event) => event.wordId !== wordId);
+  state2.simpleWords = (state2.simpleWords || []).filter((lexeme) => lexeme !== word.en);
+  for (const plan of Object.values(state2.dailyPlans || {})) {
+    plan.newIds = removeId(plan.newIds, wordId);
+    plan.reviewIds = removeId(plan.reviewIds, wordId);
+    if (plan.resumeWordId === wordId) plan.resumeWordId = null;
+    for (const segment of plan.bookSegments || []) {
+      segment.newIds = removeId(segment.newIds, wordId);
+      segment.reviewIds = removeId(segment.reviewIds, wordId);
+    }
+  }
+  return true;
+}
+
 // src/app.js
 var root = document.getElementById("app");
 var restoreInput = document.getElementById("file-restore");
@@ -3193,6 +3344,10 @@ var textEditId = null;
 var textFormOpen = false;
 var sentenceRun = null;
 var wholeSentenceRun = null;
+var wholeQueue = [];
+var wordEditId = null;
+var importDraft = null;
+var freeListen = null;
 var statRange = 30;
 var statDay = currentDayKey();
 var statMonth = calendarDate(statDay);
@@ -3291,6 +3446,8 @@ function go(next) {
   typeRun = null;
   sentenceRun = null;
   wholeSentenceRun = null;
+  wholeQueue = [];
+  freeListen = null;
   textReaderId = null;
   render();
 }
@@ -3798,7 +3955,7 @@ function renderText() {
   const editing = textEditId ? state.texts.find((t) => t.id === textEditId) : null;
   const sentenceBookNames = state.sentenceBooks.map((b) => b.name);
   const sentenceBookRows = state.sentenceBooks.map(sentenceLibraryBookHtml).join("");
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u4E0E\u53E5\u5B50</h2><p>\u6587\u7AE0 \u2192 \u7A33\u5B9A\u53E5\u5B50 \u2192 \u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u9519\u8BCD\u91CD\u542C\u3002\u53E5\u5B50\u672C\u8EAB\u4E0D\u8FDB\u5165 FSRS\uFF1B\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u9519\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u590D\u4E60\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div></section><section class="card"><h2 class="section-title">\u5FEB\u901F\u4FDD\u5B58\u4E00\u53E5\u5E76\u62C6\u8BCD</h2><div class="small">\u9002\u5408\u4E34\u65F6\u53E5\u5B50\u3002\u9ED8\u8BA4\u4FDD\u7559\u91CD\u590D\u8BCD\u4F4D\u7F6E\uFF1B\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u81EA\u52A8\u8DF3\u8FC7\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u62C6\u8BCD</label><button id="startSentenceDictation" class="primary">\u4FDD\u5B58\u5E76\u62C6\u8BCD\u542C\u5199</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u9519\u8BCD\u5B9A\u4F4D\u4E0E\u91CD\u542C</h2><div class="small">\u53EF\u4EE5\u641C\u6587\u7AE0\u6807\u9898\u3001\u53E5\u5B50\u539F\u6587\u6216\u5355\u8BCD\uFF1B\u4ECE\u6587\u7AE0\u4EA7\u751F\u7684\u53E5\u5B50\u4F7F\u7528\u7A33\u5B9A\u53E5\u5B50 ID \u5173\u8054\uFF0C\u4E0D\u518D\u53EA\u9760\u201C\u7B2C\u51E0\u53E5\u201D\u3002</div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u53E5\u5B50\u5E93</label><select id="sentenceProblemBook"><option value="">\u5168\u90E8\u53E5\u5B50\u5E93</option>${state.sentenceBooks.map((book) => `<option value="${book.id}">${esc(book.name)}</option>`).join("")}</select></div><div class="field"><label>\u68C0\u7D22</label><input id="sentenceProblemSearch" placeholder="\u6587\u7AE0\u6807\u9898 / \u53E5\u5B50 / \u9519\u8BCD"></div></div><label class="small" style="display:block;margin-top:10px"><input id="sentenceProblemUnique" type="checkbox" checked style="width:auto"> \u9519\u8BCD\u91CD\u542C\u65F6\u53BB\u91CD</label><div id="sentenceProblemList" style="margin-top:12px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u5E93</h2><div class="small">\u9ED8\u8BA4\u6309\u201C\u9700\u91CD\u7EC3 \u2192 \u672A\u7EC3 \u2192 \u5DF2\u901A\u8FC7 \u2192 \u5FFD\u7565\u201D\u6392\u5217\u3002\u6BCF\u4E00\u53E5\u90FD\u80FD\u91CD\u65B0\u505A\u6574\u53E5\u3001\u62C6\u8BCD\u6216\u53EA\u7EC3\u9519\u8BCD\u3002</div><div class="sentence-library">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6253\u5F00\u6587\u7AE0\u540E\uFF0C\u6BCF\u4E00\u53E5\u90FD\u6709\u201C\u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u672C\u53E5\u9519\u8BCD\u201D\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u4E0E\u53E5\u5B50</h2><p>\u6587\u7AE0 \u2192 \u7A33\u5B9A\u53E5\u5B50 \u2192 \u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u9519\u8BCD\u91CD\u542C\u3002\u53E5\u5B50\u672C\u8EAB\u4E0D\u8FDB\u5165 FSRS\uFF1B\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u9519\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u590D\u4E60\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div></section><section class="card"><h2 class="section-title">\u5FEB\u901F\u4FDD\u5B58\u4E00\u53E5\u5E76\u62C6\u8BCD</h2><div class="small">\u9002\u5408\u4E34\u65F6\u53E5\u5B50\u3002\u9ED8\u8BA4\u4FDD\u7559\u91CD\u590D\u8BCD\u4F4D\u7F6E\uFF1B\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u81EA\u52A8\u8DF3\u8FC7\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u62C6\u8BCD</label><button id="startQuickWhole" class="primary">\u4FDD\u5B58\u5E76\u6574\u53E5\u542C\u5199</button><button id="startSentenceDictation" class="soft">\u4FDD\u5B58\u5E76\u62C6\u8BCD\u542C\u5199</button><button id="saveQuickOnly" class="ghost">\u53EA\u4FDD\u5B58</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u9519\u8BCD\u5B9A\u4F4D\u4E0E\u91CD\u542C</h2><div class="small">\u53EF\u4EE5\u641C\u6587\u7AE0\u6807\u9898\u3001\u53E5\u5B50\u539F\u6587\u6216\u5355\u8BCD\uFF1B\u4ECE\u6587\u7AE0\u4EA7\u751F\u7684\u53E5\u5B50\u4F7F\u7528\u7A33\u5B9A\u53E5\u5B50 ID \u5173\u8054\uFF0C\u4E0D\u518D\u53EA\u9760\u201C\u7B2C\u51E0\u53E5\u201D\u3002</div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u53E5\u5B50\u5E93</label><select id="sentenceProblemBook"><option value="">\u5168\u90E8\u53E5\u5B50\u5E93</option>${state.sentenceBooks.map((book) => `<option value="${book.id}">${esc(book.name)}</option>`).join("")}</select></div><div class="field"><label>\u68C0\u7D22</label><input id="sentenceProblemSearch" placeholder="\u6587\u7AE0\u6807\u9898 / \u53E5\u5B50 / \u9519\u8BCD"></div></div><label class="small" style="display:block;margin-top:10px"><input id="sentenceProblemUnique" type="checkbox" checked style="width:auto"> \u9519\u8BCD\u91CD\u542C\u65F6\u53BB\u91CD</label><div id="sentenceProblemList" style="margin-top:12px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u5E93</h2><div class="small">\u9ED8\u8BA4\u6309\u201C\u9700\u91CD\u7EC3 \u2192 \u672A\u7EC3 \u2192 \u5DF2\u901A\u8FC7 \u2192 \u5FFD\u7565\u201D\u6392\u5217\u3002\u6BCF\u4E00\u53E5\u90FD\u80FD\u91CD\u65B0\u505A\u6574\u53E5\u3001\u62C6\u8BCD\u6216\u53EA\u7EC3\u9519\u8BCD\u3002</div><div class="sentence-library">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6253\u5F00\u6587\u7AE0\u540E\uFF0C\u6BCF\u4E00\u53E5\u90FD\u6709\u201C\u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u672C\u53E5\u9519\u8BCD\u201D\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("newText").onclick = () => {
     textFormOpen = !textFormOpen;
     if (!textFormOpen) textEditId = null;
@@ -3808,14 +3965,16 @@ function renderText() {
     document.getElementById("saveText").onclick = saveTextItem;
     document.getElementById("importTextFile").onclick = () => textInput.click();
   }
-  const sentenceBox = document.getElementById("sentenceDictationText"), unique2 = document.getElementById("sentenceUnique"), preview = document.getElementById("sentencePreview");
+  const sentenceBox = document.getElementById("sentenceDictationText"), unique3 = document.getElementById("sentenceUnique"), preview = document.getElementById("sentencePreview");
   const drawSentencePreview = () => {
-    const tokens = tokenizeEnglish(sentenceBox.value, { unique: unique2.checked });
+    const tokens = tokenizeEnglish(sentenceBox.value, { unique: unique3.checked });
     preview.innerHTML = tokens.slice(0, 30).map((x) => `<span class="tag">${esc(x)}${isSimpleLexeme(state, x) ? " \xB7 \u7B80\u5355" : ""}</span>`).join("") + (tokens.length > 30 ? `<span class="tag">\u2026 \u5171 ${tokens.length} \u4E2A</span>` : "");
   };
   sentenceBox.oninput = drawSentencePreview;
-  unique2.onchange = drawSentencePreview;
-  document.getElementById("startSentenceDictation").onclick = () => startSentenceDictation(sentenceBox.value, unique2.checked, document.getElementById("sentenceBookName").value);
+  unique3.onchange = drawSentencePreview;
+  document.getElementById("startQuickWhole").onclick = () => startQuickWhole(sentenceBox.value, document.getElementById("sentenceBookName").value);
+  document.getElementById("startSentenceDictation").onclick = () => startSentenceDictation(sentenceBox.value, unique3.checked, document.getElementById("sentenceBookName").value);
+  document.getElementById("saveQuickOnly").onclick = () => saveQuickOnly(sentenceBox.value, document.getElementById("sentenceBookName").value);
   document.getElementById("sentenceProblemBook").onchange = drawSentenceProblemList;
   document.getElementById("sentenceProblemSearch").oninput = drawSentenceProblemList;
   document.getElementById("sentenceProblemUnique").onchange = drawSentenceProblemList;
@@ -3843,21 +4002,45 @@ function drawSentenceProblemList() {
   if (!box) return;
   const rows = activeProblemRows();
   const uniqueWords = new Set(rows.flatMap((row) => row.problems.map((token) => token.normalized || String(token.surface).toLowerCase())));
-  const unique2 = document.getElementById("sentenceProblemUnique")?.checked !== false;
+  const unique3 = document.getElementById("sentenceProblemUnique")?.checked !== false;
   box.innerHTML = `<div class="space"><div><b>${rows.length} \u53E5 \xB7 ${uniqueWords.size} \u4E2A\u9519\u8BCD</b><div class="small">\u70B9\u67D0\u4E00\u53E5\u7CBE\u51C6\u91CD\u7EC3\uFF0C\u4E5F\u53EF\u4EE5\u628A\u5F53\u524D\u68C0\u7D22\u7ED3\u679C\u4E00\u8D77\u91CD\u542C\u3002</div></div><button id="retryFilteredProblems" class="primary" ${rows.length ? "" : "disabled"}>\u91CD\u542C\u5F53\u524D\u7B5B\u9009\u9519\u8BCD</button></div><div style="margin-top:10px">${rows.map((row) => `<article class="textitem"><div class="space"><div><h3>${esc(sentenceSourceLabel(row.entry))}</h3><div class="small">${esc(row.book.name)} \xB7 ${problemSummary(row.problems)}</div></div></div><p class="snippet">${esc(row.entry.text)}</p><div class="toolbar"><button class="primary" data-whole-problem-entry="${row.book.id}|${row.entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-retry-entry="${row.book.id}|${row.entry.id}">\u53EA\u91CD\u542C\u8FD9\u53E5\u9519\u8BCD</button><button class="soft" data-retry-entry-all="${row.book.id}|${row.entry.id}">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button></div></article>`).join("")}</div>`;
-  document.getElementById("retryFilteredProblems").onclick = () => startSentenceProblemRows(rows, unique2, "\u7B5B\u9009\u51FA\u6765\u7684\u53E5\u5B50\u9519\u8BCD");
+  document.getElementById("retryFilteredProblems").onclick = () => startSentenceProblemRows(rows, unique3, "\u7B5B\u9009\u51FA\u6765\u7684\u53E5\u5B50\u9519\u8BCD");
   document.querySelectorAll("[data-whole-problem-entry]").forEach((button) => button.onclick = () => {
     const [bookId, entryId] = button.dataset.wholeProblemEntry.split("|");
     startWholeSentenceEntry(bookId, entryId);
   });
   document.querySelectorAll("[data-retry-entry]").forEach((button) => button.onclick = () => {
     const [bookId, entryId] = button.dataset.retryEntry.split("|");
-    startSavedEntryDictation(bookId, entryId, { onlyProblems: true, unique: unique2 });
+    startSavedEntryDictation(bookId, entryId, { onlyProblems: true, unique: unique3 });
   });
   document.querySelectorAll("[data-retry-entry-all]").forEach((button) => button.onclick = () => {
     const [bookId, entryId] = button.dataset.retryEntryAll.split("|");
     startSavedEntryDictation(bookId, entryId, { onlyProblems: false, unique: false });
   });
+}
+function saveQuickEntries(raw, bookName) {
+  const segments = segmentTextSentences(raw);
+  if (!segments.length) return [];
+  const out = [];
+  for (const row of segments) {
+    const tokens = tokenizeEnglish(row.text, { unique: false });
+    if (!tokens.length) continue;
+    const saved = addSentenceEntry(state, { bookName: bookName || "\u53E5\u5B50\u8BCD\u5E93", text: row.text, tokens });
+    out.push({ bookId: saved.book.id, entryId: saved.entry.id });
+  }
+  persist();
+  return out;
+}
+function startQuickWhole(raw, bookName) {
+  const entries = saveQuickEntries(raw, bookName);
+  if (!entries.length) return toast("\u6CA1\u6709\u8BC6\u522B\u5230\u53EF\u542C\u5199\u7684\u53E5\u5B50");
+  startWholeSequence(entries, null);
+}
+function saveQuickOnly(raw, bookName) {
+  const entries = saveQuickEntries(raw, bookName);
+  if (!entries.length) return toast("\u6CA1\u6709\u8BC6\u522B\u5230\u53E5\u5B50");
+  toast(`\u5DF2\u4FDD\u5B58 ${entries.length} \u53E5`);
+  renderText();
 }
 function ensureLinkedSentenceEntry(text, sentenceRecord, sentenceIndex) {
   const allTokens = tokenizeEnglish(sentenceRecord.text, { unique: false });
@@ -3868,12 +4051,29 @@ function startWholeSentenceFromText(text, sentenceRecord, sentenceIndex) {
   persist();
   startWholeSentenceEntry(saved.book.id, saved.entry.id, { returnTextId: text.id });
 }
-function startWholeSentenceEntry(bookId, entryId, { returnTextId = null } = {}) {
+function startWholeSentenceEntry(bookId, entryId, { returnTextId = null, preserveQueue = false } = {}) {
+  if (!preserveQueue) wholeQueue = [];
   const { book, entry } = getSentenceEntry(state, bookId, entryId);
   if (!book || !entry) return toast("\u6CA1\u6709\u627E\u5230\u8FD9\u53E5\u8BB0\u5F55");
   wholeSentenceRun = { bookId, entryId, returnTextId, input: "", alignment: null, revealed: false, peek: false };
   renderWholeSentenceRun();
   speak(entry.text);
+}
+function startWholeSequence(items, returnTextId = null) {
+  const queue = (items || []).filter(Boolean);
+  if (!queue.length) return toast("\u6CA1\u6709\u53EF\u542C\u5199\u7684\u53E5\u5B50");
+  wholeQueue = queue.slice(1);
+  const first = queue[0];
+  startWholeSentenceEntry(first.bookId, first.entryId, { returnTextId, preserveQueue: true });
+}
+function continueWholeSequence(run) {
+  if (wholeQueue.length) {
+    const next = wholeQueue.shift();
+    wholeSentenceRun = null;
+    startWholeSentenceEntry(next.bookId, next.entryId, { returnTextId: run?.returnTextId || null, preserveQueue: true });
+    return;
+  }
+  returnFromWholeSentenceRun(run);
 }
 function wholeSentenceCurrent() {
   if (!wholeSentenceRun) return {};
@@ -3896,6 +4096,7 @@ function wholeDiffHtml(alignment) {
 }
 function returnFromWholeSentenceRun(run) {
   wholeSentenceRun = null;
+  wholeQueue = [];
   if (run?.returnTextId) {
     textReaderId = run.returnTextId;
     view = "text";
@@ -3915,7 +4116,7 @@ function renderWholeSentenceRun() {
   }
   const st = sentenceStateInfo(entry);
   const problems = sentenceProblemTokens(entry).filter((token) => !isSimpleLexeme(state, token.normalized || token.surface));
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="wholeBack" class="back">\u2039</button><div class="studyprogress">\u6574\u53E5\u542C\u5199 \xB7 ${esc(sentenceSourceLabel(entry))}</div><button id="wholeIgnore" class="retire">${st.status === "ignored" ? "\u6062\u590D\u672C\u53E5" : "\u5FFD\u7565\u672C\u53E5"}</button></div><div class="studybody" style="max-width:820px"><span class="sentence-state ${st.status}">${st.label}</span><button id="wholeSpeak" class="speaker">\u25D6))</button>${!run.revealed ? `<div class="small">\u5148\u542C\u5B8C\u6574\u53E5\u5B50\uFF0C\u518D\u628A\u6574\u53E5\u5199\u4E0B\u6765\u3002\u6807\u70B9\u4E0D\u53C2\u4E0E\u5BF9\u9519\uFF1B\u6309\u5355\u8BCD\u987A\u5E8F\u505A\u5BF9\u9F50\u3002</div><textarea id="wholeSentenceAnswer" class="whole-answer" placeholder="\u8F93\u5165\u4F60\u542C\u5230\u7684\u5B8C\u6574\u82F1\u6587\u53E5\u5B50\u2026" autocomplete="off" autocapitalize="off">${esc(run.input)}</textarea><div class="grid2" style="width:100%;max-width:720px;margin-top:10px"><button id="wholeSubmit" class="primary">\u63D0\u4EA4\u6574\u53E5</button><button id="wholeReveal" class="soft">\u770B\u539F\u53E5</button></div>` : `${run.peek ? `<div class="small">\u672C\u6B21\u76F4\u63A5\u770B\u4E86\u539F\u53E5\uFF0C\u8FD9\u53E5\u6807\u8BB0\u4E3A\u201C\u9700\u91CD\u7EC3\u201D\u3002</div><div class="sentence" style="max-width:720px">${esc(entry.text)}</div>` : `<div class="small">${run.alignment?.correct ? "\u6574\u53E5\u6B63\u786E" : "\u6309\u5355\u8BCD\u5BF9\u9F50\u7ED3\u679C\u5982\u4E0B"}</div>${wholeDiffHtml(run.alignment)}<div class="typed" style="max-width:720px"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(run.input || "\uFF08\u7A7A\uFF09")}</div></div>`}<div class="sentence-mode-row" style="justify-content:center"><button id="wholeReplay" class="soft">\u91CD\u542C\u6574\u53E5</button><button id="wholeRedoSplit" class="soft">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button>${problems.length ? `<button id="wholeProblems" class="soft">\u53EA\u7EC3\u9519\u8BCD \xB7 ${problems.length}</button>` : ""}<button id="wholeRetry" class="primary">\u518D\u5199\u4E00\u6B21\u6574\u53E5</button><button id="wholeFinish" class="soft">\u8FD4\u56DE</button></div>`}</div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="wholeBack" class="back">\u2039</button><div class="studyprogress">\u6574\u53E5\u542C\u5199 \xB7 ${esc(sentenceSourceLabel(entry))}</div><button id="wholeIgnore" class="retire">${st.status === "ignored" ? "\u6062\u590D\u672C\u53E5" : "\u5FFD\u7565\u672C\u53E5"}</button></div><div class="studybody" style="max-width:820px"><span class="sentence-state ${st.status}">${st.label}</span><button id="wholeSpeak" class="speaker">\u25D6))</button>${!run.revealed ? `<div class="small">\u5148\u542C\u5B8C\u6574\u53E5\u5B50\uFF0C\u518D\u628A\u6574\u53E5\u5199\u4E0B\u6765\u3002\u6807\u70B9\u4E0D\u53C2\u4E0E\u5BF9\u9519\uFF1B\u6309\u5355\u8BCD\u987A\u5E8F\u505A\u5BF9\u9F50\u3002</div><textarea id="wholeSentenceAnswer" class="whole-answer" placeholder="\u8F93\u5165\u4F60\u542C\u5230\u7684\u5B8C\u6574\u82F1\u6587\u53E5\u5B50\u2026" autocomplete="off" autocapitalize="off">${esc(run.input)}</textarea><div class="grid2" style="width:100%;max-width:720px;margin-top:10px"><button id="wholeSubmit" class="primary">\u63D0\u4EA4\u6574\u53E5</button><button id="wholeReveal" class="soft">\u770B\u539F\u53E5</button></div>` : `${run.peek ? `<div class="small">\u672C\u6B21\u76F4\u63A5\u770B\u4E86\u539F\u53E5\uFF0C\u8FD9\u53E5\u6807\u8BB0\u4E3A\u201C\u9700\u91CD\u7EC3\u201D\u3002</div><div class="sentence" style="max-width:720px">${esc(entry.text)}</div>` : `<div class="small">${run.alignment?.correct ? "\u6574\u53E5\u6B63\u786E" : "\u6309\u5355\u8BCD\u5BF9\u9F50\u7ED3\u679C\u5982\u4E0B"}</div>${wholeDiffHtml(run.alignment)}<div class="typed" style="max-width:720px"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(run.input || "\uFF08\u7A7A\uFF09")}</div></div>`}<div class="sentence-mode-row" style="justify-content:center"><button id="wholeReplay" class="soft">\u91CD\u542C\u6574\u53E5</button><button id="wholeRedoSplit" class="soft">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button>${problems.length ? `<button id="wholeProblems" class="soft">\u53EA\u7EC3\u9519\u8BCD \xB7 ${problems.length}</button>` : ""}<button id="wholeRetry" class="primary">\u518D\u5199\u4E00\u6B21\u6574\u53E5</button><button id="wholeFinish" class="soft">${wholeQueue.length ? `\u4E0B\u4E00\u53E5 \xB7 ${wholeQueue.length}` : `\u8FD4\u56DE`}</button></div>`}</div></main>`;
   document.getElementById("wholeBack").onclick = () => returnFromWholeSentenceRun(run);
   document.getElementById("wholeSpeak").onclick = () => speak(entry.text);
   document.getElementById("wholeIgnore").onclick = () => {
@@ -3964,15 +4165,15 @@ function renderWholeSentenceRun() {
       renderWholeSentenceRun();
       speak(entry.text);
     };
-    document.getElementById("wholeFinish").onclick = () => returnFromWholeSentenceRun(run);
+    document.getElementById("wholeFinish").onclick = () => continueWholeSequence(run);
   }
 }
-function startSentenceDictation(text, unique2, bookName, meta = {}) {
+function startSentenceDictation(text, unique3, bookName, meta = {}) {
   const allTokens = tokenizeEnglish(text, { unique: false });
   if (!allTokens.length) return toast("\u8FD9\u53E5\u8BDD\u91CC\u6CA1\u6709\u8BC6\u522B\u5230\u82F1\u6587\u5355\u8BCD");
   const saved = addSentenceEntry(state, { bookName: bookName || "\u53E5\u5B50\u8BCD\u5E93", text, tokens: allTokens, sourceTextId: meta.sourceTextId || null, sourceSentenceId: meta.sourceSentenceId || null, sourceTitle: meta.sourceTitle || "", sourceCollection: meta.sourceCollection || "", sentenceIndex: meta.sentenceIndex ?? null });
   persist();
-  const indexes = sentencePracticeIndexes(state, saved.entry, { unique: unique2, skipSimple: true });
+  const indexes = sentencePracticeIndexes(state, saved.entry, { unique: unique3, skipSimple: true });
   const skippedSimple = saved.entry.tokens.filter((token) => isSimpleLexeme(state, token.normalized || token.surface)).length;
   if (!indexes.length) return toast("\u8FD9\u53E5\u6CA1\u6709\u9700\u8981\u542C\u5199\u7684\u8BCD\uFF1B\u5DF2\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u4F1A\u81EA\u52A8\u8DF3\u8FC7");
   const items = indexes.map((tokenIndex) => ({ bookId: saved.book.id, entryId: saved.entry.id, tokenIndex }));
@@ -3982,22 +4183,22 @@ function startLinkedSentenceDictation(text, sentenceRecord, sentenceIndex) {
   const bookName = `${text.collection || "\u6587\u672C"} \xB7 \u53E5\u5B50`;
   startSentenceDictation(sentenceRecord.text, false, bookName, { sourceTextId: text.id, sourceSentenceId: sentenceRecord.id, sourceTitle: text.title, sourceCollection: text.collection || "\u672A\u5206\u7C7B", sentenceIndex, returnTextId: text.id, label: `${text.title} \xB7 \u7B2C ${sentenceIndex + 1} \u53E5` });
 }
-function startSavedEntryDictation(bookId, entryId, { onlyProblems = false, unique: unique2 = false, returnTextId = null } = {}) {
+function startSavedEntryDictation(bookId, entryId, { onlyProblems = false, unique: unique3 = false, returnTextId = null } = {}) {
   const { book, entry } = getSentenceEntry(state, bookId, entryId);
   if (!book || !entry) return toast("\u6CA1\u6709\u627E\u5230\u8FD9\u53E5\u8BB0\u5F55");
-  const indexes = sentencePracticeIndexes(state, entry, { onlyProblems, unique: unique2, skipSimple: true });
+  const indexes = sentencePracticeIndexes(state, entry, { onlyProblems, unique: unique3, skipSimple: true });
   if (!indexes.length) return toast(onlyProblems ? "\u8FD9\u53E5\u5F53\u524D\u6CA1\u6709\u9700\u8981\u91CD\u542C\u7684\u9519\u8BCD" : "\u8FD9\u53E5\u7684\u8BCD\u90FD\u5DF2\u6807\u8BB0\u7B80\u5355");
   const items = indexes.map((tokenIndex) => ({ bookId, entryId, tokenIndex }));
   startSentenceItems(items, onlyProblems ? `${sentenceSourceLabel(entry)} \xB7 \u9519\u8BCD` : sentenceSourceLabel(entry), { returnTextId });
 }
-function startSentenceProblemRows(rows, unique2 = true, label = "\u53E5\u5B50\u9519\u8BCD", returnTextId = null) {
+function startSentenceProblemRows(rows, unique3 = true, label = "\u53E5\u5B50\u9519\u8BCD", returnTextId = null) {
   const items = [];
   const seen = /* @__PURE__ */ new Set();
   for (const row of rows) {
     for (const token of row.problems || []) {
       const key = token.normalized || String(token.surface).toLowerCase();
       if (isSimpleLexeme(state, key)) continue;
-      if (unique2 && seen.has(key)) continue;
+      if (unique3 && seen.has(key)) continue;
       seen.add(key);
       items.push({ bookId: row.book.id, entryId: row.entry.id, tokenIndex: token.tokenIndex });
     }
@@ -4029,7 +4230,7 @@ function sentenceRunProblemTokens(run) {
   }
   return [...byWord.values()];
 }
-function sentenceRunProblemItems(run, unique2 = true) {
+function sentenceRunProblemItems(run, unique3 = true) {
   const out = [];
   const seen = /* @__PURE__ */ new Set();
   for (const item of run?.items || []) {
@@ -4037,7 +4238,7 @@ function sentenceRunProblemItems(run, unique2 = true) {
     const token = entry?.tokens?.[item.tokenIndex];
     if (!token || !["unfamiliar", "unknown"].includes(token.status) || isSimpleLexeme(state, token.normalized || token.surface)) continue;
     const key = token.normalized || String(token.surface).toLowerCase();
-    if (unique2 && seen.has(key)) continue;
+    if (unique3 && seen.has(key)) continue;
     seen.add(key);
     out.push({ ...item });
   }
@@ -4224,7 +4425,7 @@ function renderTextReader() {
   const linkedRows = findSentenceProblemEntries(state).filter((row) => row.entry.sourceTextId === t.id && (row.entry.sourceSentenceId && row.entry.sourceSentenceId === sentenceRecord.id || !row.entry.sourceSentenceId && Number(row.entry.sentenceIndex) === Number(idx))).map((row) => ({ ...row, problems: row.problems.filter((token) => !isSimpleLexeme(state, token.normalized || token.surface)) })).filter((row) => row.problems.length);
   const linkedProblemCount = new Set(linkedRows.flatMap((row) => row.problems.map((token) => token.normalized || String(token.surface).toLowerCase()))).size;
   const sentenceState = linkedEntries.length ? sentenceStateInfo(linkedEntries[0].entry) : { status: "unseen", label: "\u672A\u7EC3" };
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="textBack" class="back">\u2039</button><div class="studyprogress">${esc(t.title)} \xB7 \u7B2C ${idx + 1}/${ss.length} \u53E5<br><span class="small">${esc(t.collection || "\u672A\u5206\u7C7B")}</span></div><button id="textEdit" class="retire">\u7F16\u8F91</button></div><div class="reader"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${sentenceState.status}">${sentenceState.label}</span>${linkedProblemCount ? `<span class="small">\u9519\u8BCD ${linkedProblemCount}</span>` : ""}</div><div class="reader-actions"><button id="playFull" class="soft">\u5168\u6587\u6717\u8BFB</button><button id="toggleText" class="soft">${t.hidden ? "\u663E\u793A\u539F\u6587" : "\u9690\u85CF\u539F\u6587"}</button><button id="toggleLoop" class="soft">\u5355\u53E5\u5FAA\u73AF ${t.loop ? "\u5F00" : "\u5173"}</button><button id="dictateWholeSentence" class="primary">\u6574\u53E5\u542C\u5199</button><button id="dictateSentence" class="soft">\u62C6\u8BCD\u542C\u5199</button>${linkedProblemCount ? `<button id="dictateSentenceProblems" class="soft">\u672C\u53E5\u9519\u8BCD \xB7 ${linkedProblemCount}</button>` : ""}</div><div class="sentence ${t.hidden ? "blur" : ""}">${esc(sentence)}</div><div class="sentence-nav"><button id="prevSentence" class="soft" ${idx === 0 ? "disabled" : ""}>\u4E0A\u4E00\u53E5</button><button id="playSentence" class="primary">\u91CD\u542C\u672C\u53E5</button><button id="nextSentence" class="soft" ${idx === ss.length - 1 ? "disabled" : ""}>\u4E0B\u4E00\u53E5</button></div><section class="card" style="margin-top:14px"><h3 style="margin-top:0">\u5168\u6587</h3><div id="fullText" class="fulltext ${t.hidden ? "blur" : ""}">${esc(t.body)}</div></section><section class="card" style="margin-top:14px"><h3 style="margin-top:0">\u4ECE\u672C\u6587\u52A0\u5165\u5355\u8BCD</h3><div class="small">\u6765\u6E90\u4F1A\u4FDD\u5B58\u4E3A\u300C${esc(source)}\u300D\uFF0C\u4F8B\u53E5\u9ED8\u8BA4\u4FDD\u5B58\u5F53\u524D\u53E5\u3002</div><div class="grid2" style="margin-top:10px"><input id="textWord" placeholder="\u82F1\u6587\u5355\u8BCD"><input id="textZh" placeholder="\u4E2D\u6587\u6838\u5FC3\u4E49\uFF0C\u53EF\u7559\u7A7A"></div><div class="row" style="margin-top:10px"><button id="useSelection" class="soft">\u4F7F\u7528\u9009\u4E2D\u7684\u8BCD</button><button id="addFromText" class="primary">\u52A0\u5165\u8BCD\u5E93</button></div></section></div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="textBack" class="back">\u2039</button><div class="studyprogress">${esc(t.title)} \xB7 \u7B2C ${idx + 1}/${ss.length} \u53E5<br><span class="small">${esc(t.collection || "\u672A\u5206\u7C7B")}</span></div><button id="textEdit" class="retire">\u7F16\u8F91</button></div><div class="reader"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${sentenceState.status}">${sentenceState.label}</span>${linkedProblemCount ? `<span class="small">\u9519\u8BCD ${linkedProblemCount}</span>` : ""}</div><div class="reader-actions"><button id="playFull" class="soft">\u5168\u6587\u6717\u8BFB</button><button id="toggleText" class="soft">${t.hidden ? "\u663E\u793A\u539F\u6587" : "\u9690\u85CF\u539F\u6587"}</button><button id="toggleLoop" class="soft">\u5355\u53E5\u5FAA\u73AF ${t.loop ? "\u5F00" : "\u5173"}</button><button id="dictateWholeSentence" class="primary">\u6574\u53E5\u542C\u5199</button><button id="dictateWholeSequence" class="soft">\u8FDE\u7EED\u6574\u53E5 \xB7 \u6700\u591A10\u53E5</button><button id="dictateSentence" class="soft">\u62C6\u8BCD\u542C\u5199</button>${linkedProblemCount ? `<button id="dictateSentenceProblems" class="soft">\u672C\u53E5\u9519\u8BCD \xB7 ${linkedProblemCount}</button>` : ""}</div><div class="sentence ${t.hidden ? "blur" : ""}">${esc(sentence)}</div><div class="sentence-nav"><button id="prevSentence" class="soft" ${idx === 0 ? "disabled" : ""}>\u4E0A\u4E00\u53E5</button><button id="playSentence" class="primary">\u91CD\u542C\u672C\u53E5</button><button id="nextSentence" class="soft" ${idx === ss.length - 1 ? "disabled" : ""}>\u4E0B\u4E00\u53E5</button></div><section class="card" style="margin-top:14px"><h3 style="margin-top:0">\u5168\u6587</h3><div id="fullText" class="fulltext ${t.hidden ? "blur" : ""}">${esc(t.body)}</div></section><section class="card" style="margin-top:14px"><h3 style="margin-top:0">\u4ECE\u672C\u6587\u52A0\u5165\u5355\u8BCD</h3><div class="small">\u6765\u6E90\u4F1A\u4FDD\u5B58\u4E3A\u300C${esc(source)}\u300D\uFF0C\u4F8B\u53E5\u9ED8\u8BA4\u4FDD\u5B58\u5F53\u524D\u53E5\u3002</div><div class="grid2" style="margin-top:10px"><input id="textWord" placeholder="\u82F1\u6587\u5355\u8BCD"><input id="textZh" placeholder="\u4E2D\u6587\u6838\u5FC3\u4E49\uFF0C\u53EF\u7559\u7A7A"></div><div class="row" style="margin-top:10px"><button id="useSelection" class="soft">\u4F7F\u7528\u9009\u4E2D\u7684\u8BCD</button><button id="addFromText" class="primary">\u52A0\u5165\u8BCD\u5E93</button></div></section></div></main>`;
   document.getElementById("textBack").onclick = () => {
     speechSynthesis.cancel();
     textReaderId = null;
@@ -4241,6 +4442,14 @@ function renderTextReader() {
   document.getElementById("playFull").onclick = () => speak(t.body);
   document.getElementById("playSentence").onclick = () => speakSentence(t, sentence);
   document.getElementById("dictateWholeSentence").onclick = () => startWholeSentenceFromText(t, sentenceRecord, idx);
+  document.getElementById("dictateWholeSequence").onclick = () => {
+    const entries = ss.slice(idx, idx + 10).map((row, offset) => {
+      const saved = ensureLinkedSentenceEntry(t, row, idx + offset);
+      return { bookId: saved.book.id, entryId: saved.entry.id };
+    });
+    persist();
+    startWholeSequence(entries, t.id);
+  };
   document.getElementById("dictateSentence").onclick = () => startLinkedSentenceDictation(t, sentenceRecord, idx);
   if (document.getElementById("dictateSentenceProblems")) document.getElementById("dictateSentenceProblems").onclick = () => startSentenceProblemRows(linkedRows, true, `${t.title} \xB7 \u7B2C ${idx + 1} \u53E5\u9519\u8BCD`, t.id);
   document.getElementById("prevSentence").onclick = () => {
@@ -4298,7 +4507,7 @@ function addWordFromText(source, sentence) {
   document.getElementById("textZh").value = "";
   toast(`\u5DF2\u52A0\u5165 ${en}`);
 }
-function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = "" }) {
+function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = "", overwrite = false }) {
   en = String(en || "").trim().toLowerCase();
   if (!en) return null;
   let w = state.words.find((x) => x.en === en);
@@ -4307,16 +4516,166 @@ function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = ""
     state.words.push(w);
   }
   if (isSimpleLexeme(state, en)) w.retired = true;
-  if (zh && !w.zh) w.zh = zh;
-  if (pos && !w.pos) w.pos = pos;
-  if (def && !w.def) w.def = def;
+  if (zh && (overwrite || !w.zh)) w.zh = zh;
+  if (pos && (overwrite || !w.pos)) w.pos = pos;
+  if (def && (overwrite || !w.def)) w.def = def;
   if (source && !w.sources.includes(source)) w.sources.push(source);
   if (example && !w.examples.includes(example)) w.examples.push(example);
   return w;
 }
+function wordEditorHtml() {
+  const w = wordById(wordEditId);
+  if (!w) return "";
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u7F16\u8F91\u5355\u8BCD</h2><div class="small">\u82F1\u6587\u4E3B\u952E\u4FDD\u6301\u4E0D\u53D8\uFF1B\u53EF\u4EE5\u6539\u91CA\u4E49\u3001\u8BCD\u6027\u3001\u82F1\u6587\u5B9A\u4E49\u3001\u4F8B\u53E5\u548C\u6240\u5C5E\u8BCD\u4E66\u3002</div></div><button id="cancelWordEdit" class="ghost">\u53D6\u6D88</button></div><div class="grid2" style="margin-top:12px"><div class="field"><label>\u82F1\u6587</label><input value="${esc(w.en)}" disabled></div><div class="field"><label>\u4E2D\u6587</label><input id="editWordZh" value="${esc(w.zh || "")}"></div><div class="field"><label>\u8BCD\u6027</label><input id="editWordPos" value="${esc(w.pos || "")}"></div><div class="field"><label>\u82F1\u6587\u91CA\u4E49</label><input id="editWordDef" value="${esc(w.def || "")}"></div></div><div class="field" style="margin-top:10px"><label>\u6240\u5C5E\u8BCD\u4E66\uFF08\u9017\u53F7\u5206\u9694\uFF09</label><input id="editWordSources" value="${esc((w.sources || []).join(", "))}"></div><div class="field" style="margin-top:10px"><label>\u4F8B\u53E5\uFF08\u6BCF\u884C\u4E00\u6761\uFF09</label><textarea id="editWordExamples" style="min-height:90px">${esc((w.examples || []).join("\n"))}</textarea></div><div class="row" style="margin-top:10px"><button id="saveWordEdit" class="primary">\u4FDD\u5B58\u4FEE\u6539</button><button id="deleteWordEdit" class="danger">\u5F7B\u5E95\u5220\u9664</button></div></section>`;
+}
+function bindWordEditor() {
+  const w = wordById(wordEditId);
+  if (!w) return;
+  document.getElementById("cancelWordEdit").onclick = () => {
+    wordEditId = null;
+    renderLibrary();
+  };
+  document.getElementById("saveWordEdit").onclick = () => {
+    updateWordFields(w, { zh: document.getElementById("editWordZh").value, pos: document.getElementById("editWordPos").value, def: document.getElementById("editWordDef").value, sources: document.getElementById("editWordSources").value.split(/[,，]/), examples: document.getElementById("editWordExamples").value.split(/\r?\n/) });
+    persist();
+    wordEditId = null;
+    toast("\u5355\u8BCD\u5DF2\u66F4\u65B0");
+    renderLibrary();
+  };
+  document.getElementById("deleteWordEdit").onclick = () => {
+    if (!confirm(`\u5F7B\u5E95\u5220\u9664\u300C${w.en}\u300D\uFF1F\u8FD9\u4F1A\u540C\u65F6\u5220\u9664\u5B83\u7684\u542C\u8BCD/\u624B\u6253\u5386\u53F2\u548C\u4ECA\u65E5\u8BA1\u5212\u5F15\u7528\uFF1B\u53E5\u5B50\u539F\u6587\u4E0D\u4F1A\u5220\u9664\u3002`)) return;
+    deleteWordEverywhere(state, w.id);
+    persist();
+    wordEditId = null;
+    toast("\u5DF2\u5220\u9664\u5355\u8BCD");
+    renderLibrary();
+  };
+}
+function importFieldSelect(field, label) {
+  if (!importDraft) return "";
+  const options = ['<option value="-1">\u4E0D\u5BFC\u5165</option>'];
+  for (let i = 0; i < importDraft.width; i++) {
+    const head = importDraft.header?.[i] || `\u7B2C ${i + 1} \u5217`;
+    options.push(`<option value="${i}" ${Number(importDraft.map[field]) === i ? "selected" : ""}>${esc(head)}</option>`);
+  }
+  return `<label class="small">${label}<select data-import-field="${field}">${options.join("")}</select></label>`;
+}
+function importPreviewHtml() {
+  if (!importDraft) return "";
+  const rows = recordsFromDraft(importDraft, importDraft.map);
+  const valid = rows.filter((r) => r.valid);
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u786E\u8BA4\u5BFC\u5165 \xB7 ${esc(importDraft.fileName)}</h2><div class="small">${importDraft.delimiter === "	" ? "TSV" : "CSV"} \xB7 ${valid.length} \u884C\u53EF\u5BFC\u5165\u3002\u5148\u786E\u8BA4\u5217\u6620\u5C04\uFF0C\u518D\u5199\u5165\u8BCD\u5E93\u3002</div></div><button id="cancelImportDraft" class="ghost">\u53D6\u6D88</button></div><div class="filtergrid" style="margin-top:12px">${importFieldSelect("en", "\u82F1\u6587")}${importFieldSelect("zh", "\u4E2D\u6587")}${importFieldSelect("pos", "\u8BCD\u6027")}${importFieldSelect("def", "\u82F1\u6587\u91CA\u4E49")}${importFieldSelect("source", "\u8BCD\u4E66/\u6765\u6E90")}${importFieldSelect("example", "\u4F8B\u53E5")}</div><label class="small" style="display:block;margin-top:10px"><input id="importOverwrite" type="checkbox" style="width:auto"> \u5DF2\u5B58\u5728\u5355\u8BCD\uFF1A\u7528\u672C\u6B21\u975E\u7A7A\u5B57\u6BB5\u8986\u76D6\u65E7\u91CA\u4E49/\u8BCD\u6027/\u5B9A\u4E49</label><div class="error-compact" style="margin-top:10px">${valid.slice(0, 10).map((r) => `<div class="error-row"><span class="en">${esc(r.en)}</span><span class="zh">${esc(r.zh || "\u2014")}</span><span class="small">${esc(r.source || "")}</span></div>`).join("") || '<div class="empty">\u6CA1\u6709\u53EF\u5BFC\u5165\u884C</div>'}</div><div class="row" style="margin-top:12px"><button id="confirmImportDraft" class="primary" ${valid.length ? "" : "disabled"}>\u786E\u8BA4\u5BFC\u5165 \xB7 ${valid.length}</button></div></section>`;
+}
+function bindImportPreview() {
+  if (!importDraft) return;
+  document.getElementById("cancelImportDraft").onclick = () => {
+    importDraft = null;
+    renderLibrary();
+  };
+  document.querySelectorAll("[data-import-field]").forEach((el) => el.onchange = () => {
+    importDraft.map[el.dataset.importField] = Number(el.value);
+    renderLibrary();
+  });
+  document.getElementById("confirmImportDraft").onclick = () => {
+    const overwrite = document.getElementById("importOverwrite").checked;
+    const rows = recordsFromDraft(importDraft, importDraft.map).filter((r) => r.valid);
+    let added = 0, updated = 0;
+    for (const row of rows) {
+      const existed = state.words.some((w) => w.en === String(row.en).trim().toLowerCase());
+      if (/错题|错词|error/i.test(row.source)) registerErrorBook(row.source);
+      upsertWord({ ...row, overwrite });
+      existed ? updated++ : added++;
+    }
+    persist();
+    importDraft = null;
+    toast(`\u5BFC\u5165\u5B8C\u6210\uFF1A\u65B0\u589E ${added} \xB7 \u5DF2\u5B58\u5728 ${updated}`);
+    renderLibrary();
+  };
+}
+function startFreeListen(book) {
+  if (!book) return toast("\u5148\u5728\u4E0B\u65B9\u9009\u62E9\u4E00\u672C\u5177\u4F53\u8BCD\u4E66");
+  const ids = state.words.filter((w) => !w.retired && (w.sources || []).includes(book)).map((w) => w.id);
+  if (!ids.length) return toast("\u8FD9\u672C\u8BCD\u4E66\u6CA1\u6709\u53EF\u81EA\u7531\u542C\u7684\u8BCD");
+  freeListen = { book, ids, index: 0, revealed: false, result: null, bad: [] };
+  renderFreeListen();
+  speak(wordById(ids[0]).en);
+}
+function freeListenCurrent() {
+  return wordById(freeListen?.ids?.[freeListen.index]);
+}
+function renderFreeListen() {
+  const w = freeListenCurrent();
+  if (!freeListen || !w) return finishFreeListen();
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="freeBack" class="back">\u2039</button><div class="studyprogress">\u81EA\u7531\u542C \xB7 ${esc(freeListen.book)} \xB7 ${freeListen.index + 1}/${freeListen.ids.length}</div><div></div></div><div class="studybody"><div class="small">\u672C\u6A21\u5F0F\u4E0D\u5199\u5165 FSRS\u3001\u4E0D\u5360\u4ECA\u65E5\u8BA1\u5212\uFF0C\u53EA\u4E34\u65F6\u6536\u96C6\u672C\u8F6E\u4E0D\u719F\u8BCD\u3002</div><button id="freeSpeak" class="speaker">\u25D6))</button>${freeListen.revealed ? `<div class="word ${freeListen.result === "good" ? "good" : "bad"}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div><div class="move"><button id="freeReplay" class="soft">\u91CD\u542C</button><button id="freeNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>` : `<div class="small">\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div><div class="judges"><button id="freeGood" class="goodbtn">\u719F\u6089</button><button id="freeBad" class="badbtn">\u4E0D\u719F\u6089</button></div>`}</div></main>`;
+  document.getElementById("freeBack").onclick = () => {
+    freeListen = null;
+    view = "library";
+    renderLibrary();
+  };
+  document.getElementById("freeSpeak").onclick = () => speak(w.en);
+  if (!freeListen.revealed) {
+    document.getElementById("freeGood").onclick = () => {
+      freeListen.result = "good";
+      freeListen.revealed = true;
+      renderFreeListen();
+    };
+    document.getElementById("freeBad").onclick = () => {
+      freeListen.result = "bad";
+      freeListen.revealed = true;
+      if (!freeListen.bad.includes(w.id)) freeListen.bad.push(w.id);
+      renderFreeListen();
+    };
+  } else {
+    document.getElementById("freeReplay").onclick = () => speak(w.en);
+    document.getElementById("freeNext").onclick = () => {
+      freeListen.index++;
+      freeListen.revealed = false;
+      freeListen.result = null;
+      if (freeListen.index >= freeListen.ids.length) finishFreeListen();
+      else {
+        renderFreeListen();
+        speak(freeListenCurrent().en);
+      }
+    };
+  }
+}
+function addFreeBadToToday(ids) {
+  const date = currentDayKey();
+  const books = state.settings.todayBooks || [];
+  const plan = ensureDailyPlan(state, planForTodayOptions(date, books));
+  if (plan.mode === "sequential") return toast("\u5F53\u524D\u662F\u5206\u672C\u4F9D\u6B21\u8BA1\u5212\uFF0C\u8BF7\u5728\u4ECA\u65E5\u9875\u8C03\u6574\u540E\u518D\u52A0\u5165");
+  let added = 0;
+  for (const id3 of ids) {
+    if (plan.newIds.includes(id3) || plan.reviewIds.includes(id3)) continue;
+    (hasEventBefore(state, id3, date) ? plan.reviewIds : plan.newIds).push(id3);
+    added++;
+  }
+  plan.newTarget = Math.max(plan.newTarget, plan.newIds.length);
+  plan.reviewTarget = Math.max(plan.reviewTarget, plan.reviewIds.length);
+  plan.updatedAt = Date.now();
+  persist();
+  toast(`\u5DF2\u52A0\u5165\u4ECA\u65E5\u8BA1\u5212 ${added} \u4E2A`);
+}
+function finishFreeListen() {
+  if (!freeListen) return;
+  const run = freeListen;
+  const bad = [...run.bad];
+  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u81EA\u7531\u542C\u5B8C\u6210 \xB7 \u4E0D\u5F71\u54CD FSRS</div><h2>${esc(run.book)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${run.ids.length}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u672C\u8F6E\u4E0D\u719F</span></div><div class="statbox"><b>${run.ids.length - bad.length}</b><span>\u5176\u4F59\u719F\u6089</span></div></div><div class="row" style="justify-content:center">${bad.length ? `<button id="freeToType" class="primary">\u624B\u6253\u8FD9\u6279 \xB7 ${bad.length}</button><button id="freeToToday" class="soft">\u52A0\u5165\u4ECA\u65E5\u8BA1\u5212</button>` : ""}<button id="freeFinish" class="ghost">\u8FD4\u56DE\u8BCD\u5E93</button></div></div></div></main>`;
+  if (document.getElementById("freeToType")) document.getElementById("freeToType").onclick = () => {
+    freeListen = null;
+    view = "type";
+    startType(bad, `${run.book} \xB7 \u81EA\u7531\u542C\u4E0D\u719F`);
+  };
+  if (document.getElementById("freeToToday")) document.getElementById("freeToToday").onclick = () => addFreeBadToToday(bad);
+  document.getElementById("freeFinish").onclick = () => {
+    freeListen = null;
+    view = "library";
+    renderLibrary();
+  };
+}
 function renderLibrary() {
   const books = allBooks(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${errorBookSectionHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="freeListenBook" class="soft">\u81EA\u7531\u542C\u5F53\u524D\u8BCD\u4E66</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${errorBookSectionHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("importWords").onclick = () => importInput.click();
   document.getElementById("backupWords").onclick = backup;
   document.getElementById("restoreWords").onclick = () => restoreInput.click();
@@ -4338,39 +4697,35 @@ function renderLibrary() {
     state.settings.speechRate = Math.min(1.5, Math.max(0.5, Number(e.target.value) || 0.92));
     persist();
   };
+  document.getElementById("freeListenBook").onclick = () => startFreeListen(document.getElementById("wordBook").value);
   drawWordList();
+  bindWordEditor();
+  bindImportPreview();
 }
 function drawWordList() {
   const box = document.getElementById("wordList");
   if (!box) return;
   const q = document.getElementById("wordSearch").value.trim().toLowerCase(), book = document.getElementById("wordBook").value;
   const list = state.words.filter((w) => (!book || w.sources.includes(book)) && (!q || `${w.en} ${w.zh}`.toLowerCase().includes(q))).slice(0, 200);
-  box.innerHTML = list.length ? list.map((w) => `<div class="listitem compact-word"><div class="space"><div style="min-width:0"><div class="word-main"><b>${esc(w.en)}</b>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : ""}<span class="word-meaning">${esc(w.zh || "")}</span></div><div class="source-tags" style="justify-content:flex-start">${w.sources.map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div></div><button class="soft" data-retire="${w.id}">${w.retired ? "\u6062\u590D" : "\u7B80\u5355"}</button></div></div>`).join("") : '<div class="empty">\u6CA1\u6709\u5339\u914D\u7684\u8BCD\u3002</div>';
+  box.innerHTML = list.length ? list.map((w) => `<div class="listitem compact-word"><div class="space"><div style="min-width:0"><div class="word-main"><b>${esc(w.en)}</b>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : ""}<span class="word-meaning">${esc(w.zh || "")}</span></div><div class="source-tags" style="justify-content:flex-start">${w.sources.map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div></div><div class="row"><button class="ghost" data-edit-word="${w.id}">\u7F16\u8F91</button><button class="soft" data-retire="${w.id}">${w.retired ? "\u6062\u590D" : "\u7B80\u5355"}</button><button class="danger" data-delete-word="${w.id}">\u5220\u9664</button></div></div></div>`).join("") : '<div class="empty">\u6CA1\u6709\u5339\u914D\u7684\u8BCD\u3002</div>';
   document.querySelectorAll("[data-retire]").forEach((b) => b.onclick = () => {
     const w = wordById(b.dataset.retire);
     markSimpleLexeme(state, w.en, !w.retired);
     persist();
     drawWordList();
   });
-}
-function parseWordFile(text, name) {
-  const lines = String(text).replace(/^\uFEFF/, "").split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  const fileSource = name.replace(/\.(csv|txt|tsv)$/i, "") || "\u5BFC\u5165\u8BCD\u5E93";
-  let count = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const sep = lines[i].includes("	") ? "	" : ",";
-    const parts = lines[i].split(sep).map((x) => x.trim().replace(/^"|"$/g, ""));
-    if (i === 0 && /^(en|english|word|单词)$/i.test(parts[0])) continue;
-    const [en, zh, pos, def, rowSource, example] = parts;
-    if (!en) continue;
-    const source = rowSource || fileSource;
-    if (/错题|错词|error/i.test(source)) registerErrorBook(source);
-    upsertWord({ en, zh, pos, def, source, example: example || "" });
-    count++;
-  }
-  persist();
-  toast(`\u5DF2\u5BFC\u5165 ${count} \u884C`);
-  renderLibrary();
+  document.querySelectorAll("[data-edit-word]").forEach((b) => b.onclick = () => {
+    wordEditId = b.dataset.editWord;
+    renderLibrary();
+  });
+  document.querySelectorAll("[data-delete-word]").forEach((b) => b.onclick = () => {
+    const w = wordById(b.dataset.deleteWord);
+    if (!w || !confirm(`\u5F7B\u5E95\u5220\u9664\u300C${w.en}\u300D\uFF1F\u5B66\u4E60\u5386\u53F2\u548C\u4ECA\u65E5\u8BA1\u5212\u5F15\u7528\u4E5F\u4F1A\u5220\u9664\u3002`)) return;
+    deleteWordEverywhere(state, w.id);
+    persist();
+    toast("\u5DF2\u5220\u9664\u5355\u8BCD");
+    renderLibrary();
+  });
 }
 function backup() {
   download(`listenwrite-backup-${currentDayKey()}.json`, exportState(state));
@@ -4478,6 +4833,7 @@ function bindStatsActions() {
 }
 function render() {
   try {
+    if (freeListen) return renderFreeListen();
     if (listen) return renderListen();
     if (typeRun) return renderTypeRun();
     if (sentenceRun) return renderSentenceRun();
@@ -4509,7 +4865,10 @@ restoreInput.onchange = async () => {
 importInput.onchange = async () => {
   const f = importInput.files?.[0];
   if (!f) return;
-  parseWordFile(await f.text(), f.name);
+  importDraft = buildImportDraft(await f.text(), f.name);
+  wordEditId = null;
+  view = "library";
+  renderLibrary();
   importInput.value = "";
 };
 textInput.onchange = async () => {
