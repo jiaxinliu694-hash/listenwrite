@@ -1819,7 +1819,9 @@ function createScheduler(retention = 0.9) {
   return fsrs({
     request_retention: Math.min(0.97, Math.max(0.75, Number(retention) || 0.9)),
     maximum_interval: 36500,
-    enable_fuzz: true,
+    // Cards can be rebuilt from the event log. Fuzz would make the same history
+    // produce a different due date after a reload/import, so keep it disabled.
+    enable_fuzz: false,
     enable_short_term: false,
     learning_steps: [],
     relearning_steps: []
@@ -1870,7 +1872,7 @@ function advanceCard(card, event, retention = 0.9) {
   return serializeCard(result.card);
 }
 function rebuildCard(events, retention = 0.9) {
-  const cold = [...events].filter((event) => event.cold && (event.result === "good" || event.result === "bad")).sort((a, b) => a.ts - b.ts);
+  const cold = [...events].filter((event) => event.cold && event.mode === "listen" && (event.result === "good" || event.result === "bad")).sort((a, b) => a.ts - b.ts);
   let card = emptyCard(cold[0]?.ts || Date.now());
   for (const event of cold) card = advanceCard(card, event, retention);
   return card;
@@ -2440,16 +2442,30 @@ var STORE = "kv";
 var STATE_KEY = "state";
 var LEGACY_KEY = "listenwrite-v2";
 var FALLBACK_KEY = "listenwrite-v3-fallback";
+var STATE_VERSION = 10;
+var dbPromise = null;
 function openDB() {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    req.onerror = () => {
+      dbPromise = null;
+      reject(req.error);
+    };
   });
+  return dbPromise;
 }
 async function dbGet(key) {
   const db = await openDB();
@@ -2471,7 +2487,7 @@ async function dbSet(key, value) {
 }
 function defaultState() {
   return {
-    version: 9,
+    version: STATE_VERSION,
     words: [],
     events: [],
     texts: [],
@@ -2567,14 +2583,18 @@ function normalizePlan(plan, key) {
   };
 }
 function reindexEvents(events) {
-  const firstByWordDay = /* @__PURE__ */ new Set();
+  const firstListenByWordDay = /* @__PURE__ */ new Set();
   const attempts = /* @__PURE__ */ new Map();
   events.sort((a, b) => a.ts - b.ts);
   for (const e of events) {
-    const coldKey = `${e.wordId}|${e.date}`;
-    e.cold = !firstByWordDay.has(coldKey);
-    firstByWordDay.add(coldKey);
-    const attemptKey = `${coldKey}|${e.mode}`;
+    const dayKey2 = `${e.wordId}|${e.date}`;
+    if (e.mode === "listen") {
+      e.cold = !firstListenByWordDay.has(dayKey2);
+      firstListenByWordDay.add(dayKey2);
+    } else {
+      e.cold = false;
+    }
+    const attemptKey = `${dayKey2}|${e.mode}`;
     const n = (attempts.get(attemptKey) || 0) + 1;
     attempts.set(attemptKey, n);
     e.attempt = n;
@@ -2589,6 +2609,8 @@ function normalizeActivities(list, preserveDate) {
 }
 function normalizeState(input) {
   const base = defaultState();
+  const inputVersion = Number(input?.version) || 0;
+  const migrateScheduling = inputVersion < STATE_VERSION;
   const oldSettings = input?.settings || input?.set || {};
   const state2 = { ...base, ...input || {} };
   const oldNew = Number(oldSettings.defaultNewTarget ?? oldSettings.newTarget ?? oldSettings.newN ?? base.settings.defaultNewTarget);
@@ -2611,7 +2633,7 @@ function normalizeState(input) {
   delete state2.settings.reviewN;
   delete state2.settings.rate;
   state2.settings.retention = Math.min(0.97, Math.max(0.75, Number(state2.settings.retention) || 0.9));
-  const preserveDates = Number(input?.version) >= 4;
+  const preserveDates = inputVersion >= 4;
   state2.words = (input?.words || []).map(normalizeWord).filter((w) => w.en);
   state2.events = reindexEvents((input?.events || []).map((e, i) => normalizeEvent(e, i, preserveDates)).filter((e) => e.wordId));
   state2.texts = normalizeTexts(input?.texts);
@@ -2623,15 +2645,19 @@ function normalizeState(input) {
   state2.errorBooks = [...inferredErrorBooks];
   state2.activities = normalizeActivities(input?.activities, preserveDates);
   state2.dailyPlans = {};
-  if (Number(input?.version) >= 4 && input?.dailyPlans && typeof input.dailyPlans === "object" && !Array.isArray(input.dailyPlans)) {
+  if (inputVersion >= 4 && input?.dailyPlans && typeof input.dailyPlans === "object" && !Array.isArray(input.dailyPlans)) {
     for (const [key, plan] of Object.entries(input.dailyPlans)) state2.dailyPlans[key] = normalizePlan(plan, key);
   }
   for (const word of state2.words) {
     if (state2.simpleWords.includes(word.en)) word.retired = true;
-    const evs = state2.events.filter((e) => e.wordId === word.id && e.cold).sort((a, b) => a.ts - b.ts);
-    word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : word.card || emptyCard();
+    const evs = state2.events.filter((e) => e.wordId === word.id && e.cold && e.mode === "listen").sort((a, b) => a.ts - b.ts);
+    if (migrateScheduling) {
+      word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : emptyCard();
+    } else if (!word.card) {
+      word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : emptyCard();
+    }
   }
-  state2.version = 9;
+  state2.version = STATE_VERSION;
   return state2;
 }
 async function parseLocal(key) {
@@ -2666,7 +2692,7 @@ async function loadState() {
   }
 }
 async function saveState(state2) {
-  state2.version = 9;
+  state2.version = STATE_VERSION;
   ensureSimpleWords(state2);
   try {
     await dbSet(STATE_KEY, state2);
@@ -2700,7 +2726,7 @@ function latestEventOnDay(state2, wordId, date = dayKey(), mode = null) {
   return list[list.length - 1] || null;
 }
 function hasEventBefore(state2, wordId, date = dayKey()) {
-  return state2.events.some((e) => e.wordId === wordId && e.date < date);
+  return state2.events.some((e) => e.wordId === wordId && e.mode === "listen" && e.date < date);
 }
 function isDailyPlanComplete(state2, date, ts = Date.now()) {
   const plan = state2.dailyPlans?.[date];
@@ -2726,7 +2752,7 @@ function activeStudyDayKey(state2, ts = Date.now()) {
 function recordAttempt(state2, word, mode, result, context = {}) {
   const ts = context.ts || Date.now();
   const date = context.date || activeStudyDayKey(state2, ts);
-  const cold = !state2.events.some((e) => e.wordId === word.id && e.date === date);
+  const cold = mode === "listen" && !state2.events.some((e) => e.wordId === word.id && e.date === date && e.mode === "listen");
   const attempt = eventsOnDay(state2, word.id, date, mode).length + 1;
   const event = {
     id: uid("ev"),
@@ -2759,7 +2785,7 @@ function editAttempt(state2, eventId, result) {
 function rebuildAllCards(state2) {
   for (const word of state2.words) {
     const events = wordEvents(state2, word.id);
-    word.card = events.some((e) => e.cold) ? rebuildCard(events, state2.settings.retention) : word.card || emptyCard();
+    word.card = events.some((e) => e.cold && e.mode === "listen") ? rebuildCard(events, state2.settings.retention) : word.card || emptyCard();
   }
 }
 
