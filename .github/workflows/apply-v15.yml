@@ -18,6 +18,15 @@ jobs:
         with:
           node-version: 20
       - run: npm install
+      - name: Correct one-shot patch escaping
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/apply-v15.mjs')
+          s = p.read_text()
+          s = s.replace('\\\\`', '\\`')
+          p.write_text(s)
+          PY
       - run: node tools/apply-v15.mjs
       - run: node --check src/queue.js
       - run: node --check src/storage.js
@@ -26,7 +35,7 @@ jobs:
       - run: npm run build
       - name: Commit patched source and bundle
         run: |
-          rm tools/apply-v15.mjs .github/workflows/apply-v15.yml
+          rm -f tools/apply-v15.mjs .github/workflows/apply-v15.yml .github/workflows/apply-v15-retry.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
