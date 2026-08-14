@@ -97,6 +97,7 @@ function normalizeWord(word, index) {
     examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [],
     retired: Boolean(word.retired ?? word.ret),
     reviewHint: Boolean(word.reviewHint ?? word.priorExposure),
+    needsMeaning: Boolean(word.needsMeaning) && !String(word.zh || '').trim(),
     card: word.card || null,
   };
 }

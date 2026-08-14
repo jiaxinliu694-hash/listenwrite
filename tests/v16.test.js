@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { defaultState } from '../src/storage.js';
 import { recordAttempt, eventsOnDay } from '../src/engine.js';
 import { ensureDailyPlan, createRetrySession, pickNext, finishCurrent, planStatus } from '../src/queue.js';
-import { reinforcementState, reinforcementDelayMs } from '../src/reinforcement.js';
+import { reinforcementState, reinforcementGapWords } from '../src/reinforcement.js';
 
 function makeWords(n, source='A') {
   return Array.from({length:n}, (_,i)=>({ id:`w${i+1}`, en:`word${i+1}`, zh:'义', sources:[source], examples:[], retired:false, card:null }));
@@ -28,25 +28,27 @@ test('one bad requires three consecutive good judgments, and another bad resets 
   assert.equal(reset.passed,false);
 });
 
-test('reinforcement intervals increase across the three recovery steps', () => {
+test('reinforcement word gaps increase across the three recovery steps', () => {
   const e=(result,ts)=>({result,ts});
-  const afterBad=reinforcementDelayMs([e('bad',1)]);
-  const afterGood1=reinforcementDelayMs([e('bad',1),e('good',2)]);
-  const afterGood2=reinforcementDelayMs([e('bad',1),e('good',2),e('good',3)]);
+  const afterBad=reinforcementGapWords([e('bad',1)]);
+  const afterGood1=reinforcementGapWords([e('bad',1),e('good',2)]);
+  const afterGood2=reinforcementGapWords([e('bad',1),e('good',2),e('good',3)]);
   assert.ok(afterBad > 0);
   assert.ok(afterGood1 > afterBad);
   assert.ok(afterGood2 > afterGood1);
 });
 
-test('retry cannot reappear before its minimum time interval', () => {
-  const s=makeState(1); const date='2026-08-14';
-  const p=ensureDailyPlan(s,{date,books:['A'],newTarget:1,reviewTarget:0});
+test('retry waits for its minimum intervening-word gap when enough words exist', () => {
+  const s=makeState(7); const date='2026-08-14';
+  const p=ensureDailyPlan(s,{date,books:['A'],newTarget:7,reviewTarget:0});
   const session=createRetrySession(s,p,'listen');
-  const id=pickNext(session,1000);
-  recordAttempt(s,s.words[0],'listen','bad',{date,ts:1000});
+  const id=pickNext(session);
+  recordAttempt(s,s.words.find(w=>w.id===id),'listen','bad',{date,ts:1000});
   finishCurrent(session,'bad',s);
-  assert.equal(pickNext(session,1001),null);
-  assert.equal(pickNext(session,31_001),id);
+  const seen=[];
+  for(let i=0;i<5;i++){const other=pickNext(session);assert.notEqual(other,id);seen.push(other);recordAttempt(s,s.words.find(w=>w.id===other),'listen','good',{date,ts:2000+i});finishCurrent(session,'good',s);}
+  assert.equal(new Set(seen).size,5);
+  assert.equal(pickNext(session),id);
 });
 
 test('raising today target preserves completed progress and only appends untouched words', () => {

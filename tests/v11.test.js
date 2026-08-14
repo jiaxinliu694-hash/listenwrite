@@ -15,7 +15,7 @@ test('history edit to bad is immediately returned to retry pool', () => {
   resyncRetryForWord(session, state, 'w1', '2026-08-14', 'listen');
   assert.equal(session.retry.length, 1);
   assert.equal(session.retry[0].wordId, 'w1');
-  assert.equal(session.retry[0].eligibleAt, 31000);
+  assert.equal(session.retry[0].eligibleTurn, 8);
 });
 
 test('history edit back to good removes stale retry entry', () => {

@@ -2260,8 +2260,78 @@ function tokenizeEnglish(text, options = {}) {
     return true;
   });
 }
+var SMALL = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+var TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+var ORDINAL = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12, thirteenth: 13, fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17, eighteenth: 18, nineteenth: 19, twentieth: 20, thirtieth: 30, fortieth: 40, fiftieth: 50, sixtieth: 60, seventieth: 70, eightieth: 80, ninetieth: 90 };
+function wordsToNumber(text) {
+  const parts = normalizeToken(text).replace(/-/g, " ").split(/\s+/).filter(Boolean).filter((x) => x !== "and");
+  if (!parts.length) return null;
+  let total = 0, current = 0, used = false;
+  for (const p of parts) {
+    if (p in SMALL) {
+      current += SMALL[p];
+      used = true;
+    } else if (p in TENS) {
+      current += TENS[p];
+      used = true;
+    } else if (p === "hundred") {
+      current = (current || 1) * 100;
+      used = true;
+    } else if (p === "thousand") {
+      total += (current || 1) * 1e3;
+      current = 0;
+      used = true;
+    } else return null;
+  }
+  return used ? total + current : null;
+}
+function numericValue(text) {
+  const clean = normalizeToken(text).replace(/,/g, "");
+  if (/^\d+(?:\.\d+)?$/.test(clean)) return Number(clean);
+  return wordsToNumber(clean);
+}
+function numericCanonical(value) {
+  const s = normalizeToken(value).replace(/[–—]/g, "-").replace(/,/g, "").trim();
+  let m = s.match(/^£\s*(\d+(?:\.\d+)?)$/);
+  if (m) return "gbp:" + Number(m[1]);
+  m = s.match(/^(.*?)\s*(?:pounds?|gbp)$/);
+  if (m) {
+    const n2 = numericValue(m[1]);
+    if (n2 != null) return "gbp:" + n2;
+  }
+  m = s.match(/^\$\s*(\d+(?:\.\d+)?)$/);
+  if (m) return "usd:" + Number(m[1]);
+  m = s.match(/^(.*?)\s*(?:dollars?|usd)$/);
+  if (m) {
+    const n2 = numericValue(m[1]);
+    if (n2 != null) return "usd:" + n2;
+  }
+  m = s.match(/^(\d+(?:\.\d+)?)%$/);
+  if (m) return "pct:" + Number(m[1]);
+  m = s.match(/^(.*?)\s*(?:percent|per cent)$/);
+  if (m) {
+    const n2 = numericValue(m[1]);
+    if (n2 != null) return "pct:" + n2;
+  }
+  m = s.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (m) return "time:" + Number(m[1]) + ":" + String(Number(m[2])).padStart(2, "0");
+  m = s.match(/^(.*?)\s+(.*?)$/);
+  if (m) {
+    const h = numericValue(m[1]), min = numericValue(m[2]);
+    if (h != null && min != null && h <= 24 && min < 60) return "time:" + h + ":" + String(min).padStart(2, "0");
+  }
+  m = s.match(/^(\d+)(?:st|nd|rd|th)$/);
+  if (m) return "ord:" + Number(m[1]);
+  if (s in ORDINAL) return "ord:" + ORDINAL[s];
+  const n = numericValue(s);
+  return n == null ? null : "num:" + n;
+}
 function spellingMatches(input, answer) {
-  return normalizeToken(input) === normalizeToken(answer);
+  const exact = normalizeToken(input) === normalizeToken(answer);
+  if (exact) return true;
+  if (!/[0-9$£€¥%]/.test(String(answer))) return false;
+  const a = numericCanonical(answer), b = numericCanonical(input);
+  return Boolean(a && b && a === b);
 }
 
 // src/textsentences.js
@@ -2539,6 +2609,7 @@ function normalizeWord(word, index) {
     examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [],
     retired: Boolean(word.retired ?? word.ret),
     reviewHint: Boolean(word.reviewHint ?? word.priorExposure),
+    needsMeaning: Boolean(word.needsMeaning) && !String(word.zh || "").trim(),
     card: word.card || null
   };
 }
@@ -2740,12 +2811,13 @@ function reinforcementState(events = []) {
     last: list.at(-1) || null
   };
 }
-function reinforcementDelayMs(events = []) {
+var REINFORCEMENT_GAPS = [5, 8, 12];
+function reinforcementGapWords(events = []) {
   const state2 = reinforcementState(events);
   if (!state2.started || state2.passed || !state2.hadBad) return 0;
-  if (state2.last?.result === "bad") return 3e4;
-  if (state2.goodStreak === 1) return 9e4;
-  if (state2.goodStreak === 2) return 18e4;
+  if (state2.last?.result === "bad") return REINFORCEMENT_GAPS[0];
+  if (state2.goodStreak === 1) return REINFORCEMENT_GAPS[1];
+  if (state2.goodStreak === 2) return REINFORCEMENT_GAPS[2];
   return 0;
 }
 function reinforcementLabel(events = []) {
@@ -2766,10 +2838,6 @@ function wordEvents(state2, wordId) {
 }
 function eventsOnDay(state2, wordId, date = dayKey(), mode = null) {
   return state2.events.filter((e) => e.wordId === wordId && e.date === date && (!mode || e.mode === mode)).sort((a, b) => a.ts - b.ts);
-}
-function latestEventOnDay(state2, wordId, date = dayKey(), mode = null) {
-  const list = eventsOnDay(state2, wordId, date, mode);
-  return list[list.length - 1] || null;
 }
 function hasEventBefore(state2, wordId, date = dayKey()) {
   return state2.events.some((e) => e.wordId === wordId && e.mode === "listen" && e.date < date);
@@ -3188,41 +3256,40 @@ function todayListeningStats(state2, books = [], date = activeStudyDayKey(state2
   return { events, ids, newCount, reviewCount, firstGood, firstBad };
 }
 function createRetrySession(state2, plan, mode = "listen", explicitIds = null) {
-  const planIds = explicitIds || [...plan.reviewIds, ...plan.newIds];
+  const planIds = [...new Set(explicitIds || [...plan.reviewIds, ...plan.newIds])];
   const wordMap = new Map(state2.words.map((w) => [w.id, w]));
   const pendingBase = [];
   const retry = [];
-  if (explicitIds) {
-    for (const id3 of [...new Set(planIds)]) {
-      const word = wordMap.get(id3);
-      if (word && !word.retired) pendingBase.push(id3);
-    }
-  } else {
-    for (const id3 of planIds) {
-      const word = wordMap.get(id3);
-      if (!word || word.retired) continue;
-      const events = eventsOnDay(state2, id3, plan.date, mode);
-      const reinforce = reinforcementState(events);
-      if (!reinforce.started) pendingBase.push(id3);
-      else if (!reinforce.passed) {
-        retry.push({
-          wordId: id3,
-          attempt: events.length,
-          eligibleAt: Number(reinforce.last?.ts || 0) + reinforcementDelayMs(events),
-          addedAt: reinforce.last?.ts || 0
-        });
-      }
-    }
-    if (plan.resumeWordId) {
-      const i = pendingBase.indexOf(plan.resumeWordId);
-      if (i > 0) pendingBase.unshift(pendingBase.splice(i, 1)[0]);
-    }
+  const completedIds = [];
+  for (const id3 of planIds) {
+    const word = wordMap.get(id3);
+    if (!word || word.retired) continue;
+    const events = eventsOnDay(state2, id3, plan.date, mode);
+    const reinforce = reinforcementState(events);
+    if (!reinforce.started) pendingBase.push(id3);
+    else if (reinforce.passed) completedIds.push(id3);
+    else retry.push({ wordId: id3, attempt: events.length, eligibleTurn: reinforcementGapWords(events), addedTurn: 0 });
   }
-  return { mode, date: plan.date, fixedIds: [...new Set(planIds)], pendingBase, retry, turn: 0, current: null, history: [] };
+  if (!explicitIds && plan.resumeWordId) {
+    const i = pendingBase.indexOf(plan.resumeWordId);
+    if (i > 0) pendingBase.unshift(pendingBase.splice(i, 1)[0]);
+  }
+  return { mode, date: plan.date, fixedIds: planIds, pendingBase, retry, completedIds, turn: 0, current: null, history: [], bufferCursor: 0, lastWordId: null };
 }
-function pickNext(session, now = Date.now()) {
+function retryDue(session) {
+  return (session.retry || []).filter((x) => Number(x.eligibleTurn || 0) <= session.turn).sort((a, b) => Number(a.eligibleTurn || 0) - Number(b.eligibleTurn || 0) || Number(a.addedTurn || 0) - Number(b.addedTurn || 0))[0] || null;
+}
+function pickBufferWord(session) {
+  const blocked = new Set((session.retry || []).map((x) => x.wordId));
+  const pool = (session.completedIds || []).filter((id4) => !blocked.has(id4) && id4 !== session.lastWordId);
+  if (!pool.length) return null;
+  const id3 = pool[session.bufferCursor % pool.length];
+  session.bufferCursor = (session.bufferCursor + 1) % Math.max(1, pool.length);
+  return id3;
+}
+function pickNext(session) {
   if (session.current) return session.current.wordId;
-  const due = session.retry.filter((x) => Number(x.eligibleAt || 0) <= now).sort((a, b) => Number(a.eligibleAt || 0) - Number(b.eligibleAt || 0) || a.addedAt - b.addedAt)[0];
+  const due = retryDue(session);
   if (due) {
     session.retry = session.retry.filter((x) => x !== due);
     session.current = { wordId: due.wordId, source: "retry", attempt: due.attempt + 1 };
@@ -3233,47 +3300,64 @@ function pickNext(session, now = Date.now()) {
     session.current = { wordId: baseId, source: "base", attempt: 1 };
     return baseId;
   }
+  if (session.retry?.length) {
+    const bufferId = pickBufferWord(session);
+    if (bufferId) {
+      session.current = { wordId: bufferId, source: "buffer", attempt: 0 };
+      return bufferId;
+    }
+    const tail = [...session.retry].sort((a, b) => Number(a.eligibleTurn || 0) - Number(b.eligibleTurn || 0))[0];
+    session.retry = session.retry.filter((x) => x !== tail);
+    session.current = { wordId: tail.wordId, source: "tail-retry", attempt: tail.attempt + 1, gapShortfall: Math.max(0, Number(tail.eligibleTurn || 0) - session.turn) };
+    return tail.wordId;
+  }
   return null;
 }
-function nextRetryDelayMs(session, now = Date.now()) {
+function nextRetryGap(session) {
   if (!session?.retry?.length) return 0;
-  return Math.max(0, Math.min(...session.retry.map((x) => Number(x.eligibleAt || 0))) - now);
+  return Math.max(0, Math.min(...session.retry.map((x) => Number(x.eligibleTurn || 0))) - Number(session.turn || 0));
 }
 function finishCurrent(session, result, state2 = null) {
   if (!session.current) return;
   const current = session.current;
   session.history.push({ ...current, result, turn: session.turn });
   session.turn += 1;
-  session.retry = session.retry.filter((x) => x.wordId !== current.wordId);
+  session.lastWordId = current.wordId;
+  session.retry = (session.retry || []).filter((x) => x.wordId !== current.wordId);
+  if (current.source === "buffer") {
+    session.current = null;
+    return;
+  }
   if (state2) {
     const events = eventsOnDay(state2, current.wordId, session.date, session.mode);
     const reinforce = reinforcementState(events);
-    if (!reinforce.passed) {
+    session.completedIds = (session.completedIds || []).filter((id3) => id3 !== current.wordId);
+    if (reinforce.passed) {
+      if (!session.completedIds.includes(current.wordId)) session.completedIds.push(current.wordId);
+    } else {
       session.retry.push({
         wordId: current.wordId,
         attempt: events.length,
-        eligibleAt: Number(reinforce.last?.ts || Date.now()) + reinforcementDelayMs(events),
-        addedAt: reinforce.last?.ts || Date.now()
+        eligibleTurn: session.turn + reinforcementGapWords(events),
+        addedTurn: session.turn
       });
     }
-  } else if (result === "bad") {
-    session.retry.push({ wordId: current.wordId, attempt: current.attempt, eligibleAt: Date.now() + 3e4, addedAt: Date.now() });
   }
   session.current = null;
 }
 function resyncRetryForWord(session, state2, wordId, date = session?.date, mode = session?.mode || "listen") {
   if (!session || !wordId) return;
   session.retry = (session.retry || []).filter((x) => x.wordId !== wordId);
+  session.completedIds = (session.completedIds || []).filter((id3) => id3 !== wordId);
   if (session.current?.wordId === wordId || (session.pendingBase || []).includes(wordId)) return;
   const events = eventsOnDay(state2, wordId, date, mode);
   const reinforce = reinforcementState(events);
-  if (!reinforce.started || reinforce.passed) return;
-  session.retry.push({
-    wordId,
-    attempt: events.length,
-    eligibleAt: Number(reinforce.last?.ts || 0) + reinforcementDelayMs(events),
-    addedAt: reinforce.last?.ts || 0
-  });
+  if (!reinforce.started) return;
+  if (reinforce.passed) {
+    session.completedIds.push(wordId);
+    return;
+  }
+  session.retry.push({ wordId, attempt: events.length, eligibleTurn: session.turn + reinforcementGapWords(events), addedTurn: session.turn });
 }
 function sessionProgress(state2, plan, session) {
   const status = planStatus(state2, plan);
@@ -3460,7 +3544,10 @@ function unique2(values) {
 }
 function updateWordFields(word, patch = {}) {
   if (!word) return null;
-  if ("zh" in patch) word.zh = String(patch.zh || "").trim();
+  if ("zh" in patch) {
+    word.zh = String(patch.zh || "").trim();
+    if (word.zh) word.needsMeaning = false;
+  }
   if ("pos" in patch) word.pos = String(patch.pos || "").trim();
   if ("def" in patch) word.def = String(patch.def || "").trim();
   if ("sources" in patch) word.sources = unique2(patch.sources);
@@ -3891,6 +3978,23 @@ function renderListen() {
     renderToday();
     return;
   }
+  if (!listen.historyView && listen.session.current?.source === "buffer") {
+    const gap = nextRetryGap(listen.session);
+    root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">\u95F4\u9694\u8BCD \xB7 \u4E0D\u8BA1\u5B66\u4E60\u8BB0\u5F55</div></div><div class="studybody"><div class="small">\u961F\u5C3E\u5F85\u5DE9\u56FA\u8BCD\u8FD8\u5DEE\u7EA6 ${gap} \u4E2A\u5176\u4ED6\u8BCD\uFF1B\u8FD9\u5F20\u53EA\u8D1F\u8D23\u62C9\u5F00\u95F4\u9694\uFF0C\u4E0D\u6539 FSRS\u3001\u4E0D\u6539 3/3\u3002</div><button id="speakWord" class="speaker">\u25D6))</button><div class="word">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "")}</div><button id="bufferNext" class="primary" style="margin-top:18px">\u7EE7\u7EED</button></div></main>`;
+    document.getElementById("listenBack").onclick = () => {
+      touchActivity(listen.activityId);
+      listen = null;
+      view = "today";
+      renderToday();
+    };
+    document.getElementById("speakWord").onclick = () => speak(w.en);
+    document.getElementById("bufferNext").onclick = () => {
+      finishCurrent(listen.session, "buffer");
+      touchActivity(listen.activityId);
+      advanceListen();
+    };
+    return;
+  }
   const p = sessionProgress(state, listen.plan, listen.session);
   const reviewing = Boolean(listen.historyView);
   const result = reviewing ? listen.historyView.result : listen.result;
@@ -3971,19 +4075,6 @@ function advanceListen() {
     speak(wordById(id3).en);
     return;
   }
-  const waitMs = nextRetryDelayMs(listen.session);
-  if (waitMs > 0) {
-    listen.plan.resumeWordId = null;
-    persist();
-    const seconds = Math.max(1, Math.ceil(waitMs / 1e3));
-    root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u8FD8\u6709\u5F85\u5DE9\u56FA\u8BCD\uFF0C\u4F46\u6700\u5C0F\u95F4\u9694\u8FD8\u6CA1\u5230</div><h2>\u5148\u9694\u4E00\u4F1A\u513F\u518D\u542C</h2><div class="statbox" style="margin:18px auto;max-width:240px"><b>${seconds} \u79D2</b><span>\u6700\u65E9\u518D\u6B21\u51FA\u73B0</span></div><div class="small">\u4E00\u6B21\u4E0D\u719F\u540E\u9700\u8981\u8FDE\u7EED 3 \u6B21\u719F\u6089\uFF1B\u4EFB\u4F55\u4E00\u6B21\u518D\u6B21\u4E0D\u719F\u90FD\u4F1A\u91CD\u65B0\u4ECE 0/3 \u5F00\u59CB\u3002\u540E\u4E24\u6B21\u5DE9\u56FA\u95F4\u9694\u4F1A\u9010\u7EA7\u62C9\u957F\u3002</div><div class="row" style="justify-content:center;margin-top:16px"><button id="retryLater" class="primary">\u56DE\u5230\u4ECA\u65E5</button></div></div></div></main>`;
-    document.getElementById("retryLater").onclick = () => {
-      listen = null;
-      view = "today";
-      renderToday();
-    };
-    return;
-  }
   if (listen.plan.mode === "sequential" && currentSequentialSegment(state, listen.plan)) {
     const activityId = listen.activityId;
     const plan = listen.plan;
@@ -4060,8 +4151,9 @@ function startType(ids, label) {
   speak(wordById(id3).en);
 }
 function typeProgress() {
-  const done = typeRun.ids.filter((id3) => latestEventOnDay(state, id3, currentDayKey(), "type")?.result === "good").length;
-  const bad = typeRun.ids.filter((id3) => latestEventOnDay(state, id3, currentDayKey(), "type")?.result === "bad").length;
+  const states = typeRun.ids.map((id3) => reinforcementState(eventsOnDay(state, id3, currentDayKey(), "type")));
+  const done = states.filter((x) => x.passed).length;
+  const bad = states.filter((x) => x.started && !x.passed).length;
   return { done, total: typeRun.ids.length, bad };
 }
 function renderTypeRun() {
@@ -4070,6 +4162,25 @@ function renderTypeRun() {
   if (!w) return finishType();
   const p = typeProgress();
   const kind = typeWordKind(id3);
+  if (typeRun.session.current?.source === "buffer") {
+    const gap = nextRetryGap(typeRun.session);
+    root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">\u95F4\u9694\u8BCD \xB7 \u624B\u6253\u4E0D\u8BA1\u5206</div></div><div class="studybody"><div class="small">\u4E3A\u4E86\u62C9\u5F00 3/3 \u7684\u8BCD\u95F4\u8DDD\u4E34\u65F6\u7A7F\u63D2\uFF1B\u8FD8\u5DEE\u7EA6 ${gap} \u4E2A\u5176\u4ED6\u8BCD\u3002</div><button id="typeSpeak" class="speaker">\u25D6))</button><div class="word">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "")}</div><button id="typeBufferNext" class="primary" style="margin-top:18px">\u7EE7\u7EED</button></div></main>`;
+    document.getElementById("typeBack").onclick = () => {
+      typeRun = null;
+      view = "type";
+      renderType();
+    };
+    document.getElementById("typeSpeak").onclick = () => speak(w.en);
+    document.getElementById("typeBufferNext").onclick = () => {
+      finishCurrent(typeRun.session, "buffer");
+      if (!pickNext(typeRun.session)) finishType();
+      else {
+        renderTypeRun();
+        speak(wordById(typeRun.session.current.wordId).en);
+      }
+    };
+    return;
+  }
   root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">${p.done} / ${p.total}${p.bad ? `\u3000\u5F85\u5DE9\u56FA ${p.bad}` : ""} \xB7 ${kind} \xB7 ${esc(typeRun.label)}</div></div><div class="studybody"><button id="typeSpeak" class="speaker">\u25D6))</button>${!typeRun.answer ? `<div class="small">\u542C\u97F3\u540E\u5199\u51FA\u4F60\u76F4\u63A5\u60F3\u5230\u7684\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="typeAnswer" style="font-size:21px;text-align:center" placeholder="\u5199\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u2026" autocomplete="off"><div class="grid2" style="margin-top:10px"><button id="typeSubmit" class="primary">\u63D0\u4EA4</button><button id="typeReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${typeRun.result === "good" ? "good" : typeRun.result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div><div class="typed"><b>\u4F60\u521A\u624D\u5199\u7684\u662F</b><div>${esc(typeRun.input || "\uFF08\u76F4\u63A5\u770B\u4E86\u7B54\u6848\uFF09")}</div></div><div class="judges"><button id="typeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="typeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div><div class="move"><button id="typeReplay" class="soft">\u91CD\u542C</button><button id="typeNext" class="primary" ${typeRun.result ? "" : "disabled"}>\u4E0B\u4E00\u8BCD</button></div><div class="statusline">\u4E0D\u81EA\u52A8\u5224\u4E2D\u6587\u540C\u4E49\u8BCD\u5BF9\u9519\uFF1B\u719F\u6089/\u4E0D\u719F\u6089\u4ECD\u7136\u4F5C\u7528\u4E8E\u540C\u4E00\u4E2A\u5355\u8BCD\u5386\u53F2\u3002</div>`}</div></main>`;
   document.getElementById("typeBack").onclick = () => {
     touchActivity(typeRun.activityId);
@@ -4120,7 +4231,7 @@ function judgeType(result) {
 }
 function nextType() {
   if (!typeRun.result) return;
-  finishCurrent(typeRun.session, typeRun.result);
+  finishCurrent(typeRun.session, typeRun.result, state);
   typeRun.answer = false;
   typeRun.input = "";
   typeRun.currentEventId = null;
@@ -4134,7 +4245,10 @@ function nextType() {
 }
 function finishType() {
   const p = typeProgress();
-  const bad = typeRun.ids.filter((id3) => latestEventOnDay(state, id3, currentDayKey(), "type")?.result === "bad");
+  const bad = typeRun.ids.filter((id3) => {
+    const r = reinforcementState(eventsOnDay(state, id3, currentDayKey(), "type"));
+    return r.started && !r.passed;
+  });
   root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>${esc(typeRun.label)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.total}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="good">${p.done}</b><span>\u6700\u7EC8\u719F\u6089</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u4ECD\u4E0D\u719F</span></div></div><div class="small">\u76F4\u63A5\u770B\u7B54\u6848 ${typeRun.skipped} \u6B21</div><div class="row" style="justify-content:center;margin-top:18px">${bad.length ? `<button id="redoType" class="primary">\u518D\u7EC3\u4E0D\u719F \xB7 ${bad.length}</button>` : ""}<button id="finishType" class="soft">\u8FD4\u56DE\u624B\u6253</button></div></div></div></main>`;
   const copy = [...bad];
   if (document.getElementById("redoType")) document.getElementById("redoType").onclick = () => {
@@ -4588,16 +4702,15 @@ function importSentenceProblems(tokens, targetName, sentence) {
   let missing = 0;
   for (const token of tokens) {
     const en = String(token.normalized || token.surface || "").toLowerCase();
-    const existing = state.words.find((w) => w.en === en);
-    let zh = existing?.zh || "";
-    if (!zh) {
-      zh = String(window.prompt?.(`\u7ED9 ${en} \u8865\u4E00\u4E2A\u4E2D\u6587\u6838\u5FC3\u4E49\uFF08\u53EF\u7559\u7A7A\uFF0C\u4E4B\u540E\u53EF\u5728\u8BCD\u5E93\u7F16\u8F91\uFF09`, "") || "").trim();
-      if (!zh) missing++;
+    const existing = state.words.find((w2) => w2.en === en);
+    const w = upsertWord({ en, zh: existing?.zh || "", source: target, example: token.sentence || sentence, reviewHint: true });
+    if (w && !w.zh) {
+      w.needsMeaning = true;
+      missing++;
     }
-    upsertWord({ en, zh, source: target, example: token.sentence || sentence, reviewHint: true });
   }
   persist();
-  toast(`\u5DF2\u628A ${tokens.length} \u4E2A\u8BCD\u52A0\u5165\u300C${target}\u300D${missing ? ` \xB7 ${missing} \u4E2A\u5F85\u8865\u91CA\u4E49` : ""}`);
+  toast(`\u5DF2\u52A0\u5165\u300C${target}\u300D${missing ? ` \xB7 ${missing} \u4E2A\u5F85\u6279\u91CF\u8865\u91CA\u4E49` : ""}`);
 }
 function finishSentenceRun() {
   const run = sentenceRun;
@@ -4780,12 +4893,40 @@ function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = ""
   }
   if (reviewHint) w.reviewHint = true;
   if (isSimpleLexeme(state, en)) w.retired = true;
-  if (zh && (overwrite || !w.zh)) w.zh = zh;
+  if (zh && (overwrite || !w.zh)) {
+    w.zh = zh;
+    w.needsMeaning = false;
+  }
   if (pos && (overwrite || !w.pos)) w.pos = pos;
   if (def && (overwrite || !w.def)) w.def = def;
   if (source && !w.sources.includes(source)) w.sources.push(source);
   if (example && !w.examples.includes(example)) w.examples.push(example);
   return w;
+}
+function pendingMeaningHtml() {
+  const words = state.words.filter((w) => w.needsMeaning && !w.zh);
+  if (!words.length) return "";
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u5F85\u8865\u91CA\u4E49</h2><div class="small">\u53E5\u5B50\u9519\u8BCD\u5148\u65E0\u6253\u65AD\u5BFC\u5165\uFF0C\u8FD9\u91CC\u4E00\u6B21\u6279\u91CF\u8865\u3002\u5171 ${words.length} \u4E2A\u3002</div></div></div><div class="error-compact" style="margin-top:10px">${words.slice(0, 80).map((w) => `<div class="error-row"><span class="en">${esc(w.en)}</span><input data-pending-meaning="${w.id}" placeholder="\u4E2D\u6587\u6838\u5FC3\u4E49" value=""></div>`).join("")}</div><div class="row" style="margin-top:10px"><button id="savePendingMeanings" class="primary">\u4FDD\u5B58\u5DF2\u586B\u5199\u91CA\u4E49</button></div></section>`;
+}
+function bindPendingMeanings() {
+  const b = document.getElementById("savePendingMeanings");
+  if (!b) return;
+  b.onclick = () => {
+    let n = 0;
+    document.querySelectorAll("[data-pending-meaning]").forEach((el) => {
+      const zh = el.value.trim();
+      if (!zh) return;
+      const w = wordById(el.dataset.pendingMeaning);
+      if (w) {
+        w.zh = zh;
+        w.needsMeaning = false;
+        n++;
+      }
+    });
+    persist();
+    toast(`\u5DF2\u8865 ${n} \u4E2A\u91CA\u4E49`);
+    renderLibrary();
+  };
 }
 function wordEditorHtml() {
   const w = wordById(wordEditId);
@@ -5019,7 +5160,7 @@ function bindWordbookManage() {
 }
 function renderLibrary() {
   const books = allBooks(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${wordbookManageHtml(books)}${freeListenSetupHtml(books)}${errorBookSectionHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${wordbookManageHtml(books)}${freeListenSetupHtml(books)}${errorBookSectionHtml()}${pendingMeaningHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("importWords").onclick = () => importInput.click();
   document.getElementById("backupWords").onclick = backup;
   document.getElementById("restoreWords").onclick = () => restoreInput.click();
@@ -5044,6 +5185,7 @@ function renderLibrary() {
   bindWordbookManage();
   bindFreeListenSetup();
   drawWordList();
+  bindPendingMeanings();
   bindWordEditor();
   bindImportPreview();
 }
