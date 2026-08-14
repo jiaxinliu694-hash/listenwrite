@@ -16,7 +16,9 @@ jobs:
         with:
           node-version: 22
       - name: Apply v13 patch
-        run: python scripts/v13_patch.py
+        run: |
+          python scripts/v13_patch.py
+          python scripts/v13_patch_fix.py
       - name: Install
         run: npm install
       - name: Syntax check
