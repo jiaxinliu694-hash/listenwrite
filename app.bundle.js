@@ -3330,6 +3330,45 @@ function deleteWordEverywhere(state2, wordId) {
   return true;
 }
 
+// src/usepolish.js
+function freeListenCandidates(state2, book, { scope = "all", limit = 0 } = {}) {
+  const listened = new Set((state2.events || []).filter((e) => e.mode === "listen").map((e) => e.wordId));
+  let ids = (state2.words || []).filter((w) => !w.retired && (w.sources || []).includes(book)).filter((w) => scope !== "unheard" || !listened.has(w.id)).map((w) => w.id);
+  if (Number(limit) > 0) ids = ids.slice(0, Number(limit));
+  return ids;
+}
+function linkedSentenceSourceState(state2, entry) {
+  if (!entry?.sourceTextId) return "standalone";
+  const text = (state2.texts || []).find((t) => t.id === entry.sourceTextId);
+  if (!text) return "source-deleted";
+  if (!entry.sourceSentenceId) return "legacy-link";
+  const exists = (text.sentences || []).some((row) => row.id === entry.sourceSentenceId);
+  return exists ? "linked" : "source-changed";
+}
+function staleLinkedSentenceCount(state2) {
+  let count = 0;
+  for (const book of state2.sentenceBooks || []) {
+    for (const entry of book.entries || []) {
+      const status = linkedSentenceSourceState(state2, entry);
+      if (status === "source-deleted" || status === "source-changed") count += 1;
+    }
+  }
+  return count;
+}
+function removeStaleLinkedSentences(state2) {
+  let removed = 0;
+  state2.sentenceBooks = (state2.sentenceBooks || []).map((book) => {
+    const entries = (book.entries || []).filter((entry) => {
+      const status = linkedSentenceSourceState(state2, entry);
+      const stale = status === "source-deleted" || status === "source-changed";
+      if (stale) removed += 1;
+      return !stale;
+    });
+    return { ...book, entries };
+  }).filter((book) => (book.entries || []).length > 0);
+  return removed;
+}
+
 // src/app.js
 var root = document.getElementById("app");
 var restoreInput = document.getElementById("file-restore");
@@ -3915,6 +3954,11 @@ function sentenceStateInfo(entry) {
   const status = deriveSentencePracticeStatus(entry);
   return { status, label: status === "repeat" ? "\u9700\u91CD\u7EC3" : status === "done" ? "\u5DF2\u901A\u8FC7" : status === "ignored" ? "\u5FFD\u7565" : "\u672A\u7EC3" };
 }
+function sentenceSourceBadge(entry) {
+  const status = linkedSentenceSourceState(state, entry);
+  const suffix = status === "source-deleted" ? " \xB7 \u6765\u6E90\u5DF2\u5220\u9664" : status === "source-changed" ? " \xB7 \u539F\u6587\u5DF2\u4FEE\u6539" : status === "legacy-link" ? " \xB7 \u65E7\u7248\u5173\u8054" : "";
+  return `${esc(sentenceSourceLabel(entry))}${suffix ? `<span class="tag">${esc(suffix.trim().replace(/^·\s*/, ""))}</span>` : ""}`;
+}
 function sentenceLibraryBookHtml(book) {
   const rank = { repeat: 0, unseen: 1, done: 2, ignored: 3 };
   const entries = [...book.entries || []].sort((a, b) => rank[sentenceStateInfo(a).status] - rank[sentenceStateInfo(b).status] || Number(b.lastPracticedAt || b.updatedAt || 0) - Number(a.lastPracticedAt || a.updatedAt || 0));
@@ -3922,7 +3966,7 @@ function sentenceLibraryBookHtml(book) {
   return `<details class="sentence-book"><summary><b>${esc(book.name)}</b><span class="small">${entries.length} \u53E5${repeat ? ` \xB7 ${repeat} \u53E5\u9700\u91CD\u7EC3` : ""}</span></summary><div>${entries.map((entry) => {
     const st = sentenceStateInfo(entry);
     const problems = sentenceProblemTokens(entry).filter((token) => !isSimpleLexeme(state, token.normalized || token.surface));
-    return `<div class="sentence-entry"><div class="sentence-entry-meta"><span class="sentence-state ${st.status}">${st.label}</span><span class="small">${esc(sentenceSourceLabel(entry))}${problems.length ? ` \xB7 \u9519\u8BCD ${problems.length}` : ""}</span></div><div class="sentence-entry-text">${esc(entry.text)}</div><div class="sentence-mode-row"><button class="soft" data-whole-entry="${book.id}|${entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-split-entry="${book.id}|${entry.id}">\u62C6\u8BCD\u542C\u5199</button>${problems.length ? `<button class="soft" data-problem-entry="${book.id}|${entry.id}">\u53EA\u7EC3\u9519\u8BCD</button>` : ""}<button class="ghost" data-ignore-entry="${book.id}|${entry.id}">${st.status === "ignored" ? "\u6062\u590D" : "\u5FFD\u7565"}</button></div></div>`;
+    return `<div class="sentence-entry"><div class="sentence-entry-meta"><span class="sentence-state ${st.status}">${st.label}</span><span class="small">${sentenceSourceBadge(entry)}${problems.length ? ` \xB7 \u9519\u8BCD ${problems.length}` : ""}</span></div><div class="sentence-entry-text">${esc(entry.text)}</div><div class="sentence-mode-row"><button class="soft" data-whole-entry="${book.id}|${entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-split-entry="${book.id}|${entry.id}">\u62C6\u8BCD\u542C\u5199</button>${problems.length ? `<button class="soft" data-problem-entry="${book.id}|${entry.id}">\u53EA\u7EC3\u9519\u8BCD</button>` : ""}<button class="ghost" data-ignore-entry="${book.id}|${entry.id}">${st.status === "ignored" ? "\u6062\u590D" : "\u5FFD\u7565"}</button></div></div>`;
   }).join("") || '<div class="empty">\u8FD8\u6CA1\u6709\u53E5\u5B50\u3002</div>'}</div></details>`;
 }
 function bindSentenceLibraryActions() {
@@ -3955,7 +3999,8 @@ function renderText() {
   const editing = textEditId ? state.texts.find((t) => t.id === textEditId) : null;
   const sentenceBookNames = state.sentenceBooks.map((b) => b.name);
   const sentenceBookRows = state.sentenceBooks.map(sentenceLibraryBookHtml).join("");
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u4E0E\u53E5\u5B50</h2><p>\u6587\u7AE0 \u2192 \u7A33\u5B9A\u53E5\u5B50 \u2192 \u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u9519\u8BCD\u91CD\u542C\u3002\u53E5\u5B50\u672C\u8EAB\u4E0D\u8FDB\u5165 FSRS\uFF1B\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u9519\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u590D\u4E60\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div></section><section class="card"><h2 class="section-title">\u5FEB\u901F\u4FDD\u5B58\u4E00\u53E5\u5E76\u62C6\u8BCD</h2><div class="small">\u9002\u5408\u4E34\u65F6\u53E5\u5B50\u3002\u9ED8\u8BA4\u4FDD\u7559\u91CD\u590D\u8BCD\u4F4D\u7F6E\uFF1B\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u81EA\u52A8\u8DF3\u8FC7\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u62C6\u8BCD</label><button id="startQuickWhole" class="primary">\u4FDD\u5B58\u5E76\u6574\u53E5\u542C\u5199</button><button id="startSentenceDictation" class="soft">\u4FDD\u5B58\u5E76\u62C6\u8BCD\u542C\u5199</button><button id="saveQuickOnly" class="ghost">\u53EA\u4FDD\u5B58</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u9519\u8BCD\u5B9A\u4F4D\u4E0E\u91CD\u542C</h2><div class="small">\u53EF\u4EE5\u641C\u6587\u7AE0\u6807\u9898\u3001\u53E5\u5B50\u539F\u6587\u6216\u5355\u8BCD\uFF1B\u4ECE\u6587\u7AE0\u4EA7\u751F\u7684\u53E5\u5B50\u4F7F\u7528\u7A33\u5B9A\u53E5\u5B50 ID \u5173\u8054\uFF0C\u4E0D\u518D\u53EA\u9760\u201C\u7B2C\u51E0\u53E5\u201D\u3002</div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u53E5\u5B50\u5E93</label><select id="sentenceProblemBook"><option value="">\u5168\u90E8\u53E5\u5B50\u5E93</option>${state.sentenceBooks.map((book) => `<option value="${book.id}">${esc(book.name)}</option>`).join("")}</select></div><div class="field"><label>\u68C0\u7D22</label><input id="sentenceProblemSearch" placeholder="\u6587\u7AE0\u6807\u9898 / \u53E5\u5B50 / \u9519\u8BCD"></div></div><label class="small" style="display:block;margin-top:10px"><input id="sentenceProblemUnique" type="checkbox" checked style="width:auto"> \u9519\u8BCD\u91CD\u542C\u65F6\u53BB\u91CD</label><div id="sentenceProblemList" style="margin-top:12px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u5E93</h2><div class="small">\u9ED8\u8BA4\u6309\u201C\u9700\u91CD\u7EC3 \u2192 \u672A\u7EC3 \u2192 \u5DF2\u901A\u8FC7 \u2192 \u5FFD\u7565\u201D\u6392\u5217\u3002\u6BCF\u4E00\u53E5\u90FD\u80FD\u91CD\u65B0\u505A\u6574\u53E5\u3001\u62C6\u8BCD\u6216\u53EA\u7EC3\u9519\u8BCD\u3002</div><div class="sentence-library">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6253\u5F00\u6587\u7AE0\u540E\uFF0C\u6BCF\u4E00\u53E5\u90FD\u6709\u201C\u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u672C\u53E5\u9519\u8BCD\u201D\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
+  const staleSentenceLinks = staleLinkedSentenceCount(state);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u4E0E\u53E5\u5B50</h2><p>\u6587\u7AE0 \u2192 \u7A33\u5B9A\u53E5\u5B50 \u2192 \u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u9519\u8BCD\u91CD\u542C\u3002\u53E5\u5B50\u672C\u8EAB\u4E0D\u8FDB\u5165 FSRS\uFF1B\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u9519\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u590D\u4E60\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div></section><section class="card"><h2 class="section-title">\u5FEB\u901F\u4FDD\u5B58\u4E00\u53E5\u5E76\u62C6\u8BCD</h2><div class="small">\u9002\u5408\u4E34\u65F6\u53E5\u5B50\u3002\u9ED8\u8BA4\u4FDD\u7559\u91CD\u590D\u8BCD\u4F4D\u7F6E\uFF1B\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u81EA\u52A8\u8DF3\u8FC7\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u62C6\u8BCD</label><button id="startQuickWhole" class="primary">\u4FDD\u5B58\u5E76\u6574\u53E5\u542C\u5199</button><button id="startSentenceDictation" class="soft">\u4FDD\u5B58\u5E76\u62C6\u8BCD\u542C\u5199</button><button id="saveQuickOnly" class="ghost">\u53EA\u4FDD\u5B58</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u9519\u8BCD\u5B9A\u4F4D\u4E0E\u91CD\u542C</h2><div class="small">\u53EF\u4EE5\u641C\u6587\u7AE0\u6807\u9898\u3001\u53E5\u5B50\u539F\u6587\u6216\u5355\u8BCD\uFF1B\u4ECE\u6587\u7AE0\u4EA7\u751F\u7684\u53E5\u5B50\u4F7F\u7528\u7A33\u5B9A\u53E5\u5B50 ID \u5173\u8054\uFF0C\u4E0D\u518D\u53EA\u9760\u201C\u7B2C\u51E0\u53E5\u201D\u3002</div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u53E5\u5B50\u5E93</label><select id="sentenceProblemBook"><option value="">\u5168\u90E8\u53E5\u5B50\u5E93</option>${state.sentenceBooks.map((book) => `<option value="${book.id}">${esc(book.name)}</option>`).join("")}</select></div><div class="field"><label>\u68C0\u7D22</label><input id="sentenceProblemSearch" placeholder="\u6587\u7AE0\u6807\u9898 / \u53E5\u5B50 / \u9519\u8BCD"></div></div><label class="small" style="display:block;margin-top:10px"><input id="sentenceProblemUnique" type="checkbox" checked style="width:auto"> \u9519\u8BCD\u91CD\u542C\u65F6\u53BB\u91CD</label><div id="sentenceProblemList" style="margin-top:12px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u5E93</h2><div class="space"><div class="small">\u9ED8\u8BA4\u6309\u201C\u9700\u91CD\u7EC3 \u2192 \u672A\u7EC3 \u2192 \u5DF2\u901A\u8FC7 \u2192 \u5FFD\u7565\u201D\u6392\u5217\u3002\u6765\u6E90\u88AB\u5220\u9664\u6216\u539F\u6587\u5DF2\u4FEE\u6539\u7684\u65E7\u53E5\u4F1A\u660E\u786E\u6807\u51FA\u6765\u3002</div>${staleSentenceLinks ? `<button id="cleanupStaleSentences" class="ghost">\u6E05\u7406\u5931\u6548\u65E7\u53E5 \xB7 ${staleSentenceLinks}</button>` : ""}</div><div class="sentence-library">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6253\u5F00\u6587\u7AE0\u540E\uFF0C\u6BCF\u4E00\u53E5\u90FD\u6709\u201C\u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u672C\u53E5\u9519\u8BCD\u201D\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("newText").onclick = () => {
     textFormOpen = !textFormOpen;
     if (!textFormOpen) textEditId = null;
@@ -3980,6 +4025,13 @@ function renderText() {
   document.getElementById("sentenceProblemUnique").onchange = drawSentenceProblemList;
   drawSentenceProblemList();
   bindSentenceLibraryActions();
+  if (document.getElementById("cleanupStaleSentences")) document.getElementById("cleanupStaleSentences").onclick = () => {
+    if (!confirm(`\u6E05\u7406 ${staleSentenceLinks} \u6761\u6765\u6E90\u5DF2\u5220\u9664\u6216\u539F\u6587\u5DF2\u4FEE\u6539\u7684\u65E7\u53E5\u8BB0\u5F55\uFF1F\u6B63\u5F0F\u8BCD\u5E93\u4E0D\u4F1A\u53D7\u5F71\u54CD\u3002`)) return;
+    const n = removeStaleLinkedSentences(state);
+    persist();
+    toast(`\u5DF2\u6E05\u7406 ${n} \u6761\u65E7\u53E5`);
+    renderText();
+  };
   document.getElementById("textSearch").oninput = drawTextList;
   document.getElementById("textFilter").onchange = drawTextList;
   drawTextList();
@@ -4332,9 +4384,19 @@ function renderSentenceRun() {
 function importSentenceProblems(tokens, targetName, sentence) {
   const target = String(targetName || "\u53E5\u5B50\u9519\u9898\u672C").trim() || "\u53E5\u5B50\u9519\u9898\u672C";
   registerErrorBook(target);
-  for (const token of tokens) upsertWord({ en: token.normalized || token.surface, source: target, example: token.sentence || sentence });
+  let missing = 0;
+  for (const token of tokens) {
+    const en = String(token.normalized || token.surface || "").toLowerCase();
+    const existing = state.words.find((w) => w.en === en);
+    let zh = existing?.zh || "";
+    if (!zh) {
+      zh = String(window.prompt?.(`\u7ED9 ${en} \u8865\u4E00\u4E2A\u4E2D\u6587\u6838\u5FC3\u4E49\uFF08\u53EF\u7559\u7A7A\uFF0C\u4E4B\u540E\u53EF\u5728\u8BCD\u5E93\u7F16\u8F91\uFF09`, "") || "").trim();
+      if (!zh) missing++;
+    }
+    upsertWord({ en, zh, source: target, example: token.sentence || sentence });
+  }
   persist();
-  toast(`\u5DF2\u628A ${tokens.length} \u4E2A\u8BCD\u52A0\u5165\u300C${target}\u300D`);
+  toast(`\u5DF2\u628A ${tokens.length} \u4E2A\u8BCD\u52A0\u5165\u300C${target}\u300D${missing ? ` \xB7 ${missing} \u4E2A\u5F85\u8865\u91CA\u4E49` : ""}`);
 }
 function finishSentenceRun() {
   const run = sentenceRun;
@@ -4350,7 +4412,7 @@ function finishSentenceRun() {
   persist();
   const problems = sentenceRunProblemTokens(run);
   const redoItems = sentenceRunProblemItems(run, true);
-  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish" style="max-width:720px"><div class="small">\u672C\u8F6E\u5B8C\u6210 \xB7 \u53E5\u5B50\u8BB0\u5F55\u5DF2\u4FDD\u7559</div><h2>\u53E5\u5B50\u62C6\u8BCD\u542C\u5199</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${run.items.length}</b><span>\u672C\u8F6E\u542C\u5199\u4F4D\u7F6E</span></div><div class="statbox"><b class="good">${run.correct}</b><span>\u4E00\u6B21\u62FC\u5BF9</span></div><div class="statbox"><b class="bad">${problems.length}</b><span>\u5F53\u524D\u9519\u8BCD</span></div></div><div class="small" style="margin-bottom:12px">\u53E5\u5B50\u8BCD\u5E93\u672C\u8EAB\u4E0D\u505A FSRS \u5230\u671F\u590D\u4E60\uFF1B\u53EA\u6709\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u5B66\u4E60\u4E0E\u590D\u4E60\u3002\u5BFC\u5165\u540E\u8FD9\u53E5\u4ECD\u7136\u53EF\u4EE5\u7EE7\u7EED\u62C6\u8BCD\u542C\u5199\u3002</div><div class="field" style="text-align:left"><label>\u9519\u8BCD\u8F6C\u5165\u54EA\u4E2A\u666E\u901A\u8BCD\u4E66</label><input id="sentenceErrorBook" value="\u53E5\u5B50\u9519\u9898\u672C" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50\u9519\u9898\u672C"></div><div class="row" style="justify-content:center;margin-top:12px"><button id="importSentenceBad" class="primary" ${problems.length ? "" : "disabled"}>\u4E00\u952E\u52A0\u5165\u9519\u9898\u672C \xB7 ${problems.length}</button><button id="exportSentenceBad" class="soft" ${problems.length ? "" : "disabled"}>\u5BFC\u51FA TSV</button>${redoItems.length ? `<button id="redoSentenceBad" class="soft">\u518D\u542C\u672C\u8F6E\u9519\u8BCD \xB7 ${redoItems.length}</button>` : ""}<button id="finishSentence" class="soft">\u8FD4\u56DE</button></div></div></div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish" style="max-width:720px"><div class="small">\u672C\u8F6E\u5B8C\u6210 \xB7 \u53E5\u5B50\u8BB0\u5F55\u5DF2\u4FDD\u7559</div><h2>\u53E5\u5B50\u62C6\u8BCD\u542C\u5199</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${run.items.length}</b><span>\u672C\u8F6E\u542C\u5199\u4F4D\u7F6E</span></div><div class="statbox"><b class="good">${run.correct}</b><span>\u4E00\u6B21\u62FC\u5BF9</span></div><div class="statbox"><b class="bad">${problems.length}</b><span>\u5F53\u524D\u9519\u8BCD</span></div></div><div class="small" style="margin-bottom:12px">\u53E5\u5B50\u8BCD\u5E93\u672C\u8EAB\u4E0D\u505A FSRS \u5230\u671F\u590D\u4E60\uFF1B\u53EA\u6709\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u5B66\u4E60\u4E0E\u590D\u4E60\u3002\u5BFC\u5165\u540E\u8FD9\u53E5\u4ECD\u7136\u53EF\u4EE5\u7EE7\u7EED\u62C6\u8BCD\u542C\u5199\u3002</div><div class="field" style="text-align:left"><label>\u9519\u8BCD\u8F6C\u5165\u54EA\u4E2A\u666E\u901A\u8BCD\u4E66</label><input id="sentenceErrorBook" value="\u53E5\u5B50\u9519\u9898\u672C" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50\u9519\u9898\u672C"></div><div class="row" style="justify-content:center;margin-top:12px"><button id="importSentenceBad" class="primary" ${problems.length ? "" : "disabled"}>\u52A0\u5165\u9519\u9898\u672C \xB7 ${problems.length}</button><button id="exportSentenceBad" class="soft" ${problems.length ? "" : "disabled"}>\u5BFC\u51FA TSV</button>${redoItems.length ? `<button id="redoSentenceBad" class="soft">\u518D\u542C\u672C\u8F6E\u9519\u8BCD \xB7 ${redoItems.length}</button>` : ""}<button id="finishSentence" class="soft">\u8FD4\u56DE</button></div></div></div></main>`;
   document.getElementById("importSentenceBad").onclick = () => importSentenceProblems(problems, document.getElementById("sentenceErrorBook").value, "");
   document.getElementById("exportSentenceBad").onclick = () => {
     const name = document.getElementById("sentenceErrorBook").value.trim() || "\u53E5\u5B50\u9519\u9898\u672C";
@@ -4592,13 +4654,25 @@ function bindImportPreview() {
     renderLibrary();
   };
 }
-function startFreeListen(book) {
-  if (!book) return toast("\u5148\u5728\u4E0B\u65B9\u9009\u62E9\u4E00\u672C\u5177\u4F53\u8BCD\u4E66");
-  const ids = state.words.filter((w) => !w.retired && (w.sources || []).includes(book)).map((w) => w.id);
-  if (!ids.length) return toast("\u8FD9\u672C\u8BCD\u4E66\u6CA1\u6709\u53EF\u81EA\u7531\u542C\u7684\u8BCD");
-  freeListen = { book, ids, index: 0, revealed: false, result: null, bad: [] };
+function freeProgressMap() {
+  state.settings.freeListenProgress = state.settings.freeListenProgress && typeof state.settings.freeListenProgress === "object" ? state.settings.freeListenProgress : {};
+  return state.settings.freeListenProgress;
+}
+function saveFreeProgress() {
+  if (!freeListen) return;
+  freeProgressMap()[freeListen.book] = { scope: freeListen.scope, limit: freeListen.limit, index: freeListen.index, updatedAt: Date.now() };
+  persist();
+}
+function startFreeListen(book, { scope = "all", limit = 0, resume = false } = {}) {
+  if (!book) return toast("\u5148\u9009\u62E9\u4E00\u672C\u5177\u4F53\u8BCD\u4E66");
+  const ids = freeListenCandidates(state, book, { scope, limit });
+  if (!ids.length) return toast(scope === "unheard" ? "\u8FD9\u672C\u8BCD\u4E66\u6CA1\u6709\u201C\u4ECE\u672A\u6B63\u5F0F\u542C\u8FC7\u201D\u7684\u8BCD" : "\u8FD9\u672C\u8BCD\u4E66\u6CA1\u6709\u53EF\u81EA\u7531\u542C\u7684\u8BCD");
+  const saved = freeProgressMap()[book];
+  let index = resume && saved && saved.scope === scope && Number(saved.limit || 0) === Number(limit || 0) ? Math.max(0, Math.min(ids.length - 1, Number(saved.index) || 0)) : 0;
+  freeListen = { book, ids, index, scope, limit: Number(limit) || 0, revealed: false, result: null, bad: [] };
+  saveFreeProgress();
   renderFreeListen();
-  speak(wordById(ids[0]).en);
+  speak(wordById(ids[index]).en);
 }
 function freeListenCurrent() {
   return wordById(freeListen?.ids?.[freeListen.index]);
@@ -4606,8 +4680,9 @@ function freeListenCurrent() {
 function renderFreeListen() {
   const w = freeListenCurrent();
   if (!freeListen || !w) return finishFreeListen();
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="freeBack" class="back">\u2039</button><div class="studyprogress">\u81EA\u7531\u542C \xB7 ${esc(freeListen.book)} \xB7 ${freeListen.index + 1}/${freeListen.ids.length}</div><div></div></div><div class="studybody"><div class="small">\u672C\u6A21\u5F0F\u4E0D\u5199\u5165 FSRS\u3001\u4E0D\u5360\u4ECA\u65E5\u8BA1\u5212\uFF0C\u53EA\u4E34\u65F6\u6536\u96C6\u672C\u8F6E\u4E0D\u719F\u8BCD\u3002</div><button id="freeSpeak" class="speaker">\u25D6))</button>${freeListen.revealed ? `<div class="word ${freeListen.result === "good" ? "good" : "bad"}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div><div class="move"><button id="freeReplay" class="soft">\u91CD\u542C</button><button id="freeNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>` : `<div class="small">\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div><div class="judges"><button id="freeGood" class="goodbtn">\u719F\u6089</button><button id="freeBad" class="badbtn">\u4E0D\u719F\u6089</button></div>`}</div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="freeBack" class="back">\u2039</button><div class="studyprogress">\u81EA\u7531\u542C \xB7 ${esc(freeListen.book)} \xB7 ${freeListen.index + 1}/${freeListen.ids.length}</div><div></div></div><div class="studybody"><div class="small">\u672C\u6A21\u5F0F\u4E0D\u5199\u5165 FSRS\u3001\u4E0D\u5360\u4ECA\u65E5\u8BA1\u5212\uFF1B\u9000\u51FA\u540E\u53EF\u4EE5\u4ECE\u672C\u4E66\u4E0A\u6B21\u4F4D\u7F6E\u7EE7\u7EED\u3002</div><button id="freeSpeak" class="speaker">\u25D6))</button>${freeListen.revealed ? `<div class="word ${freeListen.result === "good" ? "good" : "bad"}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div><div class="move"><button id="freePrev" class="soft" ${freeListen.index === 0 ? "disabled" : ""}>\u4E0A\u4E00\u8BCD</button><button id="freeReplay" class="soft">\u91CD\u542C</button><button id="freeNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>` : `<div class="small">\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div><div class="judges"><button id="freeGood" class="goodbtn">\u719F\u6089</button><button id="freeBad" class="badbtn">\u4E0D\u719F\u6089</button></div>`}</div></main>`;
   document.getElementById("freeBack").onclick = () => {
+    saveFreeProgress();
     freeListen = null;
     view = "library";
     renderLibrary();
@@ -4627,12 +4702,22 @@ function renderFreeListen() {
     };
   } else {
     document.getElementById("freeReplay").onclick = () => speak(w.en);
+    document.getElementById("freePrev").onclick = () => {
+      if (freeListen.index <= 0) return;
+      freeListen.index--;
+      freeListen.revealed = false;
+      freeListen.result = null;
+      saveFreeProgress();
+      renderFreeListen();
+      speak(freeListenCurrent().en);
+    };
     document.getElementById("freeNext").onclick = () => {
       freeListen.index++;
       freeListen.revealed = false;
       freeListen.result = null;
       if (freeListen.index >= freeListen.ids.length) finishFreeListen();
       else {
+        saveFreeProgress();
         renderFreeListen();
         speak(freeListenCurrent().en);
       }
@@ -4660,6 +4745,8 @@ function finishFreeListen() {
   if (!freeListen) return;
   const run = freeListen;
   const bad = [...run.bad];
+  freeProgressMap()[run.book] = { scope: run.scope, limit: run.limit, index: 0, updatedAt: Date.now(), completedAt: Date.now() };
+  persist();
   root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u81EA\u7531\u542C\u5B8C\u6210 \xB7 \u4E0D\u5F71\u54CD FSRS</div><h2>${esc(run.book)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${run.ids.length}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u672C\u8F6E\u4E0D\u719F</span></div><div class="statbox"><b>${run.ids.length - bad.length}</b><span>\u5176\u4F59\u719F\u6089</span></div></div><div class="row" style="justify-content:center">${bad.length ? `<button id="freeToType" class="primary">\u624B\u6253\u8FD9\u6279 \xB7 ${bad.length}</button><button id="freeToToday" class="soft">\u52A0\u5165\u4ECA\u65E5\u8BA1\u5212</button>` : ""}<button id="freeFinish" class="ghost">\u8FD4\u56DE\u8BCD\u5E93</button></div></div></div></main>`;
   if (document.getElementById("freeToType")) document.getElementById("freeToType").onclick = () => {
     freeListen = null;
@@ -4673,9 +4760,24 @@ function finishFreeListen() {
     renderLibrary();
   };
 }
+function freeListenSetupHtml(books) {
+  const progress = freeProgressMap();
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u81EA\u7531\u542C\u8BCD\u4E66</h2><div class="small">\u5BFC\u5165\u4E00\u6574\u672C\u540E\u53EF\u4EE5\u76F4\u63A5\u4ECE\u5934\u6328\u4E2A\u542C\uFF0C\u4E0D\u5360\u4ECA\u65E5\u65B0\u8BCD/\u590D\u4E60\uFF0C\u4E5F\u4E0D\u4F1A\u4FEE\u6539 FSRS\u3002</div></div></div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u8BCD\u4E66</label><select id="freeListenSelect"><option value="">\u8BF7\u9009\u62E9</option>${books.map((b) => `<option value="${esc(b)}">${esc(b)}</option>`).join("")}</select></div><div class="field"><label>\u8303\u56F4</label><select id="freeListenScope"><option value="all">\u6574\u672C</option><option value="unheard">\u53EA\u542C\u4ECE\u672A\u6B63\u5F0F\u542C\u8FC7</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="freeListenLimit"><option value="50">50</option><option value="100">100</option><option value="0">\u5168\u90E8</option></select></div><label class="small" style="align-self:end"><input id="freeListenResume" type="checkbox" checked style="width:auto"> \u6709\u8BB0\u5F55\u65F6\u4ECE\u4E0A\u6B21\u4F4D\u7F6E\u7EE7\u7EED</label></div><div id="freeListenHint" class="small" style="margin-top:9px"></div><div class="row" style="margin-top:10px"><button id="startFreeListen" class="primary">\u5F00\u59CB\u81EA\u7531\u542C</button></div></section>`;
+}
+function bindFreeListenSetup() {
+  const select = document.getElementById("freeListenSelect"), hint = document.getElementById("freeListenHint");
+  if (!select) return;
+  const draw = () => {
+    const book = select.value, saved = freeProgressMap()[book];
+    hint.textContent = saved && Number(saved.index) > 0 ? `\u4E0A\u6B21\u505C\u5728\u7B2C ${Number(saved.index) + 1} \u4E2A\uFF1B\u52FE\u9009\u201C\u7EE7\u7EED\u201D\u5373\u53EF\u63A5\u7740\u542C\u3002` : "\u6309\u8BCD\u5E93\u987A\u5E8F\u64AD\u653E\uFF1B\u81EA\u7531\u542C\u7ED3\u679C\u53EA\u4FDD\u7559\u672C\u8F6E\u4E0D\u719F\u5217\u8868\u3002";
+  };
+  select.onchange = draw;
+  draw();
+  document.getElementById("startFreeListen").onclick = () => startFreeListen(select.value, { scope: document.getElementById("freeListenScope").value, limit: Number(document.getElementById("freeListenLimit").value) || 0, resume: document.getElementById("freeListenResume").checked });
+}
 function renderLibrary() {
   const books = allBooks(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="freeListenBook" class="soft">\u81EA\u7531\u542C\u5F53\u524D\u8BCD\u4E66</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${errorBookSectionHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${freeListenSetupHtml(books)}${errorBookSectionHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("importWords").onclick = () => importInput.click();
   document.getElementById("backupWords").onclick = backup;
   document.getElementById("restoreWords").onclick = () => restoreInput.click();
@@ -4697,7 +4799,7 @@ function renderLibrary() {
     state.settings.speechRate = Math.min(1.5, Math.max(0.5, Number(e.target.value) || 0.92));
     persist();
   };
-  document.getElementById("freeListenBook").onclick = () => startFreeListen(document.getElementById("wordBook").value);
+  bindFreeListenSetup();
   drawWordList();
   bindWordEditor();
   bindImportPreview();
