@@ -1,0 +1,19 @@
+name: Export Claude Source
+on:
+  push:
+    branches: [export-claude-source]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create source zip
+        run: |
+          zip -qr listenwrite-main-latest.zip . -x '.git/*' 'node_modules/*' '.github/workflows/export-claude-source.yml'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: listenwrite-main-latest
+          path: listenwrite-main-latest.zip
+          retention-days: 1
