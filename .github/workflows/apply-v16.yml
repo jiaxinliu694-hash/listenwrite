@@ -20,6 +20,18 @@ jobs:
         with:
           node-version: 20
       - run: npm install
+      - name: Remove optional status-line patch with nested template quoting
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/apply-v16.mjs')
+          s=p.read_text()
+          start=s.find("patch('src/app.js',\n`<div class=\"statusline\">")
+          end=s.find("// Type mode keeps its old one-good completion semantics.")
+          if start != -1 and end != -1:
+              s=s[:start]+s[end:]
+          p.write_text(s)
+          PY
       - run: node tools/apply-v16.mjs
       - run: node --check src/reinforcement.js
       - run: node --check src/queue.js
