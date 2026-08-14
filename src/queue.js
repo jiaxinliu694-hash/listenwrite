@@ -386,8 +386,15 @@ function persistedInterveningTurns(state, wordId, date, mode, afterTs = 0) {
   ).length;
 }
 
+function mixedStudyOrder(ids, plan, mode = 'listen') {
+  const books = (plan.books || []).slice().sort().join('|');
+  const seed = `${plan.date}|${mode}|${Number(plan.drawNonce) || 0}|${books}|mixed-study`;
+  return [...new Set(ids)].sort((a,b) => randomRank(a, seed) - randomRank(b, seed) || String(a).localeCompare(String(b)));
+}
+
 export function createRetrySession(state, plan, mode = 'listen', explicitIds = null) {
-  const planIds = [...new Set(explicitIds || [...plan.reviewIds, ...plan.newIds])];
+  const orderedIds = explicitIds ? [...explicitIds] : mixedStudyOrder([...(plan.newIds || []), ...(plan.reviewIds || [])], plan, mode);
+  const planIds = [...new Set(orderedIds)];
   const wordMap = new Map(state.words.map((w) => [w.id, w]));
   const pendingBase = [];
   const retry = [];
