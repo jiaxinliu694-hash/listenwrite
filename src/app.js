@@ -87,12 +87,8 @@ function bindBookChips(scope, rerender) {
 
 function dueCount() { return state.words.filter((w) => !w.retired && (w.card?.reps || 0) && Number(w.card.due) <= Date.now()).length; }
 function renderHome() {
-  const date = currentDayKey();
-  const books = state.settings.todayBooks || [];
-  const plan = ensureDailyPlan(state, planForTodayOptions(date, books));
-  const progress = sessionProgress(state, plan, null);
-  persist();
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>今天</h2><p>首页只留今日完成小计和入口。</p></div><button id="goToday" class="primary">${progress.remaining ? '继续今日学习' : '今日已完成'}</button></div><div class="grid2" style="margin-top:16px"><div class="statbox"><b>${progress.newDone} / ${progress.newTotal}</b><span>今日新词</span><div class="progressline"><i style="width:${progress.newTotal ? progress.newDone * 100 / progress.newTotal : 0}%"></i></div></div><div class="statbox"><b>${progress.reviewDone} / ${progress.reviewTotal}</b><span>今日复习</span><div class="progressline"><i style="width:${progress.reviewTotal ? progress.reviewDone * 100 / progress.reviewTotal : 0}%"></i></div></div></div></section><div class="grid2"><button id="homeToday" class="entry"><b>今日学习</b><span>继续新词、复习和当天待巩固。</span></button><button id="goType" class="entry"><b>手打强化</b><span>按日期、词书和不熟次数筛选强化。</span></button><button id="goText" class="entry"><b>文本与句子</b><span>文本库、句子拆词听写和句子错词。</span></button><button id="goStats" class="entry"><b>学习统计</b><span>日历、首轮结果、困难词和复习预测。</span></button></div></div>`);
+  const today = todayListeningStats(state, [], currentDayKey());
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>今天</h2><p>首页只留今日完成小计和入口。</p></div><button id="goToday" class="primary">进入今日学习</button></div><div class="grid2" style="margin-top:16px"><div class="statbox"><b>${today.newCount}</b><span>今日新词完成</span></div><div class="statbox"><b>${today.reviewCount}</b><span>今日复习完成</span></div></div></section><div class="grid2"><button id="homeToday" class="entry"><b>今日学习</b><span>继续新词、复习和当天待巩固。</span></button><button id="goType" class="entry"><b>手打强化</b><span>按日期、词书和不熟次数筛选强化。</span></button><button id="goText" class="entry"><b>文本与句子</b><span>文本库、句子拆词听写和句子错词。</span></button><button id="goStats" class="entry"><b>学习统计</b><span>日历、首轮结果、困难词和复习预测。</span></button></div></div>`);
   document.getElementById('goToday').onclick = () => go('today');
   document.getElementById('homeToday').onclick = () => go('today');
   document.getElementById('goType').onclick = () => go('type');
