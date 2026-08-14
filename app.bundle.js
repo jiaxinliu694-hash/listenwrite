@@ -2931,12 +2931,24 @@ function moveHintedNewWordsToReview(state2, plan) {
 }
 function reconcileScope(state2, plan, books) {
   if (sameBooks(plan.books, books)) return;
+  const previousBooks = [...plan.books || []];
   const keepTouchedInScope = (id3) => {
     const word = state2.words.find((w) => w.id === id3);
     return Boolean(word) && listenedToday(state2, id3, plan.date) && matchesBooks(word, books);
   };
-  plan.newIds = plan.newIds.filter(keepTouchedInScope);
-  plan.reviewIds = plan.reviewIds.filter(keepTouchedInScope);
+  const survivingNew = plan.newIds.filter(keepTouchedInScope);
+  const survivingReview = plan.reviewIds.filter(keepTouchedInScope);
+  const movedToReview = [];
+  plan.newIds = survivingNew.filter((id3) => {
+    const word = state2.words.find((w) => w.id === id3);
+    const hasContinuousSelectedSource = Boolean(word) && (word.sources || []).some(
+      (source) => previousBooks.includes(source) && books.includes(source)
+    );
+    if (hasContinuousSelectedSource) return true;
+    movedToReview.push(id3);
+    return false;
+  });
+  plan.reviewIds = [.../* @__PURE__ */ new Set([...survivingReview, ...movedToReview])];
   plan.resumeWordId = keepTouchedInScope(plan.resumeWordId) ? plan.resumeWordId : null;
   plan.books = [...books];
   plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
