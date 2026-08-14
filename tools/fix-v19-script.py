@@ -15,3 +15,4 @@ s2, n = re.subn(r"const oldImport=.*?app=app\.replace\(oldImport,newImport\);", 
 if n != 1:
     raise SystemExit(f'could not patch apply-v19.mjs, replacements={n}')
 p.write_text(s2)
+# v19b
