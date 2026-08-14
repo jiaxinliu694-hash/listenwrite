@@ -1,0 +1,41 @@
+name: Listenwrite v6 sentence books
+
+on:
+  push:
+    branches: [sentence-books-v6]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply v6 app changes
+        run: python3 scripts/apply_v6.py
+      - name: Install
+        run: npm install
+      - name: Syntax checks
+        run: |
+          node --check src/app.js
+          node --check src/engine.js
+          node --check src/queue.js
+          node --check src/storage.js
+          node --check src/studyday.js
+          node --check src/sentencebooks.js
+      - name: Core and browser tests
+        run: npm test
+      - name: Build Safari bundle
+        run: npm run build
+      - name: Commit validated v6 output
+        run: |
+          git config user.name "listenwrite-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/app.js app.bundle.js package-lock.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Apply validated sentence books v6"
+          git push
