@@ -24,7 +24,7 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/app.js styles.css app.bundle.js tests/v21.test.js
+          git add src/app.js styles.css app.bundle.js tests/v19.test.js tests/v21.test.js
           git rm .github/workflows/apply-v21.yml tools/apply-v21.mjs
           git commit -m "Keep wordbook picker open while selecting" || exit 0
           git push
