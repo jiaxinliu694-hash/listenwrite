@@ -8,11 +8,11 @@ function word(id, en = id, source = 'Book') {
   return { id, en, zh: '义', pos: '', def: '', sources: [source], examples: [], retired: false, card: emptyCard() };
 }
 function state(words, settings = {}) {
-  return { version: 4, words, events: [], texts: [], dailyPlans: {}, activities: [], settings: { defaultNewTarget: 2, defaultReviewTarget: 1, retention: 0.9, speechRate: 0.92, todayBooks: [], typeBooks: [], ...settings } };
+  return { version: 10, words, events: [], texts: [], dailyPlans: {}, activities: [], settings: { defaultNewTarget: 2, defaultReviewTarget: 1, retention: 0.9, speechRate: 0.92, todayBooks: [], typeBooks: [], ...settings } };
 }
 function dateOffset(n) { const d = new Date(); d.setDate(d.getDate() + n); return dayKey(d.getTime()); }
 
-test('FSRS updates only from the cold daily signal', () => {
+test('FSRS updates only from the first cold listening signal', () => {
   const w = word('w'); const S = state([w]);
   const first = recordAttempt(S, w, 'listen', 'bad', { ts: Date.now() });
   assert.equal(first.cold, true);
@@ -56,11 +56,20 @@ test('retry reappears after other cards, not only at the end', () => {
 });
 function wordBy(S,id){return S.words.find(w=>w.id===id);}
 
-test('hand-writing does not complete Today listening task', () => {
+test('hand-writing does not complete Today listening task or schedule an unseen word', () => {
   const w = word('w'); const S = state([w], { defaultNewTarget: 1, defaultReviewTarget: 0 }); const plan = ensureDailyPlan(S);
-  recordAttempt(S, w, 'type', 'good'); const status = planStatus(S, plan);
+  const ev = recordAttempt(S, w, 'type', 'good'); const status = planStatus(S, plan);
   assert.equal(status.new.done, 0); assert.equal(status.new.pending, 1);
-  assert.equal(w.card.reps, 1, 'first cold event in either mode still updates shared memory state');
+  assert.equal(ev.cold, false, 'typing is reinforcement, not the daily scheduling signal');
+  assert.equal(w.card.reps, 0, 'typing alone must not turn an unseen word into a review card');
+});
+
+test('typing before listening does not steal the cold listening signal', () => {
+  const w = word('w'); const S = state([w]);
+  recordAttempt(S, w, 'type', 'bad');
+  const listen = recordAttempt(S, w, 'listen', 'good', { ts: Date.now() + 1000 });
+  assert.equal(listen.cold, true);
+  assert.equal(w.card.reps, 1);
 });
 
 test('editing the cold judgment rebuilds the FSRS card', () => {
