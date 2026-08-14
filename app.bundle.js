@@ -2229,12 +2229,13 @@ async function dbSet(key, value) {
 }
 function defaultState() {
   return {
-    version: 7,
+    version: 8,
     words: [],
     events: [],
     texts: [],
     sentenceBooks: [],
     simpleWords: [],
+    errorBooks: [],
     dailyPlans: {},
     activities: [],
     settings: {
@@ -2375,6 +2376,9 @@ function normalizeState(input) {
   state2.sentenceBooks = normalizeSentenceBooks(input?.sentenceBooks);
   state2.simpleWords = Array.isArray(input?.simpleWords) ? [...new Set(input.simpleWords.map(normalizeLexeme).filter(Boolean))] : [];
   ensureSimpleWords(state2);
+  const inferredErrorBooks = new Set(Array.isArray(input?.errorBooks) ? input.errorBooks.map(String).filter(Boolean) : []);
+  for (const word of state2.words) for (const source of word.sources || []) if (/错题|错词|error/i.test(source)) inferredErrorBooks.add(source);
+  state2.errorBooks = [...inferredErrorBooks];
   state2.activities = normalizeActivities(input?.activities, preserveDates);
   state2.dailyPlans = {};
   if (Number(input?.version) >= 4 && input?.dailyPlans && typeof input.dailyPlans === "object" && !Array.isArray(input.dailyPlans)) {
@@ -2385,7 +2389,7 @@ function normalizeState(input) {
     const evs = state2.events.filter((e) => e.wordId === word.id && e.cold).sort((a, b) => a.ts - b.ts);
     word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : word.card || emptyCard();
   }
-  state2.version = 7;
+  state2.version = 8;
   return state2;
 }
 async function parseLocal(key) {
@@ -2420,7 +2424,7 @@ async function loadState() {
   }
 }
 async function saveState(state2) {
-  state2.version = 7;
+  state2.version = 8;
   ensureSimpleWords(state2);
   try {
     await dbSet(STATE_KEY, state2);
@@ -2998,6 +3002,61 @@ function bindBookChips(scope, rerender) {
     rerender();
   });
 }
+function planWordKind(plan, id2) {
+  return plan?.newIds?.includes(id2) ? "\u65B0\u8BCD" : plan?.reviewIds?.includes(id2) ? "\u590D\u4E60" : "\u5176\u4ED6";
+}
+function planWordBook(plan, id2) {
+  if (plan?.mode !== "sequential") return "";
+  const seg = (plan.bookSegments || []).find((x) => (x.newIds || []).includes(id2) || (x.reviewIds || []).includes(id2));
+  return seg?.book || "";
+}
+function planWordMark(plan, id2) {
+  const w = wordById(id2);
+  if (!w) return { label: "\u5DF2\u79FB\u9664", cls: "mark-pending" };
+  if (w.retired || isSimpleLexeme(state, w.en)) return { label: "\u7B80\u5355", cls: "mark-simple" };
+  const last = latestEventOnDay(state, id2, plan.date, "listen");
+  if (!last) return { label: "\u672A\u5F00\u59CB", cls: "mark-pending" };
+  return last.result === "good" ? { label: "\u5DF2\u719F\u6089", cls: "mark-good" } : { label: "\u5F85\u5DE9\u56FA", cls: "mark-bad" };
+}
+function planChecklistHtml(plan, currentId = null) {
+  const group = (title, ids) => {
+    const rows = (ids || []).map((id2, index) => {
+      const w = wordById(id2);
+      if (!w) return "";
+      const mark = planWordMark(plan, id2), book = planWordBook(plan, id2);
+      return `<div class="study-word-row ${id2 === currentId ? "current" : ""}"><span class="en">${index + 1}. ${esc(w.en)}</span><span class="zh">${esc(w.zh || "\u2014")}</span><span class="${mark.cls}">${mark.label}</span><span class="small">${book ? esc(book) : planWordKind(plan, id2)}</span></div>`;
+    }).join("");
+    const done = (ids || []).filter((id2) => ["\u5DF2\u719F\u6089", "\u7B80\u5355"].includes(planWordMark(plan, id2).label)).length;
+    return `<div class="study-list-group"><div class="study-list-title"><b>${title}</b><span>${done} / ${(ids || []).length}</span></div>${rows || '<div class="empty">\u8FD9\u4E00\u7C7B\u6CA1\u6709\u8BCD\u3002</div>'}</div>`;
+  };
+  return `<div class="study-list">${group("\u65B0\u8BCD", plan?.newIds || [])}${group("\u590D\u4E60\u8BCD", plan?.reviewIds || [])}</div>`;
+}
+function typeWordKind(id2, date = currentDayKey()) {
+  const plan = state.dailyPlans?.[date];
+  if (plan?.newIds?.includes(id2)) return "\u65B0\u8BCD";
+  if (plan?.reviewIds?.includes(id2)) return "\u590D\u4E60\u8BCD";
+  return state.events.some((e) => e.wordId === id2 && e.date < date) ? "\u590D\u4E60\u8BCD" : "\u65B0\u8BCD";
+}
+function registerErrorBook(name) {
+  const clean = String(name || "").trim();
+  if (!clean) return;
+  state.errorBooks = Array.isArray(state.errorBooks) ? state.errorBooks : [];
+  if (!state.errorBooks.includes(clean)) state.errorBooks.push(clean);
+}
+function errorBookNames() {
+  const names = new Set(Array.isArray(state.errorBooks) ? state.errorBooks : []);
+  for (const w of state.words) for (const source of w.sources || []) if (/错题|错词|error/i.test(source)) names.add(source);
+  return [...names].filter(Boolean).sort((a, b) => a.localeCompare(b));
+}
+function errorBookSectionHtml() {
+  const books = errorBookNames();
+  if (!books.length) return `<section class="card"><h2 class="section-title">\u9519\u9898\u672C</h2><div class="empty">\u8FD8\u6CA1\u6709\u9519\u9898\u672C\u3002\u53E5\u5B50\u542C\u5199\u7ED3\u675F\u540E\u53EF\u4EE5\u628A\u4E0D\u719F/\u4E0D\u8BA4\u8BC6\u7684\u8BCD\u4E00\u952E\u52A0\u5165\u3002</div></section>`;
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u9519\u9898\u672C</h2><div class="small">\u9ED8\u8BA4\u6298\u53E0\uFF0C\u53EA\u663E\u793A\u540D\u79F0\u548C\u8BCD\u6570\uFF1B\u5C55\u5F00\u540E\u7528\u7D27\u51D1\u5217\u8868\u67E5\u770B\u3002</div></div></div><div class="error-books">${books.map((book) => {
+    const words = state.words.filter((w) => (w.sources || []).includes(book));
+    const preview = words.slice(0, 60).map((w) => `<div class="error-row"><span class="en">${esc(w.en)}</span><span class="zh">${esc(w.zh || "")}</span>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : "<span></span>"}</div>`).join("");
+    return `<details class="error-book"><summary><b>${esc(book)}</b><span class="small">${words.length} \u8BCD</span></summary><div class="error-compact">${preview || '<div class="empty">\u6682\u65E0\u5355\u8BCD</div>'}</div>${words.length > 60 ? `<div class="small" style="padding:8px 0">\u8FD9\u91CC\u53EA\u9884\u89C8\u524D 60 \u4E2A\uFF1B\u70B9\u4E0B\u9762\u67E5\u770B\u5168\u90E8\u3002</div>` : ""}<div class="row" style="padding:9px 0"><button class="soft" data-open-error-book="${esc(book)}">\u5728\u8BCD\u5E93\u4E2D\u67E5\u770B\u5168\u90E8</button></div></details>`;
+  }).join("")}</div></section>`;
+}
 function renderHome() {
   const today = todayListeningStats(state, [], currentDayKey());
   shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929</h2><p>\u9996\u9875\u53EA\u7559\u4ECA\u65E5\u5B8C\u6210\u5C0F\u8BA1\u548C\u5165\u53E3\u3002</p></div><button id="goToday" class="primary">\u8FDB\u5165\u4ECA\u65E5\u5B66\u4E60</button></div><div class="grid2" style="margin-top:16px"><div class="statbox"><b>${today.newCount}</b><span>\u4ECA\u65E5\u65B0\u8BCD\u5B8C\u6210</span></div><div class="statbox"><b>${today.reviewCount}</b><span>\u4ECA\u65E5\u590D\u4E60\u5B8C\u6210</span></div></div></section><div class="grid2"><button id="homeToday" class="entry"><b>\u4ECA\u65E5\u5B66\u4E60</b><span>\u7EE7\u7EED\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u5F53\u5929\u5F85\u5DE9\u56FA\u3002</span></button><button id="goType" class="entry"><b>\u624B\u6253\u5F3A\u5316</b><span>\u6309\u65E5\u671F\u3001\u8BCD\u4E66\u548C\u4E0D\u719F\u6B21\u6570\u7B5B\u9009\u5F3A\u5316\u3002</span></button><button id="goText" class="entry"><b>\u6587\u672C\u4E0E\u53E5\u5B50</b><span>\u6587\u672C\u5E93\u3001\u53E5\u5B50\u62C6\u8BCD\u542C\u5199\u548C\u53E5\u5B50\u9519\u8BCD\u3002</span></button><button id="goStats" class="entry"><b>\u5B66\u4E60\u7EDF\u8BA1</b><span>\u65E5\u5386\u3001\u9996\u8F6E\u7ED3\u679C\u3001\u56F0\u96BE\u8BCD\u548C\u590D\u4E60\u9884\u6D4B\u3002</span></button></div></div>`);
@@ -3032,7 +3091,7 @@ function renderToday() {
     return `<div class="bookrow"><b>${esc(b)}</b><span>${x.newCount} \u65B0</span><span>${x.reviewCount} \u590D\u4E60</span><span class="mobilehide good">${x.firstGood} \u719F\u6089</span><span class="mobilehide bad">${x.firstBad} \u4E0D\u719F</span></div>`;
   }).join("");
   const planControls = plan.mode === "sequential" ? `<div class="small" style="margin:10px 0">\u6309\u4E0B\u9762\u987A\u5E8F\u4E00\u672C\u4E00\u672C\u5B66\u5B8C\u3002\u91CD\u590D\u8BCD\u53EA\u5F52\u524D\u9762\u7B2C\u4E00\u672C\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5360\u540D\u989D\u3002</div>${sequentialRows || '<div class="empty">\u5148\u9009\u62E9\u81F3\u5C11\u4E00\u672C\u5177\u4F53\u8BCD\u4E66\u3002</div>'}` : `<div class="grid2" style="margin-top:12px"><div class="field"><label>\u4ECA\u5929\u65B0\u8BCD\u76EE\u6807</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>\u4ECA\u5929\u590D\u4E60\u76EE\u6807</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div>`;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">${plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21" : "\u6DF7\u5408"} \xB7 FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">\u5F53\u524D\u8BCD\u4E66\uFF1A<b>${esc(currentSeg.book)}</b>\uFF0C\u5B8C\u6210\u540E\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u672C\u3002</div>` : ""}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="field"><label>\u5B66\u4E60\u65B9\u5F0F</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === "mixed" ? "selected" : ""}>\u6DF7\u5408\u5B66\u4E60\uFF1A\u591A\u672C\u8BCD\u4E66\u5171\u7528\u4E00\u4E2A\u603B\u91CF</option><option value="sequential" ${plan.mode === "sequential" ? "selected" : ""}>\u5206\u672C\u4F9D\u6B21\uFF1A\u4E00\u672C\u5B66\u5B8C\u518D\u4E0B\u4E00\u672C</option></select></div><div class="small" style="margin:10px 0">\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\u3002</div>${bookChips(books, "today")}${planControls}</div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u53EA\u5F71\u54CD\u4E4B\u540E\u65B0\u751F\u6210\u7684\u6DF7\u5408\u8BA1\u5212\uFF1B\u5206\u672C\u6A21\u5F0F\u6BCF\u672C\u5355\u72EC\u8BBE\u7F6E\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">${plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21" : "\u6DF7\u5408"} \xB7 FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">\u5F53\u524D\u8BCD\u4E66\uFF1A<b>${esc(currentSeg.book)}</b>\uFF0C\u5B8C\u6210\u540E\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u672C\u3002</div>` : ""}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u672C\u8F6E\u5355\u8BCD\u6E05\u5355 \xB7 ${prog.newTotal + prog.reviewTotal}</summary><div style="margin-top:10px">${planChecklistHtml(plan)}</div></details><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="field"><label>\u5B66\u4E60\u65B9\u5F0F</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === "mixed" ? "selected" : ""}>\u6DF7\u5408\u5B66\u4E60\uFF1A\u591A\u672C\u8BCD\u4E66\u5171\u7528\u4E00\u4E2A\u603B\u91CF</option><option value="sequential" ${plan.mode === "sequential" ? "selected" : ""}>\u5206\u672C\u4F9D\u6B21\uFF1A\u4E00\u672C\u5B66\u5B8C\u518D\u4E0B\u4E00\u672C</option></select></div><div class="small" style="margin:10px 0">\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\u3002</div>${bookChips(books, "today")}${planControls}</div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u53EA\u5F71\u54CD\u4E4B\u540E\u65B0\u751F\u6210\u7684\u6DF7\u5408\u8BA1\u5212\uFF1B\u5206\u672C\u6A21\u5F0F\u6BCF\u672C\u5355\u72EC\u8BBE\u7F6E\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
   bindBookChips("today", () => {
     if (plan.mode === "sequential") {
       const existing = new Map((plan.bookSegments || []).map((x) => [x.book, x]));
@@ -3115,7 +3174,7 @@ function startListen(plan, activityId = null) {
   if (!id2) return toast("\u5F53\u524D\u8BCD\u4E66\u5DF2\u7ECF\u5B8C\u6210");
   plan.resumeWordId = id2;
   persist();
-  listen = { plan, sessionPlan, session, currentEventId: null, result: null, answer: false, activityId: activityId || startActivity("listen", "\u4ECA\u65E5\u542C\u97F3", plan.books), historyView: null, segmentBook: sessionPlan.segmentBook || null };
+  listen = { plan, sessionPlan, session, currentEventId: null, result: null, answer: false, showList: false, activityId: activityId || startActivity("listen", "\u4ECA\u65E5\u542C\u97F3", plan.books), historyView: null, segmentBook: sessionPlan.segmentBook || null };
   renderListen();
   speak(wordById(id2).en);
 }
@@ -3135,13 +3194,22 @@ function renderListen() {
   const reviewing = Boolean(listen.historyView);
   const result = reviewing ? listen.historyView.result : listen.result;
   const answer = reviewing || listen.answer;
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">${listen.segmentBook ? `${esc(listen.segmentBook)} \xB7 ` : ""}\u65B0\u8BCD ${p.newDone} / ${p.newTotal}\u3000\u590D\u4E60 ${p.reviewDone} / ${p.reviewTotal}${p.retry ? `\u3000\u5F85\u5DE9\u56FA ${p.retry}` : ""}</div>${!reviewing ? '<button id="retireWord" class="retire">\u6807\u8BB0\u7B80\u5355</button>' : ""}</div><div class="studybody"><button id="speakWord" class="speaker">\u25D6))</button>${answer ? `<div class="word ${result === "good" ? "good" : result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div>` : '<div class="small">\u542C\u5230\u4EE5\u540E\uFF0C\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div>'}<div class="judges"><button id="judgeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="judgeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div>${answer ? `<div class="move"><button id="prevWord" class="soft" ${listen.session.history.length ? "" : "disabled"}>\u4E0A\u4E00\u8BCD</button><button id="nextWord" class="primary">${reviewing ? "\u56DE\u5230\u5F53\u524D\u8BCD" : "\u4E0B\u4E00\u8BCD"}</button></div>` : ""}<div class="statusline">${reviewing ? "\u4FEE\u6539\u5386\u53F2\u5224\u65AD\u540E\u4F1A\u91CD\u65B0\u8BA1\u7B97\u5F53\u5929\u961F\u5217\u548C FSRS \u72B6\u6001\u3002" : "\u53EA\u64AD\u653E\u4F46\u6CA1\u5224\u65AD\u7684\u8BCD\u4E0D\u4EA7\u751F\u5B66\u4E60\u8BB0\u5F55\uFF1B\u9000\u51FA\u540E\u4F1A\u5C3D\u91CF\u4ECE\u5B83\u7EE7\u7EED\u3002"}</div></div></main>`;
+  const currentId = w.id;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">${listen.segmentBook ? `${esc(listen.segmentBook)} \xB7 ` : ""}\u65B0\u8BCD ${p.newDone} / ${p.newTotal}\u3000\u590D\u4E60 ${p.reviewDone} / ${p.reviewTotal}${p.retry ? `\u3000\u5F85\u5DE9\u56FA ${p.retry}` : ""}</div><div class="study-actions"><button id="studyListButton">${listen.showList ? "\u6536\u8D77\u6E05\u5355" : "\u672C\u8F6E\u6E05\u5355"}</button>${!reviewing ? '<button id="retireWord">\u6807\u8BB0\u7B80\u5355</button>' : ""}</div></div>${listen.showList ? `<section class="study-sheet"><div class="study-sheet-head"><div><b>\u672C\u8F6E\u5355\u8BCD</b><div class="small">\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u6BCF\u4E2A\u8BCD\u5F53\u524D\u6807\u8BB0</div></div><button id="closeStudyList" class="soft">\u5173\u95ED</button></div>${planChecklistHtml(listen.plan, currentId)}</section>` : ""}<div class="studybody"><div class="type-kind">${planWordKind(listen.plan, w.id)}${planWordBook(listen.plan, w.id) ? ` \xB7 ${esc(planWordBook(listen.plan, w.id))}` : ""}</div><button id="speakWord" class="speaker">\u25D6))</button>${answer ? `<div class="word ${result === "good" ? "good" : result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div>` : '<div class="small">\u542C\u5230\u4EE5\u540E\uFF0C\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div>'}<div class="judges"><button id="judgeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="judgeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div>${answer ? `<div class="move"><button id="prevWord" class="soft" ${listen.session.history.length ? "" : "disabled"}>\u4E0A\u4E00\u8BCD</button><button id="nextWord" class="primary">${reviewing ? "\u56DE\u5230\u5F53\u524D\u8BCD" : "\u4E0B\u4E00\u8BCD"}</button></div>` : ""}<div class="statusline">${reviewing ? "\u4FEE\u6539\u5386\u53F2\u5224\u65AD\u540E\u4F1A\u91CD\u65B0\u8BA1\u7B97\u5F53\u5929\u961F\u5217\u548C FSRS \u72B6\u6001\u3002" : "\u53EA\u64AD\u653E\u4F46\u6CA1\u5224\u65AD\u7684\u8BCD\u4E0D\u4EA7\u751F\u5B66\u4E60\u8BB0\u5F55\uFF1B\u9000\u51FA\u540E\u4F1A\u5C3D\u91CF\u4ECE\u5B83\u7EE7\u7EED\u3002"}</div></div></main>`;
   document.getElementById("listenBack").onclick = () => {
     touchActivity(listen.activityId);
     persist();
     listen = null;
     view = "today";
     renderToday();
+  };
+  document.getElementById("studyListButton").onclick = () => {
+    listen.showList = !listen.showList;
+    renderListen();
+  };
+  if (document.getElementById("closeStudyList")) document.getElementById("closeStudyList").onclick = () => {
+    listen.showList = false;
+    renderListen();
   };
   document.getElementById("speakWord").onclick = () => {
     speak(w.en);
@@ -3242,6 +3310,10 @@ function typePreset(kind) {
   const candidates = typeCandidates();
   const allowed = new Set(candidates.map((w) => w.id));
   const today = currentDayKey();
+  const plan = state.dailyPlans?.[today];
+  const heard = (ids) => [...new Set((ids || []).filter((id2) => allowed.has(id2) && latestEventOnDay(state, id2, today, "listen")))];
+  if (kind === "todayNew") return heard(plan?.newIds || []);
+  if (kind === "todayReview") return heard(plan?.reviewIds || []);
   if (kind === "todayListen") return [...new Set(state.events.filter((e) => e.date === today && e.mode === "listen" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId))];
   if (kind === "todayType") return [...new Set(state.events.filter((e) => e.date === today && e.mode === "type" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId))];
   if (kind === "repeat7") {
@@ -3260,12 +3332,12 @@ function typePreset(kind) {
 }
 function renderType() {
   const books = state.settings.typeBooks || [];
-  const auto = typePreset("auto"), l = typePreset("todayListen"), t = typePreset("todayType"), r = typePreset("repeat7");
+  const auto = typePreset("auto"), n = typePreset("todayNew"), rv = typePreset("todayReview"), l = typePreset("todayListen"), t = typePreset("todayType"), r = typePreset("repeat7");
   const typedToday = new Set(state.events.filter((e) => e.date === currentDayKey() && e.mode === "type").map((e) => e.wordId)).size;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u624B\u6253\u5F3A\u5316</h2><p>\u5148\u7ED9\u4F60\u6700\u503C\u5F97\u7EC3\u7684\u5165\u53E3\uFF1B\u65E5\u671F\u3001\u6B21\u6570\u7B49\u7CBE\u786E\u7B5B\u9009\u653E\u4E0B\u9762\u3002</p></div><span class="tag">${books.length ? `${books.length} \u672C\u8BCD\u4E66` : "\u5168\u90E8\u8BCD\u4E66"}</span></div><div class="grid3" style="margin-top:13px"><div class="statbox"><b>${auto.length}</b><span>\u5EFA\u8BAE\u5F3A\u5316</span></div><div class="statbox"><b>${typedToday}</b><span>\u4ECA\u65E5\u5DF2\u624B\u6253</span></div><div class="statbox"><b>${activityMinutes("type")}m</b><span>\u624B\u6253\u7528\u65F6</span></div></div><div class="row" style="margin-top:15px"><button id="typeStartAuto" class="primary">\u5F00\u59CB\u5EFA\u8BAE\u5F3A\u5316${auto.length ? ` \xB7 ${Math.min(30, auto.length)}` : ""}</button></div><details class="details"><summary>\u8BCD\u4E66\u8303\u56F4\u4E0E\u9AD8\u7EA7\u7B5B\u9009</summary><div style="margin-top:12px">${bookChips(books, "type")}<div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u6307\u5B9A\u65E5\u671F</label><input id="typeDate" type="date" value="${currentDayKey()}"></div><div class="field"><label>\u5931\u8D25\u6765\u6E90</label><select id="typeMode"><option value="all">\u542C\u97F3 + \u624B\u6253</option><option value="listen">\u53EA\u770B\u542C\u97F3</option><option value="type">\u53EA\u770B\u624B\u6253</option></select></div><div class="field"><label>\u81F3\u5C11\u4E0D\u719F\u6B21\u6570</label><select id="typeMin"><option>1</option><option>2</option><option>3</option><option>5</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="typeLimit"><option>20</option><option selected>50</option><option>100</option><option value="0">\u5168\u90E8</option></select></div></div><div id="customTypePreview" style="margin-top:12px"></div></div></details></section><section class="card"><h2 class="section-title">\u5FEB\u6377\u5165\u53E3</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayListen"><span class="num">${l.length}</span><b>\u4ECA\u65E5\u542C\u97F3\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u542C\u97F3\u9636\u6BB5\u66B4\u9732\u51FA\u6765\u7684\u8BCD</span></button><button data-type-preset="todayType"><span class="num">${t.length}</span><b>\u4ECA\u65E5\u624B\u6253\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u624B\u6253\u540E\u4ECD\u7136\u5361\u4F4F</span></button><button data-type-preset="repeat7"><span class="num">${r.length}</span><b>\u8FD1 7 \u5929\u53CD\u590D\u4E0D\u719F</b><span class="small">\u8FD1\u671F\u91CD\u590D\u5931\u8D25\u7684\u8BCD</span></button><button data-type-preset="auto"><span class="num">${auto.length}</span><b>\u5168\u90E8\u56F0\u96BE\u8BCD</b><span class="small">\u6309\u8DE8\u5929\u5931\u8D25\u4E0E\u53EF\u63D0\u53D6\u7387\u6392\u5E8F</span></button></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u624B\u6253\u5F3A\u5316</h2><p>\u65B0\u8BCD\u548C\u590D\u4E60\u8BCD\u5206\u5F00\u770B\uFF1B\u53EA\u628A\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u653E\u8FDB\u201C\u4ECA\u65E5\u65B0\u8BCD/\u590D\u4E60\u201D\uFF0C\u4E0D\u4F1A\u63D0\u524D\u6CC4\u9732\u8FD8\u6CA1\u51B7\u542F\u52A8\u7684\u65B0\u8BCD\u3002</p></div><span class="tag">${books.length ? `${books.length} \u672C\u8BCD\u4E66` : "\u5168\u90E8\u8BCD\u4E66"}</span></div><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${n.length}</b><span>\u4ECA\u65E5\u65B0\u8BCD\u53EF\u624B\u6253</span></div><div class="statbox"><b>${rv.length}</b><span>\u4ECA\u65E5\u590D\u4E60\u53EF\u624B\u6253</span></div><div class="statbox"><b>${auto.length}</b><span>\u5EFA\u8BAE\u5F3A\u5316</span></div><div class="statbox"><b>${typedToday}</b><span>\u4ECA\u65E5\u5DF2\u624B\u6253</span></div></div><div class="small" style="margin-top:9px">\u624B\u6253\u7528\u65F6 ${activityMinutes("type")} \u5206\u949F</div><div class="row" style="margin-top:15px"><button id="typeStartAuto" class="primary">\u5F00\u59CB\u5EFA\u8BAE\u5F3A\u5316${auto.length ? ` \xB7 ${Math.min(30, auto.length)}` : ""}</button></div><details class="details"><summary>\u8BCD\u4E66\u8303\u56F4\u4E0E\u9AD8\u7EA7\u7B5B\u9009</summary><div style="margin-top:12px">${bookChips(books, "type")}<div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u6307\u5B9A\u65E5\u671F</label><input id="typeDate" type="date" value="${currentDayKey()}"></div><div class="field"><label>\u5931\u8D25\u6765\u6E90</label><select id="typeMode"><option value="all">\u542C\u97F3 + \u624B\u6253</option><option value="listen">\u53EA\u770B\u542C\u97F3</option><option value="type">\u53EA\u770B\u624B\u6253</option></select></div><div class="field"><label>\u81F3\u5C11\u4E0D\u719F\u6B21\u6570</label><select id="typeMin"><option>1</option><option>2</option><option>3</option><option>5</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="typeLimit"><option>20</option><option selected>50</option><option>100</option><option value="0">\u5168\u90E8</option></select></div></div><div id="customTypePreview" style="margin-top:12px"></div></div></details></section><section class="card"><h2 class="section-title">\u6309\u65B0\u8BCD / \u590D\u4E60\u8FDB\u5165</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayNew"><span class="num">${n.length}</span><b>\u4ECA\u65E5\u65B0\u8BCD</b><span class="small">\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u65B0\u8BCD</span></button><button data-type-preset="todayReview"><span class="num">${rv.length}</span><b>\u4ECA\u65E5\u590D\u4E60\u8BCD</b><span class="small">\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u590D\u4E60\u8BCD</span></button></div></section><section class="card"><h2 class="section-title">\u56F0\u96BE\u8BCD\u5FEB\u6377\u5165\u53E3</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayListen"><span class="num">${l.length}</span><b>\u4ECA\u65E5\u542C\u97F3\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u542C\u97F3\u9636\u6BB5\u66B4\u9732\u51FA\u6765\u7684\u8BCD</span></button><button data-type-preset="todayType"><span class="num">${t.length}</span><b>\u4ECA\u65E5\u624B\u6253\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u624B\u6253\u540E\u4ECD\u7136\u5361\u4F4F</span></button><button data-type-preset="repeat7"><span class="num">${r.length}</span><b>\u8FD1 7 \u5929\u53CD\u590D\u4E0D\u719F</b><span class="small">\u8FD1\u671F\u91CD\u590D\u5931\u8D25\u7684\u8BCD</span></button><button data-type-preset="auto"><span class="num">${auto.length}</span><b>\u5168\u90E8\u56F0\u96BE\u8BCD</b><span class="small">\u6309\u8DE8\u5929\u5931\u8D25\u4E0E\u53EF\u63D0\u53D6\u7387\u6392\u5E8F</span></button></div></section></div>`);
   bindBookChips("type", renderType);
   document.getElementById("typeStartAuto").onclick = () => startType(auto.slice(0, 30), "\u5EFA\u8BAE\u5F3A\u5316");
-  document.querySelectorAll("[data-type-preset]").forEach((b) => b.onclick = () => startType(typePreset(b.dataset.typePreset).slice(0, 50), b.textContent.trim().replace(/\d+/, "").slice(0, 20)));
+  document.querySelectorAll("[data-type-preset]").forEach((b) => b.onclick = () => startType(typePreset(b.dataset.typePreset).slice(0, 50), b.dataset.typePreset === "todayNew" ? "\u4ECA\u65E5\u65B0\u8BCD" : b.dataset.typePreset === "todayReview" ? "\u4ECA\u65E5\u590D\u4E60\u8BCD" : b.textContent.trim().replace(/\d+/, "").slice(0, 20)));
   const inputs = ["typeDate", "typeMode", "typeMin", "typeLimit"];
   inputs.forEach((id2) => document.getElementById(id2).onchange = renderTypeCustom);
   renderTypeCustom();
@@ -3312,7 +3384,8 @@ function renderTypeRun() {
   const w = wordById(id2);
   if (!w) return finishType();
   const p = typeProgress();
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">${p.done} / ${p.total}${p.bad ? `\u3000\u5F85\u5DE9\u56FA ${p.bad}` : ""} \xB7 ${esc(typeRun.label)}</div></div><div class="studybody"><button id="typeSpeak" class="speaker">\u25D6))</button>${!typeRun.answer ? `<div class="small">\u542C\u97F3\u540E\u5199\u51FA\u4F60\u76F4\u63A5\u60F3\u5230\u7684\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="typeAnswer" style="font-size:21px;text-align:center" placeholder="\u5199\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u2026" autocomplete="off"><div class="grid2" style="margin-top:10px"><button id="typeSubmit" class="primary">\u63D0\u4EA4</button><button id="typeReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${typeRun.result === "good" ? "good" : typeRun.result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div><div class="typed"><b>\u4F60\u521A\u624D\u5199\u7684\u662F</b><div>${esc(typeRun.input || "\uFF08\u76F4\u63A5\u770B\u4E86\u7B54\u6848\uFF09")}</div></div><div class="judges"><button id="typeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="typeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div><div class="move"><button id="typeReplay" class="soft">\u91CD\u542C</button><button id="typeNext" class="primary" ${typeRun.result ? "" : "disabled"}>\u4E0B\u4E00\u8BCD</button></div><div class="statusline">\u4E0D\u81EA\u52A8\u5224\u4E2D\u6587\u540C\u4E49\u8BCD\u5BF9\u9519\uFF1B\u719F\u6089/\u4E0D\u719F\u6089\u4ECD\u7136\u4F5C\u7528\u4E8E\u540C\u4E00\u4E2A\u5355\u8BCD\u5386\u53F2\u3002</div>`}</div></main>`;
+  const kind = typeWordKind(id2);
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">${p.done} / ${p.total}${p.bad ? `\u3000\u5F85\u5DE9\u56FA ${p.bad}` : ""} \xB7 ${kind} \xB7 ${esc(typeRun.label)}</div></div><div class="studybody"><button id="typeSpeak" class="speaker">\u25D6))</button>${!typeRun.answer ? `<div class="small">\u542C\u97F3\u540E\u5199\u51FA\u4F60\u76F4\u63A5\u60F3\u5230\u7684\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="typeAnswer" style="font-size:21px;text-align:center" placeholder="\u5199\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u2026" autocomplete="off"><div class="grid2" style="margin-top:10px"><button id="typeSubmit" class="primary">\u63D0\u4EA4</button><button id="typeReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${typeRun.result === "good" ? "good" : typeRun.result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div><div class="typed"><b>\u4F60\u521A\u624D\u5199\u7684\u662F</b><div>${esc(typeRun.input || "\uFF08\u76F4\u63A5\u770B\u4E86\u7B54\u6848\uFF09")}</div></div><div class="judges"><button id="typeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="typeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div><div class="move"><button id="typeReplay" class="soft">\u91CD\u542C</button><button id="typeNext" class="primary" ${typeRun.result ? "" : "disabled"}>\u4E0B\u4E00\u8BCD</button></div><div class="statusline">\u4E0D\u81EA\u52A8\u5224\u4E2D\u6587\u540C\u4E49\u8BCD\u5BF9\u9519\uFF1B\u719F\u6089/\u4E0D\u719F\u6089\u4ECD\u7136\u4F5C\u7528\u4E8E\u540C\u4E00\u4E2A\u5355\u8BCD\u5386\u53F2\u3002</div>`}</div></main>`;
   document.getElementById("typeBack").onclick = () => {
     touchActivity(typeRun.activityId);
     typeRun = null;
@@ -3627,6 +3700,7 @@ function renderSentenceRun() {
 }
 function importSentenceProblems(tokens, targetName, sentence) {
   const target = String(targetName || "\u53E5\u5B50\u9519\u9898\u672C").trim() || "\u53E5\u5B50\u9519\u9898\u672C";
+  registerErrorBook(target);
   for (const token of tokens) upsertWord({ en: token.normalized || token.surface, source: target, example: token.sentence || sentence });
   persist();
   toast(`\u5DF2\u628A ${tokens.length} \u4E2A\u8BCD\u52A0\u5165\u300C${target}\u300D`);
@@ -3788,12 +3862,17 @@ function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = ""
 }
 function renderLibrary() {
   const books = allBooks(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section><section class="card"><div class="grid2"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${errorBookSectionHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("importWords").onclick = () => importInput.click();
   document.getElementById("backupWords").onclick = backup;
   document.getElementById("restoreWords").onclick = () => restoreInput.click();
   document.getElementById("wordSearch").oninput = drawWordList;
   document.getElementById("wordBook").onchange = drawWordList;
+  document.querySelectorAll("[data-open-error-book]").forEach((button) => button.onclick = () => {
+    document.getElementById("wordBook").value = button.dataset.openErrorBook;
+    drawWordList();
+    document.getElementById("wordList").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
   document.getElementById("retention").onchange = (e) => {
     state.settings.retention = Math.min(0.97, Math.max(0.75, Number(e.target.value) || 0.9));
     rebuildAllCards(state);
@@ -3812,7 +3891,7 @@ function drawWordList() {
   if (!box) return;
   const q = document.getElementById("wordSearch").value.trim().toLowerCase(), book = document.getElementById("wordBook").value;
   const list = state.words.filter((w) => (!book || w.sources.includes(book)) && (!q || `${w.en} ${w.zh}`.toLowerCase().includes(q))).slice(0, 200);
-  box.innerHTML = list.length ? list.map((w) => `<div class="listitem"><div class="space"><div><h3>${esc(w.en)} ${w.retired ? '<span class="tag">\u7B80\u5355</span>' : ""}</h3><div>${esc(w.zh || "")}</div><div class="source-tags" style="justify-content:flex-start">${w.sources.map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div></div><button class="soft" data-retire="${w.id}">${w.retired ? "\u6062\u590D\u5B66\u4E60" : "\u6807\u8BB0\u7B80\u5355"}</button></div></div>`).join("") : '<div class="empty">\u6CA1\u6709\u5339\u914D\u7684\u8BCD\u3002</div>';
+  box.innerHTML = list.length ? list.map((w) => `<div class="listitem compact-word"><div class="space"><div style="min-width:0"><div class="word-main"><b>${esc(w.en)}</b>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : ""}<span class="word-meaning">${esc(w.zh || "")}</span></div><div class="source-tags" style="justify-content:flex-start">${w.sources.map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div></div><button class="soft" data-retire="${w.id}">${w.retired ? "\u6062\u590D" : "\u7B80\u5355"}</button></div></div>`).join("") : '<div class="empty">\u6CA1\u6709\u5339\u914D\u7684\u8BCD\u3002</div>';
   document.querySelectorAll("[data-retire]").forEach((b) => b.onclick = () => {
     const w = wordById(b.dataset.retire);
     markSimpleLexeme(state, w.en, !w.retired);
@@ -3830,7 +3909,9 @@ function parseWordFile(text, name) {
     if (i === 0 && /^(en|english|word|单词)$/i.test(parts[0])) continue;
     const [en, zh, pos, def, rowSource, example] = parts;
     if (!en) continue;
-    upsertWord({ en, zh, pos, def, source: rowSource || fileSource, example: example || "" });
+    const source = rowSource || fileSource;
+    if (/错题|错词|error/i.test(source)) registerErrorBook(source);
+    upsertWord({ en, zh, pos, def, source, example: example || "" });
     count++;
   }
   persist();

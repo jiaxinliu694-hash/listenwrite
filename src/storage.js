@@ -43,12 +43,13 @@ async function dbSet(key, value) {
 
 export function defaultState() {
   return {
-    version: 7,
+    version: 8,
     words: [],
     events: [],
     texts: [],
     sentenceBooks: [],
     simpleWords: [],
+    errorBooks: [],
     dailyPlans: {},
     activities: [],
     settings: {
@@ -191,6 +192,9 @@ export function normalizeState(input) {
   state.sentenceBooks = normalizeSentenceBooks(input?.sentenceBooks);
   state.simpleWords = Array.isArray(input?.simpleWords) ? [...new Set(input.simpleWords.map(normalizeLexeme).filter(Boolean))] : [];
   ensureSimpleWords(state);
+  const inferredErrorBooks = new Set(Array.isArray(input?.errorBooks) ? input.errorBooks.map(String).filter(Boolean) : []);
+  for (const word of state.words) for (const source of word.sources || []) if (/错题|错词|error/i.test(source)) inferredErrorBooks.add(source);
+  state.errorBooks = [...inferredErrorBooks];
   state.activities = normalizeActivities(input?.activities, preserveDates);
   state.dailyPlans = {};
   if (Number(input?.version) >= 4 && input?.dailyPlans && typeof input.dailyPlans === 'object' && !Array.isArray(input.dailyPlans)) {
@@ -201,7 +205,7 @@ export function normalizeState(input) {
     const evs = state.events.filter((e) => e.wordId === word.id && e.cold).sort((a, b) => a.ts - b.ts);
     word.card = evs.length ? rebuildCard(evs, state.settings.retention) : (word.card || emptyCard());
   }
-  state.version = 7;
+  state.version = 8;
   return state;
 }
 
@@ -236,7 +240,7 @@ export async function loadState() {
 }
 
 export async function saveState(state) {
-  state.version = 7;
+  state.version = 8;
   ensureSimpleWords(state);
   try {
     await dbSet(STATE_KEY, state);
