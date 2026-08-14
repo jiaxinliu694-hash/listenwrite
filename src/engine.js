@@ -23,7 +23,13 @@ export function latestEventOnDay(state, wordId, date = dayKey(), mode = null) {
   return list[list.length - 1] || null;
 }
 
+/** Historical formal exposure used for new/review classification. */
 export function hasEventBefore(state, wordId, date = dayKey()) {
+  return state.events.some((e) => e.wordId === wordId && e.mode === 'listen' && e.date < date);
+}
+
+/** Any historical event, regardless of mode, for analytics-only callers. */
+export function hasAnyEventBefore(state, wordId, date = dayKey()) {
   return state.events.some((e) => e.wordId === wordId && e.date < date);
 }
 
@@ -68,7 +74,9 @@ export function activeStudyDayKey(state, ts = Date.now()) {
 export function recordAttempt(state, word, mode, result, context = {}) {
   const ts = context.ts || Date.now();
   const date = context.date || activeStudyDayKey(state, ts);
-  const cold = !state.events.some((e) => e.wordId === word.id && e.date === date);
+  // Cross-day scheduling is intentionally driven only by the first cold
+  // listening judgment of the study day. Typing remains reinforcement/analytics.
+  const cold = mode === 'listen' && !state.events.some((e) => e.wordId === word.id && e.date === date && e.mode === 'listen');
   const attempt = eventsOnDay(state, word.id, date, mode).length + 1;
   const event = {
     id: uid('ev'),
@@ -103,7 +111,7 @@ export function editAttempt(state, eventId, result) {
 export function rebuildAllCards(state) {
   for (const word of state.words) {
     const events = wordEvents(state, word.id);
-    word.card = events.some((e) => e.cold)
+    word.card = events.some((e) => e.cold && e.mode === 'listen')
       ? rebuildCard(events, state.settings.retention)
       : (word.card || emptyCard());
   }
@@ -111,6 +119,6 @@ export function rebuildAllCards(state) {
 
 export function firstColdEventOnDay(state, wordId, date = dayKey()) {
   return state.events
-    .filter((e) => e.wordId === wordId && e.date === date && e.cold)
+    .filter((e) => e.wordId === wordId && e.date === date && e.mode === 'listen' && e.cold)
     .sort((a, b) => a.ts - b.ts)[0] || null;
 }

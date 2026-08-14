@@ -6,7 +6,9 @@ export function createScheduler(retention = 0.9) {
   return fsrs({
     request_retention: Math.min(0.97, Math.max(0.75, Number(retention) || 0.9)),
     maximum_interval: 36500,
-    enable_fuzz: true,
+    // Cards can be rebuilt from the event log. Fuzz would make the same history
+    // produce a different due date after a reload/import, so keep it disabled.
+    enable_fuzz: false,
     enable_short_term: false,
     learning_steps: [],
     relearning_steps: [],
@@ -64,7 +66,7 @@ export function advanceCard(card, event, retention = 0.9) {
 
 export function rebuildCard(events, retention = 0.9) {
   const cold = [...events]
-    .filter((event) => event.cold && (event.result === 'good' || event.result === 'bad'))
+    .filter((event) => event.cold && event.mode === 'listen' && (event.result === 'good' || event.result === 'bad'))
     .sort((a, b) => a.ts - b.ts);
   let card = emptyCard(cold[0]?.ts || Date.now());
   for (const event of cold) card = advanceCard(card, event, retention);
@@ -78,11 +80,4 @@ export function retrievability(card, now = Date.now(), retention = 0.9) {
   } catch {
     return 0;
   }
-}
-
-export function dueToday(card, now = Date.now()) {
-  if (!card || !card.reps) return false;
-  const d = new Date(now);
-  const tomorrow = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
-  return Number(card.due) < tomorrow;
 }
