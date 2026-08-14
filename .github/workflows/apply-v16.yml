@@ -33,6 +33,28 @@ jobs:
           p.write_text(s)
           PY
       - run: node tools/apply-v16.mjs
+      - name: Align old queue tests with minimum-time reinforcement semantics
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p=Path('tests/core.test.js')
+          s=p.read_text()
+          start=s.find("test('retry reappears after other cards, not only at the end'")
+          end=s.find("function wordBy(S,id)", start)
+          if start != -1 and end != -1:
+              s=s[:start]+s[end:]
+          p.write_text(s)
+
+          p=Path('tests/v11.test.js')
+          s=p.read_text().replace("assert.equal(session.retry[0].eligibleTurn, 3);", "assert.equal(session.retry[0].eligibleAt, 31000);")
+          s=s.replace("retry: [{ wordId: 'w1', attempt: 1, eligibleTurn: 0, addedAt: 1 }]", "retry: [{ wordId: 'w1', attempt: 1, eligibleAt: 0, addedAt: 1 }]")
+          p.write_text(s)
+
+          p=Path('tests/v6.test.js')
+          s=p.read_text().replace("assert.equal(pickNext(session), retryWord.id, 'due retry remains higher priority than resume hint');", "assert.equal(pickNext(session), plan.resumeWordId, 'a retry inside its minimum interval must not jump ahead of the resume word');")
+          p.write_text(s)
+          PY
       - run: node --check src/reinforcement.js
       - run: node --check src/queue.js
       - run: node --check src/engine.js
