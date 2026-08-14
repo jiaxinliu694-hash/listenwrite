@@ -1,9 +1,7 @@
 import { advanceCard, emptyCard, rebuildCard } from './scheduler.js';
+import { studyDayKey } from './studyday.js';
 
-export function dayKey(ts = Date.now()) {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
+export const dayKey = studyDayKey;
 
 export function uid(prefix = 'id') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
