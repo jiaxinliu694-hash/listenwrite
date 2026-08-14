@@ -1,0 +1,31 @@
+name: Finalize v19
+on:
+  push:
+    branches: [v19-gap-reinforcement-batch-meaning]
+    paths:
+      - 'tools/finalize-v19.mjs'
+      - '.github/workflows/finalize-v19.yml'
+permissions:
+  contents: write
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: node tools/finalize-v19.mjs
+      - run: node --check src/queue.js
+      - run: node --check src/app.js
+      - run: npm test
+      - run: npm run build
+      - name: Commit final v19 changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/queue.js src/app.js tests/v19.test.js app.bundle.js
+          git rm -f tools/finalize-v19.mjs .github/workflows/finalize-v19.yml
+          git commit -m "Preserve reinforcement gap credit across sessions"
+          git push
