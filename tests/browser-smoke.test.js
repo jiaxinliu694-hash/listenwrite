@@ -55,7 +55,8 @@ test('browser shell renders Home, Today and immersive listening without blank-sc
   assert.match(todayText, /新词/);
   assert.match(todayText, /复习/);
   assert.match(todayText, /待巩固/);
-  assert.match(todayText, /学习设置与词书范围/);
+  assert.match(todayText, /调整今天的计划与词书/);
+  assert.match(todayText, /东八区.*02:00/);
 
   document.getElementById('startListen').click();
   await waitFor(() => document.querySelector('#judgeBad'));
