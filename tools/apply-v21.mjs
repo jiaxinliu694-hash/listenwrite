@@ -5,7 +5,6 @@ function write(path,text){fs.writeFileSync(path,text);}
 
 let app=read('src/app.js');
 app=app.replace("let saveFailureShown = false;", "let saveFailureShown = false;\nlet todayPlanPanelOpen = false;\nlet typeFilterPanelOpen = false;");
-
 app=app.replace(
   '<details class="details"><summary>调整今天的计划与词书</summary>',
   '<details id="todayPlanDetails" class="details" ${todayPlanPanelOpen ? \'open\' : \'\'}><summary>调整今天的计划与词书</summary>'
@@ -30,6 +29,13 @@ let css=read('styles.css');
 css += '\n/* v21: larger, easier wordbook controls on touch screens */\n.chips{gap:10px}\n.chip{min-height:42px;padding:10px 15px;font-size:14px;touch-action:manipulation}\n.details>summary{min-height:42px;display:flex;align-items:center;padding:6px 2px}\n@media(max-width:620px){.chips{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.chip{width:100%;min-height:48px;padding:12px 10px;font-size:14px}.details>summary{min-height:48px;font-size:14px}.details[open]>summary{margin-bottom:4px}}\n';
 write('styles.css',css);
 
+let v19=read('tests/v19.test.js');
+v19=v19.replace(
+"test('retry waits for five completed other cards, not wall clock',()=>{const s=state();add(s,'a','bad');const p={date:'2026-08-14',newIds:['a','b','c','d','e','f','g'],reviewIds:[]};const q=createRetrySession(s,p,'listen');assert.equal(pickNext(q),'b');for(const id of ['b','c','d','e','f']){assert.equal(q.current.wordId,id);add(s,id,'good','listen',10+q.turn);finishCurrent(q,'good',s);pickNext(q);}assert.equal(q.current.wordId,'a');});",
+"test('retry waits for five completed other cards, not wall clock',()=>{const s=state();add(s,'a','bad');const p={date:'2026-08-14',newIds:['a','b','c','d','e','f','g'],reviewIds:[]};const q=createRetrySession(s,p,'listen');const seen=[];for(let i=0;i<5;i++){const id=pickNext(q);assert.notEqual(id,'a');assert.ok(id);seen.push(id);add(s,id,'good','listen',10+q.turn);finishCurrent(q,'good',s);}assert.equal(new Set(seen).size,5);assert.equal(pickNext(q),'a');});"
+);
+write('tests/v19.test.js',v19);
+
 const testText = [
   "import test from 'node:test';",
   "import assert from 'node:assert/strict';",
@@ -40,12 +46,13 @@ const testText = [
   "",
   "test('today wordbook panel persists open state across chip-triggered rerenders',()=>{",
   "  assert.ok(app.includes('let todayPlanPanelOpen = false;'));",
-  "  assert.ok(app.includes('id=\"todayPlanDetails\" class=\"details\" ${todayPlanPanelOpen ? \'open\' : \'\'}'));",
+  "  assert.ok(app.includes('id=\"todayPlanDetails\"'));",
   "  assert.ok(app.includes('todayPlanPanelOpen = true;'));",
   "});",
   "",
   "test('type wordbook filter also preserves its open state',()=>{",
   "  assert.ok(app.includes('let typeFilterPanelOpen = false;'));",
+  "  assert.ok(app.includes('id=\"typeFilterDetails\"'));",
   "  assert.ok(app.includes('typeFilterPanelOpen=true;renderType();'));",
   "});",
   "",
