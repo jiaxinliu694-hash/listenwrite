@@ -2835,6 +2835,21 @@ function rebuildAllCards(state2) {
   }
 }
 
+// src/studyidentity.js
+function isReviewHinted(word) {
+  return Boolean(word?.reviewHint) || (word?.sources || []).some((source) => /错题|错词|error/i.test(source));
+}
+function wordStudyKind(state2, wordOrId, date) {
+  const word = typeof wordOrId === "string" ? state2.words.find((w) => w.id === wordOrId) : wordOrId;
+  if (!word) return "new";
+  return hasEventBefore(state2, word.id, date) || isReviewHinted(word) ? "review" : "new";
+}
+function wordPassedOnDay(state2, wordOrId, date) {
+  const wordId = typeof wordOrId === "string" ? wordOrId : wordOrId?.id;
+  if (!wordId) return false;
+  return reinforcementState(eventsOnDay(state2, wordId, date, "listen")).passed;
+}
+
 // src/queue.js
 function allBooks(state2) {
   const set = /* @__PURE__ */ new Set();
@@ -2854,10 +2869,10 @@ function attemptedCount(state2, ids, date) {
   return ids.filter((id3) => listenedToday(state2, id3, date)).length;
 }
 function reviewHinted(word) {
-  return Boolean(word?.reviewHint) || (word?.sources || []).some((source) => /错题|错词|error/i.test(source));
+  return isReviewHinted(word);
 }
 function reviewKnown(state2, word, date) {
-  return Boolean(word) && (hasEventBefore(state2, word.id, date) || reviewHinted(word));
+  return Boolean(word) && wordStudyKind(state2, word, date) === "review";
 }
 function hash32(value) {
   let h = 2166136261;
@@ -2878,7 +2893,7 @@ function reviewCandidates(state2, pool, assigned, date, books = [], nonce = 0) {
   const cutoff = studyDayEnd(date);
   const now = Date.now();
   const seed = drawSeed(date, books, nonce);
-  return pool.filter((w) => !assigned.has(w.id) && reviewKnown(state2, w, date)).sort((a, b) => {
+  return pool.filter((w) => !assigned.has(w.id) && !wordPassedOnDay(state2, w.id, date) && reviewKnown(state2, w, date)).sort((a, b) => {
     const ah = !hasEventBefore(state2, a.id, date) && reviewHinted(a);
     const bh = !hasEventBefore(state2, b.id, date) && reviewHinted(b);
     if (ah !== bh) return ah ? -1 : 1;
@@ -2897,7 +2912,7 @@ function reviewCandidates(state2, pool, assigned, date, books = [], nonce = 0) {
 }
 function freshCandidates(state2, pool, assigned, date, books = [], nonce = 0) {
   const seed = drawSeed(date, books, nonce);
-  return pool.filter((w) => !assigned.has(w.id) && !reviewKnown(state2, w, date)).sort((a, b) => randomRank(a.id, seed) - randomRank(b.id, seed));
+  return pool.filter((w) => !assigned.has(w.id) && !wordPassedOnDay(state2, w.id, date) && !reviewKnown(state2, w, date)).sort((a, b) => randomRank(a.id, seed) - randomRank(b.id, seed));
 }
 function restoreUntouchedNewRandomOrder(state2, ids, date, books = [], nonce = 0) {
   const seed = drawSeed(date, books, nonce);
@@ -2910,34 +2925,39 @@ function seedTodayFromListenHistory(state2, plan) {
   const seen = /* @__PURE__ */ new Set([...plan.newIds, ...plan.reviewIds]);
   const listenedIds = [...new Set(state2.events.filter((e) => e.date === plan.date && e.mode === "listen").map((e) => e.wordId))];
   for (const id3 of listenedIds) {
-    if (seen.has(id3)) continue;
+    if (seen.has(id3) || wordPassedOnDay(state2, id3, plan.date)) continue;
     const word = state2.words.find((w) => w.id === id3);
     if (!word || !matchesBooks(word, plan.books)) continue;
-    if (reviewKnown(state2, word, plan.date)) plan.reviewIds.push(id3);
+    if (wordStudyKind(state2, word, plan.date) === "review") plan.reviewIds.push(id3);
     else plan.newIds.push(id3);
     seen.add(id3);
   }
 }
-function moveHintedNewWordsToReview(state2, plan) {
-  const moved = [];
-  plan.newIds = plan.newIds.filter((id3) => {
+function normalizeMixedPlanIdentity(state2, plan) {
+  const ids = [.../* @__PURE__ */ new Set([...plan.newIds || [], ...plan.reviewIds || []])];
+  plan.newIds = [];
+  plan.reviewIds = [];
+  for (const id3 of ids) {
     const word = state2.words.find((w) => w.id === id3);
-    if (!word || !reviewHinted(word)) return true;
-    moved.push(id3);
-    return false;
-  });
-  for (const id3 of moved) if (!plan.reviewIds.includes(id3)) plan.reviewIds.push(id3);
-  if (moved.length) plan.reviewTarget = Math.max(Number(plan.reviewTarget) || 0, plan.reviewIds.length);
+    if (!word) continue;
+    if (wordStudyKind(state2, word, plan.date) === "review") plan.reviewIds.push(id3);
+    else plan.newIds.push(id3);
+  }
 }
 function reconcileScope(state2, plan, books) {
   if (sameBooks(plan.books, books)) return;
-  const keepTouchedInScope = (id3) => {
+  const carry = [.../* @__PURE__ */ new Set([...plan.newIds || [], ...plan.reviewIds || []])].filter((id3) => {
     const word = state2.words.find((w) => w.id === id3);
-    return Boolean(word) && listenedToday(state2, id3, plan.date) && matchesBooks(word, books);
-  };
-  plan.newIds = plan.newIds.filter(keepTouchedInScope);
-  plan.reviewIds = plan.reviewIds.filter(keepTouchedInScope);
-  plan.resumeWordId = keepTouchedInScope(plan.resumeWordId) ? plan.resumeWordId : null;
+    return Boolean(word) && !word.retired && listenedToday(state2, id3, plan.date) && !wordPassedOnDay(state2, id3, plan.date) && matchesBooks(word, books);
+  });
+  plan.newIds = [];
+  plan.reviewIds = [];
+  for (const id3 of carry) {
+    const word = state2.words.find((w) => w.id === id3);
+    if (wordStudyKind(state2, word, plan.date) === "review") plan.reviewIds.push(id3);
+    else plan.newIds.push(id3);
+  }
+  plan.resumeWordId = carry.includes(plan.resumeWordId) ? plan.resumeWordId : null;
   plan.books = [...books];
   plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
 }
@@ -2989,7 +3009,7 @@ function ensureDailyPlan(state2, options = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(options, "books")) reconcileScope(state2, plan, options.books || []);
   seedTodayFromListenHistory(state2, plan);
-  moveHintedNewWordsToReview(state2, plan);
+  normalizeMixedPlanIdentity(state2, plan);
   const minNew = attemptedCount(state2, plan.newIds, plan.date);
   const minReview = attemptedCount(state2, plan.reviewIds, plan.date);
   if (options.newTarget != null) plan.newTarget = Math.max(minNew, Math.max(0, Number(options.newTarget) || 0));
@@ -3046,11 +3066,26 @@ function configureSequentialPlan(state2, plan, configs = []) {
 }
 function fillSequentialPlan(state2, plan) {
   const assigned = /* @__PURE__ */ new Set();
+  const listenedIds = [...new Set(state2.events.filter((e) => e.date === plan.date && e.mode === "listen").map((e) => e.wordId))];
   for (const segment of plan.bookSegments || []) {
     const pool = state2.words.filter((w) => !w.retired && (w.sources || []).includes(segment.book));
     const valid = new Set(pool.map((w) => w.id));
-    segment.newIds = segment.newIds.filter((id3) => valid.has(id3) && !assigned.has(id3));
-    segment.reviewIds = segment.reviewIds.filter((id3) => valid.has(id3) && !assigned.has(id3));
+    const existing = [.../* @__PURE__ */ new Set([...segment.newIds || [], ...segment.reviewIds || []])].filter((id3) => valid.has(id3) && !assigned.has(id3));
+    segment.newIds = [];
+    segment.reviewIds = [];
+    for (const id3 of existing) {
+      const word = state2.words.find((w) => w.id === id3);
+      if (wordStudyKind(state2, word, plan.date) === "review") segment.reviewIds.push(id3);
+      else segment.newIds.push(id3);
+    }
+    const present = /* @__PURE__ */ new Set([...segment.newIds, ...segment.reviewIds]);
+    for (const id3 of listenedIds) {
+      if (present.has(id3) || assigned.has(id3) || !valid.has(id3) || wordPassedOnDay(state2, id3, plan.date)) continue;
+      const word = state2.words.find((w) => w.id === id3);
+      if (wordStudyKind(state2, word, plan.date) === "review") segment.reviewIds.push(id3);
+      else segment.newIds.push(id3);
+      present.add(id3);
+    }
     const minNew = attemptedCount(state2, segment.newIds, plan.date);
     const minReview = attemptedCount(state2, segment.reviewIds, plan.date);
     segment.newTarget = Math.max(minNew, Math.max(0, Number(segment.newTarget) || 0));
@@ -3075,8 +3110,9 @@ function fillSequentialPlan(state2, plan) {
   return plan;
 }
 function convertPlanToMixed(state2, plan, books = []) {
-  const attemptedNew = plan.newIds.filter((id3) => listenedToday(state2, id3, plan.date));
-  const attemptedReview = plan.reviewIds.filter((id3) => listenedToday(state2, id3, plan.date));
+  const attempted = [.../* @__PURE__ */ new Set([...plan.newIds || [], ...plan.reviewIds || []])].filter((id3) => listenedToday(state2, id3, plan.date));
+  const attemptedNew = attempted.filter((id3) => wordStudyKind(state2, id3, plan.date) === "new");
+  const attemptedReview = attempted.filter((id3) => wordStudyKind(state2, id3, plan.date) === "review");
   plan.mode = "mixed";
   plan.bookSegments = [];
   plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
@@ -3143,7 +3179,7 @@ function todayListeningStats(state2, books = [], date = activeStudyDayKey(state2
   let newCount = 0, reviewCount = 0, firstGood = 0, firstBad = 0;
   for (const id3 of ids) {
     const word = state2.words.find((w) => w.id === id3);
-    if (reviewKnown(state2, word, date)) reviewCount++;
+    if (wordStudyKind(state2, word, date) === "review") reviewCount++;
     else newCount++;
     const first = eventsOnDay(state2, id3, date, "listen")[0];
     if (first?.result === "good") firstGood++;
@@ -3273,8 +3309,9 @@ function unique(ids) {
 function typePresetIds(state2, candidates, kind, today, plan = null) {
   const allowed = new Set(candidates.map((w) => w.id));
   const heard = (ids) => unique((ids || []).filter((id3) => allowed.has(id3) && state2.events.some((e) => e.wordId === id3 && e.date === today && e.mode === "listen")));
-  if (kind === "todayNew") return heard(plan?.newIds || []);
-  if (kind === "todayReview") return heard(plan?.reviewIds || []);
+  const heardPlanIds = heard([...plan?.newIds || [], ...plan?.reviewIds || []]);
+  if (kind === "todayNew") return heardPlanIds.filter((id3) => wordStudyKind(state2, id3, today) === "new");
+  if (kind === "todayReview") return heardPlanIds.filter((id3) => wordStudyKind(state2, id3, today) === "review");
   if (kind === "todayListen") return unique(state2.events.filter((e) => e.date === today && e.mode === "listen" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId));
   if (kind === "todayType") return unique(state2.events.filter((e) => e.date === today && e.mode === "type" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId));
   const sevenDayStart = addStudyDays(today, -6);
@@ -3662,7 +3699,7 @@ function bindBookChips(scope, rerender) {
   });
 }
 function planWordKind(plan, id3) {
-  return plan?.newIds?.includes(id3) ? "\u65B0\u8BCD" : plan?.reviewIds?.includes(id3) ? "\u590D\u4E60" : "\u5176\u4ED6";
+  return wordStudyKind(state, id3, plan?.date || currentDayKey()) === "review" ? "\u590D\u4E60" : "\u65B0\u8BCD";
 }
 function planWordBook(plan, id3) {
   if (plan?.mode !== "sequential") return "";
@@ -3693,10 +3730,7 @@ function planChecklistHtml(plan, currentId = null) {
   return `<div class="study-list">${group("\u65B0\u8BCD", plan?.newIds || [])}${group("\u590D\u4E60\u8BCD", plan?.reviewIds || [])}</div>`;
 }
 function typeWordKind(id3, date = currentDayKey()) {
-  const plan = state.dailyPlans?.[date];
-  if (plan?.newIds?.includes(id3)) return "\u65B0\u8BCD";
-  if (plan?.reviewIds?.includes(id3)) return "\u590D\u4E60\u8BCD";
-  return state.events.some((e) => e.wordId === id3 && e.date < date) ? "\u590D\u4E60\u8BCD" : "\u65B0\u8BCD";
+  return wordStudyKind(state, id3, date) === "review" ? "\u590D\u4E60\u8BCD" : "\u65B0\u8BCD";
 }
 function registerErrorBook(name) {
   const clean = String(name || "").trim();

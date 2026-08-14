@@ -3,6 +3,7 @@ import { activeStudyDayKey, dayKey, uid, recordAttempt, editAttempt, eventsOnDay
 import { allBooks, matchesBooks, ensureDailyPlan, configureSequentialPlan, convertPlanToMixed, currentSequentialSegment, segmentStatus, planStatus, todayListeningStats, createRetrySession, pickNext, finishCurrent, resyncRetryForWord, sessionProgress, dueForecast, nextRetryDelayMs } from './queue.js';
 import { reinforcementState, reinforcementLabel } from './reinforcement.js';
 import { typePresetIds, customTypeIdsFromEvents } from './typefilters.js';
+import { wordStudyKind } from './studyidentity.js';
 import { buildImportDraft, recordsFromDraft } from './importwords.js';
 import { updateWordFields, deleteWordEverywhere, deleteWordbook } from './wordadmin.js';
 import { freeListenCandidates, linkedSentenceSourceState, staleLinkedSentenceCount, removeStaleLinkedSentences } from './usepolish.js';
@@ -109,14 +110,14 @@ function bindBookChips(scope, rerender) {
 
 function dueCount() { return state.words.filter((w) => !w.retired && (w.card?.reps || 0) && Number(w.card.due) <= Date.now()).length; }
 
-function planWordKind(plan,id){return plan?.newIds?.includes(id)?'新词':plan?.reviewIds?.includes(id)?'复习':'其他';}
+function planWordKind(plan,id){return wordStudyKind(state,id,plan?.date||currentDayKey())==='review'?'复习':'新词';}
 function planWordBook(plan,id){if(plan?.mode!=='sequential')return'';const seg=(plan.bookSegments||[]).find(x=>(x.newIds||[]).includes(id)||(x.reviewIds||[]).includes(id));return seg?.book||'';}
 function planWordMark(plan,id){const w=wordById(id);if(!w)return{label:'已移除',cls:'mark-pending'};if(w.retired||isSimpleLexeme(state,w.en))return{label:'简单',cls:'mark-simple'};const events=eventsOnDay(state,id,plan.date,'listen');const r=reinforcementState(events);if(!r.started)return{label:'未开始',cls:'mark-pending'};if(r.passed)return{label:'已熟悉',cls:'mark-good'};return{label:reinforcementLabel(events),cls:'mark-bad'};}
 function planChecklistHtml(plan,currentId=null){
   const group=(title,ids)=>{const rows=(ids||[]).map((id,index)=>{const w=wordById(id);if(!w)return'';const mark=planWordMark(plan,id),book=planWordBook(plan,id);return`<div class="study-word-row ${id===currentId?'current':''}"><span class="en">${index+1}. ${esc(w.en)}</span><span class="zh">${esc(w.zh||'—')}</span><span class="${mark.cls}">${mark.label}</span><span class="small">${book?esc(book):planWordKind(plan,id)}</span></div>`;}).join('');const done=(ids||[]).filter(id=>['已熟悉','简单'].includes(planWordMark(plan,id).label)).length;return`<div class="study-list-group"><div class="study-list-title"><b>${title}</b><span>${done} / ${(ids||[]).length}</span></div>${rows||'<div class="empty">这一类没有词。</div>'}</div>`;};
   return `<div class="study-list">${group('新词',plan?.newIds||[])}${group('复习词',plan?.reviewIds||[])}</div>`;
 }
-function typeWordKind(id,date=currentDayKey()){const plan=state.dailyPlans?.[date];if(plan?.newIds?.includes(id))return'新词';if(plan?.reviewIds?.includes(id))return'复习词';return state.events.some(e=>e.wordId===id&&e.date<date)?'复习词':'新词';}
+function typeWordKind(id,date=currentDayKey()){return wordStudyKind(state,id,date)==='review'?'复习词':'新词';}
 function registerErrorBook(name){const clean=String(name||'').trim();if(!clean)return;state.errorBooks=Array.isArray(state.errorBooks)?state.errorBooks:[];if(!state.errorBooks.includes(clean))state.errorBooks.push(clean);}
 function errorBookNames(){const names=new Set(Array.isArray(state.errorBooks)?state.errorBooks:[]);for(const w of state.words)for(const source of w.sources||[])if(/错题|错词|error/i.test(source))names.add(source);return[...names].filter(Boolean).sort((a,b)=>a.localeCompare(b));}
 function errorBookSectionHtml(){const books=errorBookNames();if(!books.length)return`<section class="card"><h2 class="section-title">错题本</h2><div class="empty">还没有错题本。句子听写结束后可以把不熟/不认识的词一键加入。</div></section>`;return`<section class="card"><div class="space"><div><h2 class="section-title">错题本</h2><div class="small">默认折叠，只显示名称和词数；展开后用紧凑列表查看。</div></div></div><div class="error-books">${books.map(book=>{const words=state.words.filter(w=>(w.sources||[]).includes(book));const preview=words.slice(0,60).map(w=>`<div class="error-row"><span class="en">${esc(w.en)}</span><span class="zh">${esc(w.zh||'')}</span>${w.retired?'<span class="tag">简单</span>':'<span></span>'}</div>`).join('');return`<details class="error-book"><summary><b>${esc(book)}</b><span class="small">${words.length} 词</span></summary><div class="error-compact">${preview||'<div class="empty">暂无单词</div>'}</div>${words.length>60?`<div class="small" style="padding:8px 0">这里只预览前 60 个；点下面查看全部。</div>`:''}<div class="row" style="padding:9px 0"><button class="soft" data-open-error-book="${esc(book)}">在词库中查看全部</button></div></details>`;}).join('')}</div></section>`;}

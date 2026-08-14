@@ -1,13 +1,15 @@
 import { retrievability } from './scheduler.js';
 import { addStudyDays } from './studyday.js';
+import { wordStudyKind } from './studyidentity.js';
 
 function unique(ids) { return [...new Set(ids)]; }
 
 export function typePresetIds(state, candidates, kind, today, plan = null) {
   const allowed = new Set(candidates.map((w) => w.id));
   const heard = (ids) => unique((ids || []).filter((id) => allowed.has(id) && state.events.some((e) => e.wordId === id && e.date === today && e.mode === 'listen')));
-  if (kind === 'todayNew') return heard(plan?.newIds || []);
-  if (kind === 'todayReview') return heard(plan?.reviewIds || []);
+  const heardPlanIds = heard([...(plan?.newIds || []), ...(plan?.reviewIds || [])]);
+  if (kind === 'todayNew') return heardPlanIds.filter((id) => wordStudyKind(state, id, today) === 'new');
+  if (kind === 'todayReview') return heardPlanIds.filter((id) => wordStudyKind(state, id, today) === 'review');
   if (kind === 'todayListen') return unique(state.events.filter((e) => e.date === today && e.mode === 'listen' && e.result === 'bad' && allowed.has(e.wordId)).map((e) => e.wordId));
   if (kind === 'todayType') return unique(state.events.filter((e) => e.date === today && e.mode === 'type' && e.result === 'bad' && allowed.has(e.wordId)).map((e) => e.wordId));
 
