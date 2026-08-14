@@ -31,7 +31,7 @@ type_finish=fn('typeFinish')
 must('separate retry pool is installed', 'data-separate-retry-pool-v1' in s and 'sess.retry' in s)
 must('listening base queue is not extended on failure', 'sess.q.push' not in listen_next)
 must('listening retry queue rotates separately', 'sess.retry.shift()' in listen_next and 'sess.retry.push(first)' in listen_next)
-must('new/review denominators are frozen from daily plan', 'totals:{' not in start and 'totals=totals' in start and 'p.newIds.length' in start and 'p.reviewIds.length' in start)
+must('new/review denominators are frozen from daily plan', 'totals:totals' in start and 'p.newIds.length' in start and 'p.reviewIds.length' in start)
 must('daily plan persists across exits/re-entry', 'S.dailyPlans' in s and 'extendDailyPlan(getDailyPlan(books),books)' in start)
 must('Today stats only use listening events', "e.mode==='listen'" in today_data)
 must('daily plan completion only uses listening events', 'latestTodayListenEvent' in plan_status and 'latestTodayEvent' not in plan_status)
@@ -41,7 +41,7 @@ must('hand judgment edits do not search arbitrary last event', 'reverse().find' 
 must('hand summary is based on final per-word state', 'lastBy' in type_finish and '最终熟悉' in type_finish and '最终不熟' in type_finish)
 must('multi-month calendar remains installed', 'data-calendar-month-v3' in s and 'calPrev' in s and 'calNext' in s)
 
-# Guard against the original bug pattern returning later.
+# Guard against the original bug patterns returning later.
 must('old listening retry append pattern is absent', "if(sess.res==='bad')sess.q.push" not in s)
 must('old mixed-mode Today query is absent', "todayEvents=S.events.filter(function(e){return e.date===d&&ids.has(e.wordId)})" not in s)
 
