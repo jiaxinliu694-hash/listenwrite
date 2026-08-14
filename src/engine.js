@@ -23,14 +23,14 @@ export function latestEventOnDay(state, wordId, date = dayKey(), mode = null) {
   return list[list.length - 1] || null;
 }
 
-/** Any historical event, regardless of mode. Kept for analytics only. */
+/** Historical formal exposure used for new/review classification. */
 export function hasEventBefore(state, wordId, date = dayKey()) {
-  return state.events.some((e) => e.wordId === wordId && e.date < date);
+  return state.events.some((e) => e.wordId === wordId && e.mode === 'listen' && e.date < date);
 }
 
-/** Historical formal exposure for new/review classification. */
-export function hasListenEventBefore(state, wordId, date = dayKey()) {
-  return state.events.some((e) => e.wordId === wordId && e.mode === 'listen' && e.date < date);
+/** Any historical event, regardless of mode, for analytics-only callers. */
+export function hasAnyEventBefore(state, wordId, date = dayKey()) {
+  return state.events.some((e) => e.wordId === wordId && e.date < date);
 }
 
 /**
