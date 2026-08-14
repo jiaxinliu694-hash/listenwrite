@@ -28,11 +28,13 @@ jobs:
         run: python3 scripts/patch_default_header.py
       - name: Fix fixed session progress
         run: python3 scripts/patch_fixed_session_progress.py
+      - name: Separate retry pool from fixed plan
+        run: python3 scripts/patch_retry_pool.py
       - name: Commit upgrade
         run: |
           if git diff --quiet; then exit 0; fi
           git config user.name "listenwrite-bot"
           git config user.email "actions@users.noreply.github.com"
           git add index.html
-          git commit -m "Fix fixed new and review denominators"
+          git commit -m "Separate retry pool from fixed study plan"
           git push
