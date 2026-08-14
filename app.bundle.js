@@ -1886,16 +1886,31 @@ function retrievability(card, now = Date.now(), retention = 0.9) {
 
 // src/studyday.js
 var STUDY_UTC_OFFSET_HOURS = 8;
-var STUDY_DAY_CUTOFF_HOUR = 2;
-var SHIFT_MS = (STUDY_UTC_OFFSET_HOURS - STUDY_DAY_CUTOFF_HOUR) * 36e5;
+var STUDY_DAY_GRACE_END_HOUR = 2;
+var OFFSET_MS = STUDY_UTC_OFFSET_HOURS * 36e5;
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
-function studyDayKey(ts = Date.now()) {
-  const shifted = new Date(Number(ts) + SHIFT_MS);
-  return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}`;
+function calendarDayKey(ts = Date.now()) {
+  const local = new Date(Number(ts) + OFFSET_MS);
+  return `${local.getUTCFullYear()}-${pad2(local.getUTCMonth() + 1)}-${pad2(local.getUTCDate())}`;
 }
-function studyDayParts(key = studyDayKey()) {
+function shanghaiClock(ts = Date.now()) {
+  const local = new Date(Number(ts) + OFFSET_MS);
+  return {
+    year: local.getUTCFullYear(),
+    month: local.getUTCMonth() + 1,
+    day: local.getUTCDate(),
+    hour: local.getUTCHours(),
+    minute: local.getUTCMinutes(),
+    second: local.getUTCSeconds()
+  };
+}
+function isGraceWindow(ts = Date.now()) {
+  const { hour } = shanghaiClock(ts);
+  return hour >= 0 && hour < STUDY_DAY_GRACE_END_HOUR;
+}
+function studyDayParts(key = calendarDayKey()) {
   const [year, month, day] = String(key).split("-").map(Number);
   return { year, month, day };
 }
@@ -1907,14 +1922,14 @@ function addStudyDays(key, amount) {
   const d = new Date(Date.UTC(year, month - 1, day + Number(amount || 0), 12));
   return formatDayKey(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
 }
-function studyDayStart(key = studyDayKey()) {
+function studyDayStart(key = calendarDayKey()) {
   const { year, month, day } = studyDayParts(key);
-  return Date.UTC(year, month - 1, day, STUDY_DAY_CUTOFF_HOUR - STUDY_UTC_OFFSET_HOURS, 0, 0, 0);
+  return Date.UTC(year, month - 1, day, -STUDY_UTC_OFFSET_HOURS, 0, 0, 0);
 }
-function studyDayEnd(key = studyDayKey()) {
+function studyDayEnd(key = calendarDayKey()) {
   return studyDayStart(addStudyDays(key, 1)) - 1;
 }
-function calendarDate(key = studyDayKey()) {
+function calendarDate(key = calendarDayKey()) {
   const { year, month, day } = studyDayParts(key);
   return new Date(Date.UTC(year, month - 1, day, 12));
 }
@@ -1922,7 +1937,7 @@ function calendarKey(date) {
   return formatDayKey(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
 }
 function studyDayLabel() {
-  return `\u4E1C\u516B\u533A \xB7 \u51CC\u6668 ${pad2(STUDY_DAY_CUTOFF_HOUR)}:00 \u6362\u65E5`;
+  return "\u4E1C\u516B\u533A \xB7 24:00 \u6B63\u5E38\u6362\u65E5\uFF1B\u672A\u5B8C\u6210\u53EF\u5EF6\u7EED\u5230 02:00";
 }
 
 // src/storage.js
@@ -1963,7 +1978,7 @@ async function dbSet(key, value) {
 }
 function defaultState() {
   return {
-    version: 4,
+    version: 5,
     words: [],
     events: [],
     texts: [],
@@ -1985,9 +2000,9 @@ function sampleWords() {
 function normalizeWord(word, index) {
   return { id: word.id || `w_${Date.now().toString(36)}_${index}`, en: String(word.en || "").trim().toLowerCase(), zh: String(word.zh || ""), pos: String(word.pos || ""), def: String(word.def || ""), sources: Array.isArray(word.sources) ? [...new Set(word.sources)] : Array.isArray(word.src) ? [...new Set(word.src)] : [], examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [], retired: Boolean(word.retired ?? word.ret), card: word.card || null };
 }
-function normalizeEvent(event, index) {
+function normalizeEvent(event, index, preserveDate) {
   const ts = Number(event.ts) || Date.now();
-  return { id: event.id || `legacy_ev_${index}`, wordId: event.wordId, date: studyDayKey(ts), ts, mode: event.mode === "type" ? "type" : "listen", result: event.result || event.res || "bad", originalResult: event.originalResult || event.result || event.res || "bad", cold: false, attempt: 1, source: event.source || null, sentence: event.sentence || null, editedAt: event.editedAt || null };
+  return { id: event.id || `legacy_ev_${index}`, wordId: event.wordId, date: preserveDate && event.date ? event.date : calendarDayKey(ts), ts, mode: event.mode === "type" ? "type" : "listen", result: event.result || event.res || "bad", originalResult: event.originalResult || event.result || event.res || "bad", cold: false, attempt: 1, source: event.source || null, sentence: event.sentence || null, editedAt: event.editedAt || null };
 }
 function normalizePlan(plan, key) {
   return { date: plan.date || key, books: Array.isArray(plan.books) ? plan.books : [], newTarget: Number(plan.newTarget) || 0, reviewTarget: Number(plan.reviewTarget) || 0, newIds: Array.isArray(plan.newIds) ? plan.newIds : [], reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [], createdAt: Number(plan.createdAt) || Date.now(), updatedAt: Number(plan.updatedAt) || Date.now() };
@@ -1996,7 +2011,6 @@ function reindexEvents(events) {
   const firstByWordDay = /* @__PURE__ */ new Set(), attempts = /* @__PURE__ */ new Map();
   events.sort((a, b) => a.ts - b.ts);
   for (const e of events) {
-    e.date = studyDayKey(e.ts);
     const coldKey = `${e.wordId}|${e.date}`;
     e.cold = !firstByWordDay.has(coldKey);
     firstByWordDay.add(coldKey);
@@ -2007,8 +2021,8 @@ function reindexEvents(events) {
   }
   return events;
 }
-function normalizeActivities(list) {
-  return (Array.isArray(list) ? list : []).map((a) => ({ ...a, date: studyDayKey(Number(a.start) || Number(a.lastTouch) || Date.now()) }));
+function normalizeActivities(list, preserveDate) {
+  return (Array.isArray(list) ? list : []).map((a) => ({ ...a, date: preserveDate && a.date ? a.date : calendarDayKey(Number(a.start) || Number(a.lastTouch) || Date.now()) }));
 }
 function normalizeState(input) {
   const base = defaultState(), oldSettings = input?.settings || input?.set || {}, state2 = { ...base, ...input || {} };
@@ -2026,10 +2040,11 @@ function normalizeState(input) {
   delete state2.settings.reviewN;
   delete state2.settings.rate;
   state2.settings.retention = Math.min(0.97, Math.max(0.75, Number(state2.settings.retention) || 0.9));
+  const preserveDates = Number(input?.version) >= 4;
   state2.words = (input?.words || []).map(normalizeWord).filter((w) => w.en);
-  state2.events = reindexEvents((input?.events || []).map(normalizeEvent).filter((e) => e.wordId));
+  state2.events = reindexEvents((input?.events || []).map((e, i) => normalizeEvent(e, i, preserveDates)).filter((e) => e.wordId));
   state2.texts = Array.isArray(input?.texts) ? input.texts : [];
-  state2.activities = normalizeActivities(input?.activities);
+  state2.activities = normalizeActivities(input?.activities, preserveDates);
   state2.dailyPlans = {};
   if (Number(input?.version) >= 4 && input?.dailyPlans && typeof input.dailyPlans === "object" && !Array.isArray(input.dailyPlans)) {
     for (const [key, plan] of Object.entries(input.dailyPlans)) state2.dailyPlans[key] = normalizePlan(plan, key);
@@ -2038,7 +2053,7 @@ function normalizeState(input) {
     const evs = state2.events.filter((e) => e.wordId === word.id && e.cold).sort((a, b) => a.ts - b.ts);
     word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : word.card || emptyCard();
   }
-  state2.version = 4;
+  state2.version = 5;
   return state2;
 }
 async function parseLocal(key) {
@@ -2073,7 +2088,7 @@ async function loadState() {
   }
 }
 async function saveState(state2) {
-  state2.version = 4;
+  state2.version = 5;
   try {
     await dbSet(STATE_KEY, state2);
     localStorage.removeItem(FALLBACK_KEY);
@@ -2091,7 +2106,7 @@ function exportState(state2) {
 }
 
 // src/engine.js
-var dayKey = studyDayKey;
+var dayKey = calendarDayKey;
 function uid(prefix = "id") {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -2108,9 +2123,30 @@ function latestEventOnDay(state2, wordId, date = dayKey(), mode = null) {
 function hasEventBefore(state2, wordId, date = dayKey()) {
   return state2.events.some((e) => e.wordId === wordId && e.date < date);
 }
+function isDailyPlanComplete(state2, date, ts = Date.now()) {
+  const plan = state2.dailyPlans?.[date];
+  if (!plan) return true;
+  const ids = [.../* @__PURE__ */ new Set([...plan.newIds || [], ...plan.reviewIds || []])].filter((id) => state2.words.some((w) => w.id === id));
+  if (!ids.length) return true;
+  for (const id of ids) {
+    const word = state2.words.find((w) => w.id === id);
+    if (word?.retired) continue;
+    const latest = state2.events.filter((e) => e.wordId === id && e.date === date && e.mode === "listen" && e.ts <= ts).sort((a, b) => a.ts - b.ts).at(-1);
+    if (!latest || latest.result !== "good") return false;
+  }
+  return true;
+}
+function activeStudyDayKey(state2, ts = Date.now()) {
+  const calendar = calendarDayKey(ts);
+  if (!isGraceWindow(ts)) return calendar;
+  const previous = addStudyDays(calendar, -1);
+  const previousPlan = state2?.dailyPlans?.[previous];
+  if (!previousPlan) return calendar;
+  return isDailyPlanComplete(state2, previous, ts) ? calendar : previous;
+}
 function recordAttempt(state2, word, mode, result, context = {}) {
   const ts = context.ts || Date.now();
-  const date = dayKey(ts);
+  const date = context.date || activeStudyDayKey(state2, ts);
   const cold = !state2.events.some((e) => e.wordId === word.id && e.date === date);
   const attempt = eventsOnDay(state2, word.id, date, mode).length + 1;
   const event = {
@@ -2191,7 +2227,7 @@ function trimToTarget(state2, plan, key, target) {
   plan[key] = [...attempted, ...untouched.slice(0, keepUntouched)];
 }
 function ensureDailyPlan(state2, options = {}) {
-  const date = options.date || dayKey();
+  const date = options.date || activeStudyDayKey(state2);
   let plan = state2.dailyPlans[date];
   if (!plan) {
     plan = state2.dailyPlans[date] = { date, books: [...options.books ?? state2.settings.todayBooks ?? []], newTarget: Math.max(0, Number(state2.settings.defaultNewTarget) || 0), reviewTarget: Math.max(0, Number(state2.settings.defaultReviewTarget) || 0), newIds: [], reviewIds: [], createdAt: Date.now(), updatedAt: Date.now() };
@@ -2232,7 +2268,7 @@ function fillDailyPlan(state2, plan) {
   }
   return plan;
 }
-function latestListenResult(state2, wordId, date = dayKey()) {
+function latestListenResult(state2, wordId, date = activeStudyDayKey(state2)) {
   return latestEventOnDay(state2, wordId, date, "listen");
 }
 function planStatus(state2, plan) {
@@ -2264,7 +2300,7 @@ function planStatus(state2, plan) {
   };
   return { new: statusFor(plan.newIds), review: statusFor(plan.reviewIds) };
 }
-function todayListeningStats(state2, books = [], date = dayKey()) {
+function todayListeningStats(state2, books = [], date = activeStudyDayKey(state2)) {
   const allowed = new Set(state2.words.filter((w) => matchesBooks(w, books)).map((w) => w.id)), events = state2.events.filter((e) => e.date === date && e.mode === "listen" && allowed.has(e.wordId)), ids = [...new Set(events.map((e) => e.wordId))];
   let newCount = 0, reviewCount = 0, firstGood = 0, firstBad = 0;
   for (const id of ids) {
@@ -2334,7 +2370,7 @@ function sessionProgress(state2, plan, session) {
   return { newDone: status.new.done, newTotal: plan.newIds.length, reviewDone: status.review.done, reviewTotal: plan.reviewIds.length, retry: status.new.retry + status.review.retry, remaining: status.new.pending + status.review.pending + status.new.retry + status.review.retry, turn: session?.turn || 0 };
 }
 function dueForecast(state2, days = 7) {
-  const today = dayKey(), out = Array.from({ length: days }, (_, i) => ({ date: addStudyDays(today, i), count: 0 })), start = studyDayStart(today);
+  const today = activeStudyDayKey(state2), out = Array.from({ length: days }, (_, i) => ({ date: addStudyDays(today, i), count: 0 })), start = studyDayStart(today);
   for (const word of state2.words) {
     if (word.retired || !(word.card?.reps || 0)) continue;
     const due = Number(word.card.due), key = dayKey(due), row = out.find((x) => x.date === key);
@@ -2377,8 +2413,11 @@ var textEditId = null;
 var textFormOpen = false;
 var sentenceRun = null;
 var statRange = 30;
-var statDay = dayKey();
+var statDay = currentDayKey();
 var statMonth = calendarDate(statDay);
+function currentDayKey(ts = Date.now()) {
+  return state ? activeStudyDayKey(state, ts) : dayKey(ts);
+}
 var labels = {
   home: ["\u9996\u9875", "\u542C\u8BCD"],
   today: ["\u4ECA\u65E5", "\u4ECA\u65E5\u5B66\u4E60"],
@@ -2424,7 +2463,7 @@ function speak(text) {
   speechSynthesis.speak(u);
 }
 function startActivity(mode, label, books = []) {
-  const a = { id: uid("act"), mode, label, books: [...books], date: dayKey(), start: Date.now(), lastTouch: Date.now(), activeMs: 0 };
+  const a = { id: uid("act"), mode, label, books: [...books], date: currentDayKey(), start: Date.now(), lastTouch: Date.now(), activeMs: 0 };
   state.activities.push(a);
   persist();
   return a.id;
@@ -2438,7 +2477,7 @@ function touchActivity(id) {
   a.lastTouch = now;
   persist();
 }
-function activityMinutes(mode = null, date = dayKey()) {
+function activityMinutes(mode = null, date = currentDayKey()) {
   const list = state.activities.filter((a) => a.date === date && (!mode || a.mode === mode));
   const ms = list.reduce((sum, a) => sum + (a.activeMs || Math.max(0, (a.end || a.start) - a.start) || 0), 0);
   return ms ? Math.max(1, Math.round(ms / 6e4)) : 0;
@@ -2506,7 +2545,7 @@ function renderToday() {
     const x = todayListeningStats(state, [b]);
     return `<div class="bookrow"><b>${esc(b)}</b><span>${x.newCount} \u65B0</span><span>${x.reviewCount} \u590D\u4E60</span><span class="mobilehide good">${x.firstGood} \u719F\u6089</span><span class="mobilehide bad">${x.firstBad} \u4E0D\u719F</span></div>`;
   }).join("");
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div><div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="small">\u8FD9\u91CC\u53EA\u6539\u4ECA\u5929\u3002\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\uFF0C\u4E5F\u4E0D\u4F1A\u51FA\u73B0 36 / 30\u3002</div>${bookChips(books, "today")}<div class="grid2" style="margin-top:12px"><div class="field"><label>\u4ECA\u5929\u65B0\u8BCD\u76EE\u6807</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>\u4ECA\u5929\u590D\u4E60\u76EE\u6807</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div></div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u4FEE\u6539\u8FD9\u91CC\u4E0D\u4F1A\u6539\u53D8\u4ECA\u5929\u5DF2\u7ECF\u751F\u6210\u7684\u8BA1\u5212\uFF0C\u4ECE\u4E0B\u4E00\u4E2A\u5B66\u4E60\u65E5\u5F00\u59CB\u4F7F\u7528\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div><div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="small">\u8FD9\u91CC\u53EA\u6539\u4ECA\u5929\u3002\u964D\u4F4E\u76EE\u6807\u65F6\u53EA\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u8BCD\uFF1B\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u4E0D\u4F1A\u88AB\u5220\u9664\uFF0C\u4E5F\u4E0D\u4F1A\u51FA\u73B0 36 / 30\u3002</div>${bookChips(books, "today")}<div class="grid2" style="margin-top:12px"><div class="field"><label>\u4ECA\u5929\u65B0\u8BCD\u76EE\u6807</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>\u4ECA\u5929\u590D\u4E60\u76EE\u6807</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div></div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u4FEE\u6539\u8FD9\u91CC\u4E0D\u4F1A\u6539\u53D8\u4ECA\u5929\u5DF2\u7ECF\u751F\u6210\u7684\u8BA1\u5212\uFF0C\u4ECE\u4E0B\u4E00\u8F6E\u5B66\u4E60\u65E5\u5F00\u59CB\u4F7F\u7528\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
   bindBookChips("today", renderToday);
   document.getElementById("todayNewTarget").onchange = (e) => {
     const requested = Math.max(0, Number(e.target.value) || 0);
@@ -2661,13 +2700,13 @@ function typeCandidates() {
   return state.words.filter((w) => !w.retired && matchesBooks(w, books));
 }
 function eventsSince(days) {
-  const key = addStudyDays(dayKey(), -days + 1);
+  const key = addStudyDays(currentDayKey(), -days + 1);
   return state.events.filter((e) => e.date >= key);
 }
 function typePreset(kind) {
   const candidates = typeCandidates();
   const allowed = new Set(candidates.map((w) => w.id));
-  const today = dayKey();
+  const today = currentDayKey();
   if (kind === "todayListen") return [...new Set(state.events.filter((e) => e.date === today && e.mode === "listen" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId))];
   if (kind === "todayType") return [...new Set(state.events.filter((e) => e.date === today && e.mode === "type" && e.result === "bad" && allowed.has(e.wordId)).map((e) => e.wordId))];
   if (kind === "repeat7") {
@@ -2687,8 +2726,8 @@ function typePreset(kind) {
 function renderType() {
   const books = state.settings.typeBooks || [];
   const auto = typePreset("auto"), l = typePreset("todayListen"), t = typePreset("todayType"), r = typePreset("repeat7");
-  const typedToday = new Set(state.events.filter((e) => e.date === dayKey() && e.mode === "type").map((e) => e.wordId)).size;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u624B\u6253\u5F3A\u5316</h2><p>\u5148\u7ED9\u4F60\u6700\u503C\u5F97\u7EC3\u7684\u5165\u53E3\uFF1B\u65E5\u671F\u3001\u6B21\u6570\u7B49\u7CBE\u786E\u7B5B\u9009\u653E\u4E0B\u9762\u3002</p></div><span class="tag">${books.length ? `${books.length} \u672C\u8BCD\u4E66` : "\u5168\u90E8\u8BCD\u4E66"}</span></div><div class="grid3" style="margin-top:13px"><div class="statbox"><b>${auto.length}</b><span>\u5EFA\u8BAE\u5F3A\u5316</span></div><div class="statbox"><b>${typedToday}</b><span>\u4ECA\u65E5\u5DF2\u624B\u6253</span></div><div class="statbox"><b>${activityMinutes("type")}m</b><span>\u624B\u6253\u7528\u65F6</span></div></div><div class="row" style="margin-top:15px"><button id="typeStartAuto" class="primary">\u5F00\u59CB\u5EFA\u8BAE\u5F3A\u5316${auto.length ? ` \xB7 ${Math.min(30, auto.length)}` : ""}</button></div><details class="details"><summary>\u8BCD\u4E66\u8303\u56F4\u4E0E\u9AD8\u7EA7\u7B5B\u9009</summary><div style="margin-top:12px">${bookChips(books, "type")}<div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u6307\u5B9A\u65E5\u671F</label><input id="typeDate" type="date" value="${dayKey()}"></div><div class="field"><label>\u5931\u8D25\u6765\u6E90</label><select id="typeMode"><option value="all">\u542C\u97F3 + \u624B\u6253</option><option value="listen">\u53EA\u770B\u542C\u97F3</option><option value="type">\u53EA\u770B\u624B\u6253</option></select></div><div class="field"><label>\u81F3\u5C11\u4E0D\u719F\u6B21\u6570</label><select id="typeMin"><option>1</option><option>2</option><option>3</option><option>5</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="typeLimit"><option>20</option><option selected>50</option><option>100</option><option value="0">\u5168\u90E8</option></select></div></div><div id="customTypePreview" style="margin-top:12px"></div></div></details></section><section class="card"><h2 class="section-title">\u5FEB\u6377\u5165\u53E3</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayListen"><span class="num">${l.length}</span><b>\u4ECA\u65E5\u542C\u97F3\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u542C\u97F3\u9636\u6BB5\u66B4\u9732\u51FA\u6765\u7684\u8BCD</span></button><button data-type-preset="todayType"><span class="num">${t.length}</span><b>\u4ECA\u65E5\u624B\u6253\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u624B\u6253\u540E\u4ECD\u7136\u5361\u4F4F</span></button><button data-type-preset="repeat7"><span class="num">${r.length}</span><b>\u8FD1 7 \u5929\u53CD\u590D\u4E0D\u719F</b><span class="small">\u8FD1\u671F\u91CD\u590D\u5931\u8D25\u7684\u8BCD</span></button><button data-type-preset="auto"><span class="num">${auto.length}</span><b>\u5168\u90E8\u56F0\u96BE\u8BCD</b><span class="small">\u6309\u8DE8\u5929\u5931\u8D25\u4E0E\u53EF\u63D0\u53D6\u7387\u6392\u5E8F</span></button></div></section></div>`);
+  const typedToday = new Set(state.events.filter((e) => e.date === currentDayKey() && e.mode === "type").map((e) => e.wordId)).size;
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u624B\u6253\u5F3A\u5316</h2><p>\u5148\u7ED9\u4F60\u6700\u503C\u5F97\u7EC3\u7684\u5165\u53E3\uFF1B\u65E5\u671F\u3001\u6B21\u6570\u7B49\u7CBE\u786E\u7B5B\u9009\u653E\u4E0B\u9762\u3002</p></div><span class="tag">${books.length ? `${books.length} \u672C\u8BCD\u4E66` : "\u5168\u90E8\u8BCD\u4E66"}</span></div><div class="grid3" style="margin-top:13px"><div class="statbox"><b>${auto.length}</b><span>\u5EFA\u8BAE\u5F3A\u5316</span></div><div class="statbox"><b>${typedToday}</b><span>\u4ECA\u65E5\u5DF2\u624B\u6253</span></div><div class="statbox"><b>${activityMinutes("type")}m</b><span>\u624B\u6253\u7528\u65F6</span></div></div><div class="row" style="margin-top:15px"><button id="typeStartAuto" class="primary">\u5F00\u59CB\u5EFA\u8BAE\u5F3A\u5316${auto.length ? ` \xB7 ${Math.min(30, auto.length)}` : ""}</button></div><details class="details"><summary>\u8BCD\u4E66\u8303\u56F4\u4E0E\u9AD8\u7EA7\u7B5B\u9009</summary><div style="margin-top:12px">${bookChips(books, "type")}<div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u6307\u5B9A\u65E5\u671F</label><input id="typeDate" type="date" value="${currentDayKey()}"></div><div class="field"><label>\u5931\u8D25\u6765\u6E90</label><select id="typeMode"><option value="all">\u542C\u97F3 + \u624B\u6253</option><option value="listen">\u53EA\u770B\u542C\u97F3</option><option value="type">\u53EA\u770B\u624B\u6253</option></select></div><div class="field"><label>\u81F3\u5C11\u4E0D\u719F\u6B21\u6570</label><select id="typeMin"><option>1</option><option>2</option><option>3</option><option>5</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="typeLimit"><option>20</option><option selected>50</option><option>100</option><option value="0">\u5168\u90E8</option></select></div></div><div id="customTypePreview" style="margin-top:12px"></div></div></details></section><section class="card"><h2 class="section-title">\u5FEB\u6377\u5165\u53E3</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayListen"><span class="num">${l.length}</span><b>\u4ECA\u65E5\u542C\u97F3\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u542C\u97F3\u9636\u6BB5\u66B4\u9732\u51FA\u6765\u7684\u8BCD</span></button><button data-type-preset="todayType"><span class="num">${t.length}</span><b>\u4ECA\u65E5\u624B\u6253\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u624B\u6253\u540E\u4ECD\u7136\u5361\u4F4F</span></button><button data-type-preset="repeat7"><span class="num">${r.length}</span><b>\u8FD1 7 \u5929\u53CD\u590D\u4E0D\u719F</b><span class="small">\u8FD1\u671F\u91CD\u590D\u5931\u8D25\u7684\u8BCD</span></button><button data-type-preset="auto"><span class="num">${auto.length}</span><b>\u5168\u90E8\u56F0\u96BE\u8BCD</b><span class="small">\u6309\u8DE8\u5929\u5931\u8D25\u4E0E\u53EF\u63D0\u53D6\u7387\u6392\u5E8F</span></button></div></section></div>`);
   bindBookChips("type", renderType);
   document.getElementById("typeStartAuto").onclick = () => startType(auto.slice(0, 30), "\u5EFA\u8BAE\u5F3A\u5316");
   document.querySelectorAll("[data-type-preset]").forEach((b) => b.onclick = () => startType(typePreset(b.dataset.typePreset).slice(0, 50), b.textContent.trim().replace(/\d+/, "").slice(0, 20)));
@@ -2697,7 +2736,7 @@ function renderType() {
   renderTypeCustom();
 }
 function customTypeIds() {
-  const date = document.getElementById("typeDate")?.value || dayKey();
+  const date = document.getElementById("typeDate")?.value || currentDayKey();
   const mode = document.getElementById("typeMode")?.value || "all";
   const min = Number(document.getElementById("typeMin")?.value || 1);
   const allowed = new Set(typeCandidates().map((w) => w.id));
@@ -2720,7 +2759,7 @@ function renderTypeCustom() {
 function startType(ids, label) {
   ids = [...new Set(ids)].filter((id2) => wordById(id2) && !wordById(id2).retired);
   if (!ids.length) return toast("\u8FD9\u7EC4\u6682\u65F6\u6CA1\u6709\u5F85\u5F3A\u5316\u8BCD");
-  const fakePlan = { date: dayKey(), newIds: ids, reviewIds: [] };
+  const fakePlan = { date: currentDayKey(), newIds: ids, reviewIds: [] };
   const session = createRetrySession(state, fakePlan, "type", ids);
   const id = pickNext(session);
   if (!id) return toast("\u8FD9\u4E9B\u8BCD\u4ECA\u5929\u5DF2\u7ECF\u624B\u6253\u719F\u6089\u4E86");
@@ -2729,8 +2768,8 @@ function startType(ids, label) {
   speak(wordById(id).en);
 }
 function typeProgress() {
-  const done = typeRun.ids.filter((id) => latestEventOnDay(state, id, dayKey(), "type")?.result === "good").length;
-  const bad = typeRun.ids.filter((id) => latestEventOnDay(state, id, dayKey(), "type")?.result === "bad").length;
+  const done = typeRun.ids.filter((id) => latestEventOnDay(state, id, currentDayKey(), "type")?.result === "good").length;
+  const bad = typeRun.ids.filter((id) => latestEventOnDay(state, id, currentDayKey(), "type")?.result === "bad").length;
   return { done, total: typeRun.ids.length, bad };
 }
 function renderTypeRun() {
@@ -2802,7 +2841,7 @@ function nextType() {
 }
 function finishType() {
   const p = typeProgress();
-  const bad = typeRun.ids.filter((id) => latestEventOnDay(state, id, dayKey(), "type")?.result === "bad");
+  const bad = typeRun.ids.filter((id) => latestEventOnDay(state, id, currentDayKey(), "type")?.result === "bad");
   root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>${esc(typeRun.label)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.total}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="good">${p.done}</b><span>\u6700\u7EC8\u719F\u6089</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u4ECD\u4E0D\u719F</span></div></div><div class="small">\u76F4\u63A5\u770B\u7B54\u6848 ${typeRun.skipped} \u6B21</div><div class="row" style="justify-content:center;margin-top:18px">${bad.length ? `<button id="redoType" class="primary">\u518D\u7EC3\u4E0D\u719F \xB7 ${bad.length}</button>` : ""}<button id="finishType" class="soft">\u8FD4\u56DE\u624B\u6253</button></div></div></div></main>`;
   const copy = [...bad];
   if (document.getElementById("redoType")) document.getElementById("redoType").onclick = () => {
@@ -3094,11 +3133,11 @@ function parseWordFile(text, name) {
   renderLibrary();
 }
 function backup() {
-  download(`listenwrite-backup-${dayKey()}.json`, exportState(state));
+  download(`listenwrite-backup-${currentDayKey()}.json`, exportState(state));
 }
 function filteredEvents() {
   if (!statRange) return state.events;
-  const key = addStudyDays(dayKey(), -statRange + 1);
+  const key = addStudyDays(currentDayKey(), -statRange + 1);
   return state.events.filter((e) => e.date >= key);
 }
 function renderStats() {
@@ -3129,7 +3168,7 @@ function calendarHtml() {
     cells.push({ key, n, date: new Date(d), same: d.getUTCMonth() === first.getUTCMonth() });
   }
   return `<section class="card"><div class="space"><div><h2 class="section-title">\u5B66\u4E60\u65E5\u5386</h2><div class="small">${studyDayLabel()}\u3002\u53EF\u4EE5\u4E00\u76F4\u5F80\u524D\u7FFB\uFF0C\u70B9\u65E5\u671F\u770B\u5177\u4F53\u8BB0\u5F55\u3002</div></div></div><div class="calendarbar"><button id="calPrev">\u2039</button><div><b>${first.getUTCFullYear()} \u5E74 ${first.getUTCMonth() + 1} \u6708</b></div><button id="calNext">\u203A</button></div><div class="week"><span>\u4E00</span><span>\u4E8C</span><span>\u4E09</span><span>\u56DB</span><span>\u4E94</span><span>\u516D</span><span>\u65E5</span></div><div class="calgrid">${cells.map((c) => {
-    const future = c.key > dayKey(), op = c.n ? 0.14 + 0.62 * c.n / max : 0.04;
+    const future = c.key > currentDayKey(), op = c.n ? 0.14 + 0.62 * c.n / max : 0.04;
     return `<button class="day ${c.key === statDay ? "sel " : ""}${c.same ? "" : "other "}${future ? "future" : ""}" data-stat-day="${c.key}" ${future ? "disabled" : ""} style="background:rgba(93,119,99,${op.toFixed(2)})"><span>${c.date.getUTCDate()}</span>${c.n ? `<strong>${c.n}</strong>` : ""}</button>`;
   }).join("")}</div><div style="text-align:center;margin-top:8px"><button id="calToday" class="ghost">\u56DE\u5230\u672C\u6708</button></div></section>`;
 }
@@ -3139,7 +3178,7 @@ function bindCalendar() {
     renderStats();
   };
   document.getElementById("calNext").onclick = () => {
-    const n = new Date(Date.UTC(statMonth.getUTCFullYear(), statMonth.getUTCMonth() + 1, 1, 12)), cur = calendarDate(dayKey());
+    const n = new Date(Date.UTC(statMonth.getUTCFullYear(), statMonth.getUTCMonth() + 1, 1, 12)), cur = calendarDate(currentDayKey());
     cur.setUTCDate(1);
     if (n <= cur) {
       statMonth = n;
@@ -3147,7 +3186,7 @@ function bindCalendar() {
     }
   };
   document.getElementById("calToday").onclick = () => {
-    statDay = dayKey();
+    statDay = currentDayKey();
     statMonth = calendarDate(statDay);
     renderStats();
   };
@@ -3259,6 +3298,8 @@ window.addEventListener("keydown", (e) => {
 });
 (async function init() {
   state = await loadState();
+  statDay = currentDayKey();
+  statMonth = calendarDate(statDay);
   render();
 })();
 /*! Bundled license information:
