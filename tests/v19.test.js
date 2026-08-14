@@ -20,3 +20,27 @@ test('typing explicit sessions also reconstruct and enforce 3/3',()=>{const s=st
 test('pending sentence meanings persist through normalization',()=>{const s=state();s.words[0].zh='';s.words[0].needsMeaning=true;const n=normalizeState(s);assert.equal(n.words[0].needsMeaning,true);n.words[0].zh='中文';n.words[0].needsMeaning=false;assert.equal(normalizeState(n).words[0].needsMeaning,false);});
 
 test('IELTS numeric answers accept practical spoken/written equivalents',()=>{assert.equal(spellingMatches('twenty five pounds','£25'),true);assert.equal(spellingMatches('twenty percent','20%'),true);assert.equal(spellingMatches('eight thirty','8:30'),true);assert.equal(spellingMatches('sixth','6th'),true);assert.equal(spellingMatches('one hundred','100'),true);assert.equal(spellingMatches('twenty six','25'),false);});
+
+
+test('reopening preserves already-earned intervening-word credit',()=>{
+  const s=state();
+  add(s,'a','bad','listen',1);
+  for(let i=0;i<4;i++) add(s,['b','c','d','e'][i],'good','listen',2+i);
+  const p={date:'2026-08-14',newIds:['a','b','c','d','e','f','g'],reviewIds:[]};
+  const q=createRetrySession(s,p,'listen');
+  assert.equal(nextRetryGap(q),1);
+  assert.equal(pickNext(q),'f');
+  add(s,'f','good','listen',10);
+  finishCurrent(q,'good',s);
+  assert.equal(pickNext(q),'a');
+});
+
+test('five persisted intervening judgments make a retry immediately eligible after reopen',()=>{
+  const s=state();
+  add(s,'a','bad','type',1);
+  for(let i=0;i<5;i++) add(s,['b','c','d','e','f'][i],'good','type',2+i);
+  const p={date:'2026-08-14',newIds:['a','b','c','d','e','f','g'],reviewIds:[]};
+  const q=createRetrySession(s,p,'type',['a','b','c','d','e','f','g']);
+  assert.equal(nextRetryGap(q),0);
+  assert.equal(pickNext(q),'a');
+});

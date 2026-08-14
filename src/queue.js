@@ -377,6 +377,15 @@ export function todayListeningStats(state, books = [], date = activeStudyDayKey(
   return { events, ids, newCount, reviewCount, firstGood, firstBad };
 }
 
+function persistedInterveningTurns(state, wordId, date, mode, afterTs = 0) {
+  return (state.events || []).filter((e) =>
+    e.date === date &&
+    e.mode === mode &&
+    e.wordId !== wordId &&
+    Number(e.ts || 0) > Number(afterTs || 0)
+  ).length;
+}
+
 export function createRetrySession(state, plan, mode = 'listen', explicitIds = null) {
   const planIds = [...new Set(explicitIds || [...plan.reviewIds, ...plan.newIds])];
   const wordMap = new Map(state.words.map((w) => [w.id, w]));
@@ -390,7 +399,16 @@ export function createRetrySession(state, plan, mode = 'listen', explicitIds = n
     const reinforce = reinforcementState(events);
     if (!reinforce.started) pendingBase.push(id);
     else if (reinforce.passed) completedIds.push(id);
-    else retry.push({ wordId:id, attempt:events.length, eligibleTurn:reinforcementGapWords(events), addedTurn:0 });
+    else {
+      const requiredGap = reinforcementGapWords(events);
+      const earnedGap = persistedInterveningTurns(state, id, plan.date, mode, reinforce.last?.ts);
+      retry.push({
+        wordId:id,
+        attempt:events.length,
+        eligibleTurn:Math.max(0, requiredGap - earnedGap),
+        addedTurn:0,
+      });
+    }
   }
   if (!explicitIds && plan.resumeWordId) {
     const i = pendingBase.indexOf(plan.resumeWordId);
