@@ -46,8 +46,11 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   await import(`../src/app.js?smoke=${Date.now()}`);
   await waitFor(() => document.querySelector('#goToday'));
 
-  assert.match(document.getElementById('app').textContent, /听词/);
-  assert.match(document.getElementById('app').textContent, /今日学习/);
+  const homeText = document.getElementById('app').textContent;
+  assert.match(homeText, /今日新词/);
+  assert.match(homeText, /今日复习/);
+  assert.doesNotMatch(homeText, /词库总词数|当前到期|今日学习时间/);
+  assert.match(homeText, /今日学习/);
   assert.ok(document.querySelector('.nav'), 'bottom navigation should render on Home');
 
   document.getElementById('goToday').click();
@@ -64,6 +67,7 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   await waitFor(() => document.querySelector('#judgeBad'));
   assert.ok(document.querySelector('.immersive'), 'learning mode should be immersive');
   assert.equal(document.querySelector('.nav'), null, 'bottom navigation must disappear during learning');
+  assert.match(document.getElementById('retireWord').textContent, /标记简单/);
 
   document.getElementById('judgeBad').click();
   await waitFor(() => document.querySelector('#nextWord'));
@@ -75,6 +79,7 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   await waitFor(() => document.querySelector('[data-nav="text"]'));
   document.querySelector('[data-nav="text"]').click();
   await waitFor(() => document.querySelector('#sentenceBookName'));
+  assert.ok(document.querySelector('#sentenceProblemSearch'), 'sentence problems should be searchable');
   document.getElementById('sentenceBookName').value = '测试句子库';
   document.getElementById('sentenceDictationText').value = 'Rural areas.';
   document.getElementById('sentenceDictationText').dispatchEvent(new window.Event('input', { bubbles: true }));
@@ -83,6 +88,7 @@ test('browser shell renders core study and persistent sentence-book workflow', a
 
   document.getElementById('sentenceReveal').click();
   await waitFor(() => document.querySelector('#sentenceUnknown'));
+  assert.ok(document.querySelector('#sentenceSimple'), 'sentence dictation should allow marking a lexeme simple');
   document.getElementById('sentenceUnknown').click();
   document.getElementById('sentenceNext').click();
   await waitFor(() => document.querySelector('#sentenceReveal'));
@@ -92,19 +98,37 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   document.getElementById('sentenceNext').click();
   await waitFor(() => document.querySelector('#importSentenceBad'));
 
-  assert.match(document.getElementById('app').textContent, /不熟\/不认识/);
-  assert.match(document.getElementById('app').textContent, /2/);
+  assert.match(document.getElementById('app').textContent, /当前错词/);
+  assert.match(document.getElementById('app').textContent, /FSRS/);
   document.getElementById('sentenceErrorBook').value = '测试句子错题本';
   document.getElementById('importSentenceBad').click();
   document.getElementById('finishSentence').click();
-  await waitFor(() => document.querySelector('[data-nav="library"]'));
+  await waitFor(() => document.querySelector('#sentenceProblemSearch'));
   assert.match(document.getElementById('app').textContent, /测试句子库/);
+  document.getElementById('sentenceProblemSearch').value = 'rural';
+  document.getElementById('sentenceProblemSearch').dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.match(document.getElementById('sentenceProblemList').textContent, /Rural areas/);
+  assert.match(document.getElementById('sentenceProblemList').textContent, /只重听这句错词/);
 
   document.querySelector('[data-nav="library"]').click();
   await waitFor(() => document.querySelector('#wordSearch'));
   document.getElementById('wordSearch').value = 'rural';
   document.getElementById('wordSearch').dispatchEvent(new window.Event('input', { bubbles: true }));
   assert.match(document.getElementById('app').textContent, /测试句子错题本/);
+  assert.match(document.querySelector('[data-retire]').textContent, /标记简单|恢复学习/);
+
+  document.querySelector('[data-nav="text"]').click();
+  await waitFor(() => document.querySelector('#newText'));
+  document.getElementById('newText').click();
+  await waitFor(() => document.querySelector('#textTitle'));
+  document.getElementById('textTitle').value = 'Test linked sentence';
+  document.getElementById('textCollection').value = '剑18';
+  document.getElementById('textBody').value = 'The rural area is quiet. Another sentence follows.';
+  document.getElementById('saveText').click();
+  await waitFor(() => document.querySelector('[data-open-text]'));
+  document.querySelector('[data-open-text]').click();
+  await waitFor(() => document.querySelector('#dictateSentence'));
+  assert.match(document.getElementById('dictateSentence').textContent, /拆词听写本句/);
 
   dom.window.close();
 });
