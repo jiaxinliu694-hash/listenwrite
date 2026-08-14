@@ -15,7 +15,7 @@ function waitFor(check, timeout = 2500) {
   });
 }
 
-test('browser shell renders Home, Today and immersive listening without blank-screen failure', async () => {
+test('browser shell renders core study and persistent sentence-book workflow', async () => {
   const dom = new JSDOM(`<!doctype html><body>
     <div id="app"></div>
     <div id="toast"></div>
@@ -36,6 +36,7 @@ test('browser shell renders Home, Today and immersive listening without blank-sc
   globalThis.speechSynthesis = speechSynthesis;
   globalThis.SpeechSynthesisUtterance = SpeechSynthesisUtterance;
   globalThis.confirm = () => true;
+  globalThis.prompt = (_message, value) => value || '测试错题本';
   window.speechSynthesis = speechSynthesis;
   window.SpeechSynthesisUtterance = SpeechSynthesisUtterance;
   window.getSelection = () => ({ toString: () => '' });
@@ -57,6 +58,7 @@ test('browser shell renders Home, Today and immersive listening without blank-sc
   assert.match(todayText, /待巩固/);
   assert.match(todayText, /调整今天的计划与词书/);
   assert.match(todayText, /东八区.*02:00/);
+  assert.ok(document.querySelector('#todayPlanMode'), 'Today should expose mixed/sequential study mode');
 
   document.getElementById('startListen').click();
   await waitFor(() => document.querySelector('#judgeBad'));
@@ -68,6 +70,41 @@ test('browser shell renders Home, Today and immersive listening without blank-sc
   assert.match(document.getElementById('app').textContent, /不熟悉/);
   assert.ok(document.querySelector('.word'), 'answer must reveal the current English word');
   assert.ok(document.querySelector('#nextWord'), 'mobile Next button must be visible after judging');
+
+  document.getElementById('listenBack').click();
+  await waitFor(() => document.querySelector('[data-nav="text"]'));
+  document.querySelector('[data-nav="text"]').click();
+  await waitFor(() => document.querySelector('#sentenceBookName'));
+  document.getElementById('sentenceBookName').value = '测试句子库';
+  document.getElementById('sentenceDictationText').value = 'Rural areas.';
+  document.getElementById('sentenceDictationText').dispatchEvent(new window.Event('input', { bubbles: true }));
+  document.getElementById('startSentenceDictation').click();
+  await waitFor(() => document.querySelector('#sentenceReveal'));
+
+  document.getElementById('sentenceReveal').click();
+  await waitFor(() => document.querySelector('#sentenceUnknown'));
+  document.getElementById('sentenceUnknown').click();
+  document.getElementById('sentenceNext').click();
+  await waitFor(() => document.querySelector('#sentenceReveal'));
+  document.getElementById('sentenceReveal').click();
+  await waitFor(() => document.querySelector('#sentenceUnfamiliar'));
+  document.getElementById('sentenceUnfamiliar').click();
+  document.getElementById('sentenceNext').click();
+  await waitFor(() => document.querySelector('#importSentenceBad'));
+
+  assert.match(document.getElementById('app').textContent, /不熟\/不认识/);
+  assert.match(document.getElementById('app').textContent, /2/);
+  document.getElementById('sentenceErrorBook').value = '测试句子错题本';
+  document.getElementById('importSentenceBad').click();
+  document.getElementById('finishSentence').click();
+  await waitFor(() => document.querySelector('[data-nav="library"]'));
+  assert.match(document.getElementById('app').textContent, /测试句子库/);
+
+  document.querySelector('[data-nav="library"]').click();
+  await waitFor(() => document.querySelector('#wordSearch'));
+  document.getElementById('wordSearch').value = 'rural';
+  document.getElementById('wordSearch').dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.match(document.getElementById('app').textContent, /测试句子错题本/);
 
   dom.window.close();
 });
