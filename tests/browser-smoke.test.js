@@ -59,6 +59,7 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   assert.match(todayText, /新词/);
   assert.match(todayText, /复习/);
   assert.match(todayText, /待巩固/);
+  assert.match(todayText, /本轮单词清单/);
   assert.match(todayText, /调整今天的计划与词书/);
   assert.match(todayText, /东八区.*02:00/);
   assert.ok(document.querySelector('#todayPlanMode'), 'Today should expose mixed/sequential study mode');
@@ -68,6 +69,13 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   assert.ok(document.querySelector('.immersive'), 'learning mode should be immersive');
   assert.equal(document.querySelector('.nav'), null, 'bottom navigation must disappear during learning');
   assert.match(document.getElementById('retireWord').textContent, /标记简单/);
+  assert.ok(document.querySelector('#studyListButton'), 'study screen should expose current-round checklist');
+  document.getElementById('studyListButton').click();
+  await waitFor(() => document.querySelector('.study-sheet'));
+  assert.match(document.querySelector('.study-sheet').textContent, /新词/);
+  assert.match(document.querySelector('.study-sheet').textContent, /复习词/);
+  assert.match(document.querySelector('.study-sheet').textContent, /未开始|待巩固|已熟悉|简单/);
+  document.getElementById('closeStudyList').click();
 
   document.getElementById('judgeBad').click();
   await waitFor(() => document.querySelector('#nextWord'));
@@ -76,7 +84,13 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   assert.ok(document.querySelector('#nextWord'), 'mobile Next button must be visible after judging');
 
   document.getElementById('listenBack').click();
-  await waitFor(() => document.querySelector('[data-nav="text"]'));
+  await waitFor(() => document.querySelector('[data-nav="type"]'));
+  document.querySelector('[data-nav="type"]').click();
+  await waitFor(() => document.querySelector('[data-type-preset="todayNew"]'));
+  assert.match(document.getElementById('app').textContent, /今日新词可手打/);
+  assert.match(document.getElementById('app').textContent, /今日复习可手打/);
+  assert.ok(document.querySelector('[data-type-preset="todayReview"]'), 'hand-writing should have a review entry');
+
   document.querySelector('[data-nav="text"]').click();
   await waitFor(() => document.querySelector('#sentenceBookName'));
   assert.ok(document.querySelector('#sentenceProblemSearch'), 'sentence problems should be searchable');
@@ -112,10 +126,16 @@ test('browser shell renders core study and persistent sentence-book workflow', a
 
   document.querySelector('[data-nav="library"]').click();
   await waitFor(() => document.querySelector('#wordSearch'));
+  const errorBook = [...document.querySelectorAll('.error-book')].find((el) => /测试句子错题本/.test(el.textContent));
+  assert.ok(errorBook, 'named error book should be visible in the library');
+  assert.equal(errorBook.open, false, 'error books should be collapsed by default');
+  errorBook.open = true;
+  assert.ok(errorBook.querySelector('.error-compact'), 'error-book words should use a compact list');
   document.getElementById('wordSearch').value = 'rural';
   document.getElementById('wordSearch').dispatchEvent(new window.Event('input', { bubbles: true }));
   assert.match(document.getElementById('app').textContent, /测试句子错题本/);
-  assert.match(document.querySelector('[data-retire]').textContent, /标记简单|恢复学习/);
+  assert.ok(document.querySelector('.compact-word'), 'normal vocabulary rows should also be compact');
+  assert.match(document.querySelector('[data-retire]').textContent, /简单|恢复/);
 
   document.querySelector('[data-nav="text"]').click();
   await waitFor(() => document.querySelector('#newText'));
