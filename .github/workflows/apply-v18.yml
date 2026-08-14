@@ -1,0 +1,33 @@
+name: Apply v18 cross-book scope fix
+on:
+  push:
+    branches: [v18-cross-book-review-scope]
+    paths:
+      - tools/apply-v18.mjs
+      - tests/v18.test.js
+      - .github/workflows/apply-v18.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v18-cross-book-review-scope
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: node tools/apply-v18.mjs
+      - run: node --check src/queue.js
+      - run: npm test
+      - run: npm run build
+      - name: Commit patched source and bundle
+        run: |
+          rm -f tools/apply-v18.mjs .github/workflows/apply-v18.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Keep Today scope strict and relabel cross-book repeats as review"
+          git push origin HEAD:v18-cross-book-review-scope
