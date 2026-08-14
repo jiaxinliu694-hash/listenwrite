@@ -19,7 +19,7 @@ jobs:
       - name: Upgrade hand-writing reinforcement
         run: python3 scripts/patch_hand.py
       - name: Upgrade persistent text library
-        run: python3 scripts/patch_text_library.py
+        run: python3 scripts/patch_text_library_fixed.py
       - name: Commit upgrade
         run: |
           if git diff --quiet; then exit 0; fi
