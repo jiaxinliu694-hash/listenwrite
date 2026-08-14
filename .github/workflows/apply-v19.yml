@@ -4,6 +4,7 @@ on:
     branches: [v19-gap-reinforcement-batch-meaning]
     paths:
       - 'tools/apply-v19.mjs'
+      - 'tools/fix-v19-script.py'
       - '.github/workflows/apply-v19.yml'
 permissions:
   contents: write
@@ -16,6 +17,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install
+      - run: python tools/fix-v19-script.py
       - run: node tools/apply-v19.mjs
       - run: node --check src/reinforcement.js
       - run: node --check src/queue.js
@@ -29,6 +31,6 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add src/reinforcement.js src/queue.js src/tokenizer.js src/storage.js src/app.js src/wordadmin.js tests/v16.test.js tests/v19.test.js app.bundle.js
-          git rm .github/workflows/apply-v19.yml tools/apply-v19.mjs
+          git rm .github/workflows/apply-v19.yml tools/apply-v19.mjs tools/fix-v19-script.py
           git commit -m "Unify 3-step reinforcement and polish study flow" || exit 0
           git push
