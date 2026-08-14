@@ -1,5 +1,6 @@
 import { advanceCard, emptyCard, rebuildCard } from './scheduler.js';
 import { addStudyDays, calendarDayKey, isGraceWindow } from './studyday.js';
+import { reinforcementState } from './reinforcement.js';
 
 /** Pure calendar date in UTC+8. Use activeStudyDayKey() for live study state. */
 export const dayKey = calendarDayKey;
@@ -46,11 +47,10 @@ export function isDailyPlanComplete(state, date, ts = Date.now()) {
   for (const id of ids) {
     const word = state.words.find((w) => w.id === id);
     if (word?.retired) continue;
-    const latest = state.events
+    const events = state.events
       .filter((e) => e.wordId === id && e.date === date && e.mode === 'listen' && e.ts <= ts)
-      .sort((a, b) => a.ts - b.ts)
-      .at(-1);
-    if (!latest || latest.result !== 'good') return false;
+      .sort((a, b) => a.ts - b.ts);
+    if (!reinforcementState(events).passed) return false;
   }
   return true;
 }

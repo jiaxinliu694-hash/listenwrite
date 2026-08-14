@@ -1,6 +1,7 @@
 import { loadState, saveState, replaceState, exportState } from './storage.js';
 import { activeStudyDayKey, dayKey, uid, recordAttempt, editAttempt, eventsOnDay, latestEventOnDay, rebuildAllCards, hasEventBefore } from './engine.js';
-import { allBooks, matchesBooks, ensureDailyPlan, configureSequentialPlan, convertPlanToMixed, currentSequentialSegment, segmentStatus, planStatus, todayListeningStats, createRetrySession, pickNext, finishCurrent, resyncRetryForWord, sessionProgress, dueForecast } from './queue.js';
+import { allBooks, matchesBooks, ensureDailyPlan, configureSequentialPlan, convertPlanToMixed, currentSequentialSegment, segmentStatus, planStatus, todayListeningStats, createRetrySession, pickNext, finishCurrent, resyncRetryForWord, sessionProgress, dueForecast, nextRetryDelayMs } from './queue.js';
+import { reinforcementState, reinforcementLabel } from './reinforcement.js';
 import { typePresetIds, customTypeIdsFromEvents } from './typefilters.js';
 import { buildImportDraft, recordsFromDraft } from './importwords.js';
 import { updateWordFields, deleteWordEverywhere } from './wordadmin.js';
@@ -110,7 +111,7 @@ function dueCount() { return state.words.filter((w) => !w.retired && (w.card?.re
 
 function planWordKind(plan,id){return plan?.newIds?.includes(id)?'新词':plan?.reviewIds?.includes(id)?'复习':'其他';}
 function planWordBook(plan,id){if(plan?.mode!=='sequential')return'';const seg=(plan.bookSegments||[]).find(x=>(x.newIds||[]).includes(id)||(x.reviewIds||[]).includes(id));return seg?.book||'';}
-function planWordMark(plan,id){const w=wordById(id);if(!w)return{label:'已移除',cls:'mark-pending'};if(w.retired||isSimpleLexeme(state,w.en))return{label:'简单',cls:'mark-simple'};const last=latestEventOnDay(state,id,plan.date,'listen');if(!last)return{label:'未开始',cls:'mark-pending'};return last.result==='good'?{label:'已熟悉',cls:'mark-good'}:{label:'待巩固',cls:'mark-bad'};}
+function planWordMark(plan,id){const w=wordById(id);if(!w)return{label:'已移除',cls:'mark-pending'};if(w.retired||isSimpleLexeme(state,w.en))return{label:'简单',cls:'mark-simple'};const events=eventsOnDay(state,id,plan.date,'listen');const r=reinforcementState(events);if(!r.started)return{label:'未开始',cls:'mark-pending'};if(r.passed)return{label:'已熟悉',cls:'mark-good'};return{label:reinforcementLabel(events),cls:'mark-bad'};}
 function planChecklistHtml(plan,currentId=null){
   const group=(title,ids)=>{const rows=(ids||[]).map((id,index)=>{const w=wordById(id);if(!w)return'';const mark=planWordMark(plan,id),book=planWordBook(plan,id);return`<div class="study-word-row ${id===currentId?'current':''}"><span class="en">${index+1}. ${esc(w.en)}</span><span class="zh">${esc(w.zh||'—')}</span><span class="${mark.cls}">${mark.label}</span><span class="small">${book?esc(book):planWordKind(plan,id)}</span></div>`;}).join('');const done=(ids||[]).filter(id=>['已熟悉','简单'].includes(planWordMark(plan,id).label)).length;return`<div class="study-list-group"><div class="study-list-title"><b>${title}</b><span>${done} / ${(ids||[]).length}</span></div>${rows||'<div class="empty">这一类没有词。</div>'}</div>`;};
   return `<div class="study-list">${group('新词',plan?.newIds||[])}${group('复习词',plan?.reviewIds||[])}</div>`;
@@ -233,7 +234,7 @@ function renderListen() {
   document.getElementById('studyListButton').onclick=()=>{listen.showList=!listen.showList;renderListen();};
   if(document.getElementById('closeStudyList'))document.getElementById('closeStudyList').onclick=()=>{listen.showList=false;renderListen();};
   document.getElementById('speakWord').onclick = () => { speak(w.en); if (!reviewing) touchActivity(listen.activityId); };
-  if (!reviewing) document.getElementById('retireWord').onclick = () => { markSimpleLexeme(state, w.en, true); persist(); finishCurrent(listen.session, 'good'); listen.currentEventId = null; listen.result = null; listen.answer = false; advanceListen(); };
+  if (!reviewing) document.getElementById('retireWord').onclick = () => { markSimpleLexeme(state, w.en, true); persist(); finishCurrent(listen.session, 'good', state); listen.currentEventId = null; listen.result = null; listen.answer = false; advanceListen(); };
   document.getElementById('judgeGood').onclick = () => judgeListen('good'); document.getElementById('judgeBad').onclick = () => judgeListen('bad');
   if (answer) { document.getElementById('prevWord').onclick = () => showPreviousListen(); document.getElementById('nextWord').onclick = () => reviewing ? returnFromHistory() : nextListen(); }
 }
@@ -245,11 +246,19 @@ function judgeListen(result) {
 }
 function nextListen() {
   if (!listen.result) return;
-  finishCurrent(listen.session, listen.result); listen.currentEventId = null; listen.result = null; listen.answer = false; touchActivity(listen.activityId); advanceListen();
+  finishCurrent(listen.session, listen.result, state); listen.currentEventId = null; listen.result = null; listen.answer = false; touchActivity(listen.activityId); advanceListen();
 }
 function advanceListen() {
   let id = pickNext(listen.session);
   if (id) { listen.plan.resumeWordId = id; persist(); renderListen(); speak(wordById(id).en); return; }
+  const waitMs = nextRetryDelayMs(listen.session);
+  if (waitMs > 0) {
+    listen.plan.resumeWordId = null; persist();
+    const seconds = Math.max(1, Math.ceil(waitMs / 1000));
+    root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">还有待巩固词，但最小间隔还没到</div><h2>先隔一会儿再听</h2><div class="statbox" style="margin:18px auto;max-width:240px"><b>${seconds} 秒</b><span>最早再次出现</span></div><div class="small">一次不熟后需要连续 3 次熟悉；任何一次再次不熟都会重新从 0/3 开始。后两次巩固间隔会逐级拉长。</div><div class="row" style="justify-content:center;margin-top:16px"><button id="retryLater" class="primary">回到今日</button></div></div></div></main>`;
+    document.getElementById('retryLater').onclick=()=>{listen=null;view='today';renderToday();};
+    return;
+  }
   if (listen.plan.mode === 'sequential' && currentSequentialSegment(state, listen.plan)) {
     const activityId = listen.activityId; const plan = listen.plan; listen = null; startListen(plan, activityId); return;
   }

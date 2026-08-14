@@ -15,14 +15,14 @@ test('history edit to bad is immediately returned to retry pool', () => {
   resyncRetryForWord(session, state, 'w1', '2026-08-14', 'listen');
   assert.equal(session.retry.length, 1);
   assert.equal(session.retry[0].wordId, 'w1');
-  assert.equal(session.retry[0].eligibleTurn, 3);
+  assert.equal(session.retry[0].eligibleAt, 31000);
 });
 
 test('history edit back to good removes stale retry entry', () => {
   const w = word('w1');
   const state = baseState([w]);
   state.events.push({ id: 'e1', wordId: 'w1', date: '2026-08-14', ts: 1000, mode: 'listen', result: 'good', cold: true, attempt: 1 });
-  const session = { mode: 'listen', date: '2026-08-14', retry: [{ wordId: 'w1', attempt: 1, eligibleTurn: 0, addedAt: 1 }], pendingBase: [], current: { wordId: 'w2' }, turn: 3 };
+  const session = { mode: 'listen', date: '2026-08-14', retry: [{ wordId: 'w1', attempt: 1, eligibleAt: 0, addedAt: 1 }], pendingBase: [], current: { wordId: 'w2' }, turn: 3 };
   resyncRetryForWord(session, state, 'w1', '2026-08-14', 'listen');
   assert.equal(session.retry.length, 0);
 });

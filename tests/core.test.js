@@ -45,15 +45,6 @@ test('fixed new/review denominators never grow with retries', () => {
   assert.equal(plan.reviewIds.length, 1);
 });
 
-test('retry reappears after other cards, not only at the end', () => {
-  const words = Array.from({ length: 7 }, (_, i) => word(`w${i + 1}`));
-  const S = state(words, { defaultNewTarget: 7, defaultReviewTarget: 0 });
-  const plan = ensureDailyPlan(S); const session = createRetrySession(S, plan);
-  const firstId = pickNext(session);
-  recordAttempt(S, wordBy(S, firstId), 'listen', 'bad'); finishCurrent(session, 'bad');
-  for (let i = 0; i < 4; i++) { const id = pickNext(session); recordAttempt(S, wordBy(S, id), 'listen', 'good'); finishCurrent(session, 'good'); }
-  assert.equal(pickNext(session), firstId, 'failed word should return after four intervening cards');
-});
 function wordBy(S,id){return S.words.find(w=>w.id===id);}
 
 test('hand-writing does not complete Today listening task or schedule an unseen word', () => {

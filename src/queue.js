@@ -1,6 +1,7 @@
 import { activeStudyDayKey, dayKey, eventsOnDay, hasEventBefore, latestEventOnDay } from './engine.js';
 import { retrievability } from './scheduler.js';
 import { addStudyDays, studyDayEnd, studyDayStart } from './studyday.js';
+import { reinforcementState, reinforcementDelayMs } from './reinforcement.js';
 
 export function allBooks(state) {
   const set = new Set();
@@ -59,21 +60,22 @@ function reviewCandidates(state, pool, assigned, date, books = [], nonce = 0) {
   const now = Date.now();
   const seed = drawSeed(date, books, nonce);
   return pool
-    .filter((w) => {
-      if (assigned.has(w.id)) return false;
-      const formal = hasEventBefore(state, w.id, date);
-      const hinted = !formal && reviewHinted(w);
-      return hinted || (formal && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff);
-    })
+    .filter((w) => !assigned.has(w.id) && reviewKnown(state, w, date))
     .sort((a, b) => {
       const ah = !hasEventBefore(state, a.id, date) && reviewHinted(a);
       const bh = !hasEventBefore(state, b.id, date) && reviewHinted(b);
       if (ah !== bh) return ah ? -1 : 1;
+      const adue = hasEventBefore(state, a.id, date) && (a.card?.reps || 0) > 0 && Number(a.card?.due || 0) <= cutoff;
+      const bdue = hasEventBefore(state, b.id, date) && (b.card?.reps || 0) > 0 && Number(b.card?.due || 0) <= cutoff;
+      if (adue !== bdue) return adue ? -1 : 1;
       if (ah && bh) return randomRank(a.id, seed) - randomRank(b.id, seed);
       const ra = retrievability(a.card, now, state.settings.retention);
       const rb = retrievability(b.card, now, state.settings.retention);
       if (ra !== rb) return ra - rb;
-      return Number(a.card?.due || 0) - Number(b.card?.due || 0);
+      const da = Number(a.card?.due || Number.MAX_SAFE_INTEGER);
+      const db = Number(b.card?.due || Number.MAX_SAFE_INTEGER);
+      if (da !== db) return da - db;
+      return randomRank(a.id, seed) - randomRank(b.id, seed);
     });
 }
 
@@ -299,9 +301,10 @@ function statusForIds(state, ids, date) {
     const word = wordMap.get(id);
     if (!word) continue;
     if (word.retired) { done++; doneIds.push(id); continue; }
-    const last = latestListenResult(state, id, date);
-    if (!last) { pending++; pendingIds.push(id); }
-    else if (last.result === 'good') { done++; doneIds.push(id); }
+    const events = eventsOnDay(state, id, date, 'listen');
+    const reinforce = reinforcementState(events);
+    if (!reinforce.started) { pending++; pendingIds.push(id); }
+    else if (reinforce.passed) { done++; doneIds.push(id); }
     else { retry++; retryIds.push(id); }
   }
   return { done, retry, pending, doneIds, retryIds, pendingIds };
@@ -360,9 +363,17 @@ export function createRetrySession(state, plan, mode = 'listen', explicitIds = n
     for (const id of planIds) {
       const word = wordMap.get(id);
       if (!word || word.retired) continue;
-      const last = latestEventOnDay(state, id, plan.date, mode);
-      if (!last) pendingBase.push(id);
-      else if (last.result === 'bad') retry.push({ wordId: id, attempt: eventsOnDay(state, id, plan.date, mode).length, eligibleTurn: 0, addedAt: last.ts });
+      const events = eventsOnDay(state, id, plan.date, mode);
+      const reinforce = reinforcementState(events);
+      if (!reinforce.started) pendingBase.push(id);
+      else if (!reinforce.passed) {
+        retry.push({
+          wordId: id,
+          attempt: events.length,
+          eligibleAt: Number(reinforce.last?.ts || 0) + reinforcementDelayMs(events),
+          addedAt: reinforce.last?.ts || 0,
+        });
+      }
     }
     if (plan.resumeWordId) {
       const i = pendingBase.indexOf(plan.resumeWordId);
@@ -372,15 +383,11 @@ export function createRetrySession(state, plan, mode = 'listen', explicitIds = n
   return { mode, date: plan.date, fixedIds: [...new Set(planIds)], pendingBase, retry, turn: 0, current: null, history: [] };
 }
 
-function retryGap(attempt) {
-  if (attempt <= 1) return 4;
-  if (attempt === 2) return 6;
-  return 8;
-}
-
-export function pickNext(session) {
+export function pickNext(session, now = Date.now()) {
   if (session.current) return session.current.wordId;
-  const due = session.retry.filter((x) => x.eligibleTurn <= session.turn).sort((a, b) => a.eligibleTurn - b.eligibleTurn || a.addedAt - b.addedAt)[0];
+  const due = session.retry
+    .filter((x) => Number(x.eligibleAt || 0) <= now)
+    .sort((a, b) => Number(a.eligibleAt || 0) - Number(b.eligibleAt || 0) || a.addedAt - b.addedAt)[0];
   if (due) {
     session.retry = session.retry.filter((x) => x !== due);
     session.current = { wordId: due.wordId, source: 'retry', attempt: due.attempt + 1 };
@@ -391,35 +398,49 @@ export function pickNext(session) {
     session.current = { wordId: baseId, source: 'base', attempt: 1 };
     return baseId;
   }
-  const nextRetry = session.retry.sort((a, b) => a.eligibleTurn - b.eligibleTurn || a.addedAt - b.addedAt).shift();
-  if (nextRetry) {
-    session.current = { wordId: nextRetry.wordId, source: 'retry', attempt: nextRetry.attempt + 1 };
-    return nextRetry.wordId;
-  }
   return null;
 }
 
-export function finishCurrent(session, result) {
+export function nextRetryDelayMs(session, now = Date.now()) {
+  if (!session?.retry?.length) return 0;
+  return Math.max(0, Math.min(...session.retry.map((x) => Number(x.eligibleAt || 0))) - now);
+}
+
+export function finishCurrent(session, result, state = null) {
   if (!session.current) return;
   const current = session.current;
   session.history.push({ ...current, result, turn: session.turn });
   session.turn += 1;
   session.retry = session.retry.filter((x) => x.wordId !== current.wordId);
-  if (result === 'bad') session.retry.push({ wordId: current.wordId, attempt: current.attempt, eligibleTurn: session.turn + retryGap(current.attempt), addedAt: Date.now() });
+  if (state) {
+    const events = eventsOnDay(state, current.wordId, session.date, session.mode);
+    const reinforce = reinforcementState(events);
+    if (!reinforce.passed) {
+      session.retry.push({
+        wordId: current.wordId,
+        attempt: events.length,
+        eligibleAt: Number(reinforce.last?.ts || Date.now()) + reinforcementDelayMs(events),
+        addedAt: reinforce.last?.ts || Date.now(),
+      });
+    }
+  } else if (result === 'bad') {
+    session.retry.push({ wordId: current.wordId, attempt: current.attempt, eligibleAt: Date.now() + 30_000, addedAt: Date.now() });
+  }
   session.current = null;
 }
 
 export function resyncRetryForWord(session, state, wordId, date = session?.date, mode = session?.mode || 'listen') {
   if (!session || !wordId) return;
   session.retry = (session.retry || []).filter((x) => x.wordId !== wordId);
-  const last = latestEventOnDay(state, wordId, date, mode);
-  if (!last || last.result !== 'bad') return;
   if (session.current?.wordId === wordId || (session.pendingBase || []).includes(wordId)) return;
+  const events = eventsOnDay(state, wordId, date, mode);
+  const reinforce = reinforcementState(events);
+  if (!reinforce.started || reinforce.passed) return;
   session.retry.push({
     wordId,
-    attempt: eventsOnDay(state, wordId, date, mode).length,
-    eligibleTurn: session.turn,
-    addedAt: last.ts,
+    attempt: events.length,
+    eligibleAt: Number(reinforce.last?.ts || 0) + reinforcementDelayMs(events),
+    addedAt: reinforce.last?.ts || 0,
   });
 }
 

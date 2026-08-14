@@ -2714,6 +2714,48 @@ function exportState(state2) {
   return JSON.stringify(state2, null, 2);
 }
 
+// src/reinforcement.js
+var REQUIRED_GOOD_STREAK = 3;
+function reinforcementState(events = []) {
+  const list = [...events].sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+  if (!list.length) return { started: false, hadBad: false, goodStreak: 0, required: 1, passed: false, last: null };
+  let hadBad = false;
+  let goodStreak = 0;
+  for (const event of list) {
+    if (event.result === "bad") {
+      hadBad = true;
+      goodStreak = 0;
+    } else if (event.result === "good") {
+      if (hadBad) goodStreak += 1;
+      else goodStreak = 1;
+    }
+  }
+  const required = hadBad ? REQUIRED_GOOD_STREAK : 1;
+  return {
+    started: true,
+    hadBad,
+    goodStreak,
+    required,
+    passed: hadBad ? goodStreak >= REQUIRED_GOOD_STREAK : list.at(-1)?.result === "good",
+    last: list.at(-1) || null
+  };
+}
+function reinforcementDelayMs(events = []) {
+  const state2 = reinforcementState(events);
+  if (!state2.started || state2.passed || !state2.hadBad) return 0;
+  if (state2.last?.result === "bad") return 3e4;
+  if (state2.goodStreak === 1) return 9e4;
+  if (state2.goodStreak === 2) return 18e4;
+  return 0;
+}
+function reinforcementLabel(events = []) {
+  const state2 = reinforcementState(events);
+  if (!state2.started) return "\u672A\u5F00\u59CB";
+  if (state2.passed) return "\u5DF2\u719F\u6089";
+  if (state2.hadBad) return `\u5DE9\u56FA ${state2.goodStreak}/${REQUIRED_GOOD_STREAK}`;
+  return state2.last?.result === "bad" ? "\u5F85\u5DE9\u56FA" : "\u672A\u5F00\u59CB";
+}
+
 // src/engine.js
 var dayKey = calendarDayKey;
 function uid(prefix = "id") {
@@ -2740,8 +2782,8 @@ function isDailyPlanComplete(state2, date, ts = Date.now()) {
   for (const id3 of ids) {
     const word = state2.words.find((w) => w.id === id3);
     if (word?.retired) continue;
-    const latest = state2.events.filter((e) => e.wordId === id3 && e.date === date && e.mode === "listen" && e.ts <= ts).sort((a, b) => a.ts - b.ts).at(-1);
-    if (!latest || latest.result !== "good") return false;
+    const events = state2.events.filter((e) => e.wordId === id3 && e.date === date && e.mode === "listen" && e.ts <= ts).sort((a, b) => a.ts - b.ts);
+    if (!reinforcementState(events).passed) return false;
   }
   return true;
 }
@@ -2836,20 +2878,21 @@ function reviewCandidates(state2, pool, assigned, date, books = [], nonce = 0) {
   const cutoff = studyDayEnd(date);
   const now = Date.now();
   const seed = drawSeed(date, books, nonce);
-  return pool.filter((w) => {
-    if (assigned.has(w.id)) return false;
-    const formal = hasEventBefore(state2, w.id, date);
-    const hinted = !formal && reviewHinted(w);
-    return hinted || formal && (w.card?.reps || 0) > 0 && Number(w.card?.due || 0) <= cutoff;
-  }).sort((a, b) => {
+  return pool.filter((w) => !assigned.has(w.id) && reviewKnown(state2, w, date)).sort((a, b) => {
     const ah = !hasEventBefore(state2, a.id, date) && reviewHinted(a);
     const bh = !hasEventBefore(state2, b.id, date) && reviewHinted(b);
     if (ah !== bh) return ah ? -1 : 1;
+    const adue = hasEventBefore(state2, a.id, date) && (a.card?.reps || 0) > 0 && Number(a.card?.due || 0) <= cutoff;
+    const bdue = hasEventBefore(state2, b.id, date) && (b.card?.reps || 0) > 0 && Number(b.card?.due || 0) <= cutoff;
+    if (adue !== bdue) return adue ? -1 : 1;
     if (ah && bh) return randomRank(a.id, seed) - randomRank(b.id, seed);
     const ra = retrievability(a.card, now, state2.settings.retention);
     const rb = retrievability(b.card, now, state2.settings.retention);
     if (ra !== rb) return ra - rb;
-    return Number(a.card?.due || 0) - Number(b.card?.due || 0);
+    const da = Number(a.card?.due || Number.MAX_SAFE_INTEGER);
+    const db = Number(b.card?.due || Number.MAX_SAFE_INTEGER);
+    if (da !== db) return da - db;
+    return randomRank(a.id, seed) - randomRank(b.id, seed);
   });
 }
 function freshCandidates(state2, pool, assigned, date, books = [], nonce = 0) {
@@ -3046,9 +3089,6 @@ function convertPlanToMixed(state2, plan, books = []) {
   plan.updatedAt = Date.now();
   return plan;
 }
-function latestListenResult(state2, wordId, date = activeStudyDayKey(state2)) {
-  return latestEventOnDay(state2, wordId, date, "listen");
-}
 function statusForIds(state2, ids, date) {
   const wordMap = new Map(state2.words.map((w) => [w.id, w]));
   let done = 0, retry = 0, pending = 0;
@@ -3061,11 +3101,12 @@ function statusForIds(state2, ids, date) {
       doneIds.push(id3);
       continue;
     }
-    const last = latestListenResult(state2, id3, date);
-    if (!last) {
+    const events = eventsOnDay(state2, id3, date, "listen");
+    const reinforce = reinforcementState(events);
+    if (!reinforce.started) {
       pending++;
       pendingIds.push(id3);
-    } else if (last.result === "good") {
+    } else if (reinforce.passed) {
       done++;
       doneIds.push(id3);
     } else {
@@ -3124,9 +3165,17 @@ function createRetrySession(state2, plan, mode = "listen", explicitIds = null) {
     for (const id3 of planIds) {
       const word = wordMap.get(id3);
       if (!word || word.retired) continue;
-      const last = latestEventOnDay(state2, id3, plan.date, mode);
-      if (!last) pendingBase.push(id3);
-      else if (last.result === "bad") retry.push({ wordId: id3, attempt: eventsOnDay(state2, id3, plan.date, mode).length, eligibleTurn: 0, addedAt: last.ts });
+      const events = eventsOnDay(state2, id3, plan.date, mode);
+      const reinforce = reinforcementState(events);
+      if (!reinforce.started) pendingBase.push(id3);
+      else if (!reinforce.passed) {
+        retry.push({
+          wordId: id3,
+          attempt: events.length,
+          eligibleAt: Number(reinforce.last?.ts || 0) + reinforcementDelayMs(events),
+          addedAt: reinforce.last?.ts || 0
+        });
+      }
     }
     if (plan.resumeWordId) {
       const i = pendingBase.indexOf(plan.resumeWordId);
@@ -3135,14 +3184,9 @@ function createRetrySession(state2, plan, mode = "listen", explicitIds = null) {
   }
   return { mode, date: plan.date, fixedIds: [...new Set(planIds)], pendingBase, retry, turn: 0, current: null, history: [] };
 }
-function retryGap(attempt) {
-  if (attempt <= 1) return 4;
-  if (attempt === 2) return 6;
-  return 8;
-}
-function pickNext(session) {
+function pickNext(session, now = Date.now()) {
   if (session.current) return session.current.wordId;
-  const due = session.retry.filter((x) => x.eligibleTurn <= session.turn).sort((a, b) => a.eligibleTurn - b.eligibleTurn || a.addedAt - b.addedAt)[0];
+  const due = session.retry.filter((x) => Number(x.eligibleAt || 0) <= now).sort((a, b) => Number(a.eligibleAt || 0) - Number(b.eligibleAt || 0) || a.addedAt - b.addedAt)[0];
   if (due) {
     session.retry = session.retry.filter((x) => x !== due);
     session.current = { wordId: due.wordId, source: "retry", attempt: due.attempt + 1 };
@@ -3153,33 +3197,46 @@ function pickNext(session) {
     session.current = { wordId: baseId, source: "base", attempt: 1 };
     return baseId;
   }
-  const nextRetry = session.retry.sort((a, b) => a.eligibleTurn - b.eligibleTurn || a.addedAt - b.addedAt).shift();
-  if (nextRetry) {
-    session.current = { wordId: nextRetry.wordId, source: "retry", attempt: nextRetry.attempt + 1 };
-    return nextRetry.wordId;
-  }
   return null;
 }
-function finishCurrent(session, result) {
+function nextRetryDelayMs(session, now = Date.now()) {
+  if (!session?.retry?.length) return 0;
+  return Math.max(0, Math.min(...session.retry.map((x) => Number(x.eligibleAt || 0))) - now);
+}
+function finishCurrent(session, result, state2 = null) {
   if (!session.current) return;
   const current = session.current;
   session.history.push({ ...current, result, turn: session.turn });
   session.turn += 1;
   session.retry = session.retry.filter((x) => x.wordId !== current.wordId);
-  if (result === "bad") session.retry.push({ wordId: current.wordId, attempt: current.attempt, eligibleTurn: session.turn + retryGap(current.attempt), addedAt: Date.now() });
+  if (state2) {
+    const events = eventsOnDay(state2, current.wordId, session.date, session.mode);
+    const reinforce = reinforcementState(events);
+    if (!reinforce.passed) {
+      session.retry.push({
+        wordId: current.wordId,
+        attempt: events.length,
+        eligibleAt: Number(reinforce.last?.ts || Date.now()) + reinforcementDelayMs(events),
+        addedAt: reinforce.last?.ts || Date.now()
+      });
+    }
+  } else if (result === "bad") {
+    session.retry.push({ wordId: current.wordId, attempt: current.attempt, eligibleAt: Date.now() + 3e4, addedAt: Date.now() });
+  }
   session.current = null;
 }
 function resyncRetryForWord(session, state2, wordId, date = session?.date, mode = session?.mode || "listen") {
   if (!session || !wordId) return;
   session.retry = (session.retry || []).filter((x) => x.wordId !== wordId);
-  const last = latestEventOnDay(state2, wordId, date, mode);
-  if (!last || last.result !== "bad") return;
   if (session.current?.wordId === wordId || (session.pendingBase || []).includes(wordId)) return;
+  const events = eventsOnDay(state2, wordId, date, mode);
+  const reinforce = reinforcementState(events);
+  if (!reinforce.started || reinforce.passed) return;
   session.retry.push({
     wordId,
-    attempt: eventsOnDay(state2, wordId, date, mode).length,
-    eligibleTurn: session.turn,
-    addedAt: last.ts
+    attempt: events.length,
+    eligibleAt: Number(reinforce.last?.ts || 0) + reinforcementDelayMs(events),
+    addedAt: reinforce.last?.ts || 0
   });
 }
 function sessionProgress(state2, plan, session) {
@@ -3585,9 +3642,11 @@ function planWordMark(plan, id3) {
   const w = wordById(id3);
   if (!w) return { label: "\u5DF2\u79FB\u9664", cls: "mark-pending" };
   if (w.retired || isSimpleLexeme(state, w.en)) return { label: "\u7B80\u5355", cls: "mark-simple" };
-  const last = latestEventOnDay(state, id3, plan.date, "listen");
-  if (!last) return { label: "\u672A\u5F00\u59CB", cls: "mark-pending" };
-  return last.result === "good" ? { label: "\u5DF2\u719F\u6089", cls: "mark-good" } : { label: "\u5F85\u5DE9\u56FA", cls: "mark-bad" };
+  const events = eventsOnDay(state, id3, plan.date, "listen");
+  const r = reinforcementState(events);
+  if (!r.started) return { label: "\u672A\u5F00\u59CB", cls: "mark-pending" };
+  if (r.passed) return { label: "\u5DF2\u719F\u6089", cls: "mark-good" };
+  return { label: reinforcementLabel(events), cls: "mark-bad" };
 }
 function planChecklistHtml(plan, currentId = null) {
   const group = (title, ids) => {
@@ -3795,7 +3854,7 @@ function renderListen() {
   if (!reviewing) document.getElementById("retireWord").onclick = () => {
     markSimpleLexeme(state, w.en, true);
     persist();
-    finishCurrent(listen.session, "good");
+    finishCurrent(listen.session, "good", state);
     listen.currentEventId = null;
     listen.result = null;
     listen.answer = false;
@@ -3831,7 +3890,7 @@ function judgeListen(result) {
 }
 function nextListen() {
   if (!listen.result) return;
-  finishCurrent(listen.session, listen.result);
+  finishCurrent(listen.session, listen.result, state);
   listen.currentEventId = null;
   listen.result = null;
   listen.answer = false;
@@ -3845,6 +3904,19 @@ function advanceListen() {
     persist();
     renderListen();
     speak(wordById(id3).en);
+    return;
+  }
+  const waitMs = nextRetryDelayMs(listen.session);
+  if (waitMs > 0) {
+    listen.plan.resumeWordId = null;
+    persist();
+    const seconds = Math.max(1, Math.ceil(waitMs / 1e3));
+    root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u8FD8\u6709\u5F85\u5DE9\u56FA\u8BCD\uFF0C\u4F46\u6700\u5C0F\u95F4\u9694\u8FD8\u6CA1\u5230</div><h2>\u5148\u9694\u4E00\u4F1A\u513F\u518D\u542C</h2><div class="statbox" style="margin:18px auto;max-width:240px"><b>${seconds} \u79D2</b><span>\u6700\u65E9\u518D\u6B21\u51FA\u73B0</span></div><div class="small">\u4E00\u6B21\u4E0D\u719F\u540E\u9700\u8981\u8FDE\u7EED 3 \u6B21\u719F\u6089\uFF1B\u4EFB\u4F55\u4E00\u6B21\u518D\u6B21\u4E0D\u719F\u90FD\u4F1A\u91CD\u65B0\u4ECE 0/3 \u5F00\u59CB\u3002\u540E\u4E24\u6B21\u5DE9\u56FA\u95F4\u9694\u4F1A\u9010\u7EA7\u62C9\u957F\u3002</div><div class="row" style="justify-content:center;margin-top:16px"><button id="retryLater" class="primary">\u56DE\u5230\u4ECA\u65E5</button></div></div></div></main>`;
+    document.getElementById("retryLater").onclick = () => {
+      listen = null;
+      view = "today";
+      renderToday();
+    };
     return;
   }
   if (listen.plan.mode === "sequential" && currentSequentialSegment(state, listen.plan)) {
