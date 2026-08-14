@@ -19,7 +19,9 @@ jobs:
         with:
           node-version: '22'
       - name: Apply v9 changes
-        run: python3 scripts/apply_v9.py
+        run: |
+          python3 scripts/apply_v9.py
+          python3 scripts/patch_v9_tests.py
       - name: Install
         run: npm install
       - name: Syntax checks
