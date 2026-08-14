@@ -39,7 +39,7 @@ test('new-word draw is stable within one scope but redraws when book scope chang
   assert.notDeepEqual(p.newIds, bDraw);
 });
 
-test('deselected book disappears from today plan while its learning event remains', () => {
+test('deselected book disappears from today plan while its completed learning event remains', () => {
   const s = stateWithWords();
   const date = '2026-08-14';
   let p = ensureDailyPlan(s, { date, books:['A'] });
@@ -49,7 +49,7 @@ test('deselected book disappears from today plan while its learning event remain
   assert.ok(!p.newIds.includes(heard) && !p.reviewIds.includes(heard));
   assert.equal(s.events.some(e => e.wordId === heard), true);
   p = ensureDailyPlan(s, { date, books:['A'] });
-  assert.ok(p.newIds.includes(heard));
+  assert.ok(!p.newIds.includes(heard) && !p.reviewIds.includes(heard), 'already-passed words do not consume another Today slot when reselecting the book');
 });
 
 test('promoted wrong words are review candidates, not new words, without inventing FSRS history', () => {
