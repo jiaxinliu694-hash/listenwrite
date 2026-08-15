@@ -12,7 +12,7 @@ import { addStudyDays, calendarDate, calendarKey, studyDayLabel } from './studyd
 import { tokenizeEnglish, spellingMatches } from './tokenizer.js';
 import { segmentTextSentences, reconcileTextSentences, alignSentenceInput } from './textsentences.js';
 import { ensureSentenceBooks, ensureSimpleWords, isSimpleLexeme, markSimpleLexeme, addSentenceEntry, getSentenceEntry, deleteSentenceEntry, deleteSentenceBook, recordSentenceToken, setSentenceTokenStatus, sentencePracticeIndexes, sentenceProblemTokens, allSentenceProblemTokens, findSentenceProblemEntries, sentenceSourceLabel, problemTokensToTSV, deriveSentencePracticeStatus, deriveWholeSentenceStatus, deriveSplitSentenceStatus, setSentencePracticeStatus, setSplitSentencePracticeStatus, recordWholeSentenceAttempt } from './sentencebooks.js';
-import { startStudyActivity, setStudyActivityDate, flushStudyActivity, pauseStudyActivity, resumeStudyActivity, finishStudyActivity, studyActivityElapsedMs, activityMinutes as activityMinutesFromState, activityTotalMs, formatStudyTime } from './activity.js';
+import { startStudyActivity, setStudyActivityDate, flushStudyActivity, pauseStudyActivity, resumeStudyActivity, finishStudyActivity, studyActivityElapsedMs, activityMinutes as activityMinutesFromState, activityTotalMs, dailyModuleElapsedMs, formatStudyTime } from './activity.js';
 
 const root = document.getElementById('app');
 const restoreInput = document.getElementById('file-restore');
@@ -86,8 +86,10 @@ function touchActivity(id) { if(!id)return;flushStudyActivity(state,id);persist(
 function finishActivity(id){if(!id)return;finishStudyActivity(state,id);persist();}
 function activityMinutes(mode = null, date = currentDayKey()) { return activityMinutesFromState(state,mode,date); }
 function activeStudyActivityId(){return listen?.activityId||typeRun?.activityId||wholeSentenceRun?.activityId||sentenceRun?.activityId||freeListen?.activityId||null;}
+function moduleTimerLabel(mode){return mode==='listen'?'今日听词':mode==='type'?'今日手打':mode==='sentence'?'今日句子':mode==='free'?'今日自由听':'今日学习';}
 function mountStudyTimer(activityId){
   clearInterval(studyTimerInterval);studyTimerInterval=null;if(!activityId)return;
+  const activity=(state.activities||[]).find(item=>item.id===activityId);if(!activity)return;
   let badge=document.getElementById('studyTimer');
   if(!badge){
     badge=document.createElement('span');badge.id='studyTimer';
@@ -95,7 +97,8 @@ function mountStudyTimer(activityId){
     if(progress){badge.className='study-timer study-timer-inline';progress.appendChild(badge);}
     else{badge.className='study-timer study-timer-float';document.querySelector('.immersive')?.appendChild(badge);}
   }
-  const draw=()=>{const el=document.getElementById('studyTimer');if(el)el.textContent='本轮 '+formatStudyTime(studyActivityElapsedMs(state,activityId,Date.now(),!document.hidden));};draw();studyTimerInterval=setInterval(draw,1000);studyTimerInterval?.unref?.();
+  const draw=()=>{const el=document.getElementById('studyTimer');if(!el)return;const date=currentDayKey();const elapsed=dailyModuleElapsedMs(state,activity.mode,date,activityId,Date.now(),!document.hidden);el.textContent=moduleTimerLabel(activity.mode)+' '+formatStudyTime(elapsed);};
+  draw();studyTimerInterval=setInterval(draw,1000);studyTimerInterval?.unref?.();
 }
 
 function navHtml() {

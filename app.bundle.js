@@ -2642,6 +2642,15 @@ function activityMinutes(state2, mode = null, date = null) {
   const ms = activityTotalMs(state2, { mode, date });
   return ms ? Math.max(1, Math.round(ms / 6e4)) : 0;
 }
+function dailyModuleElapsedMs(state2, mode, date, activeId = null, now = Date.now(), visible = true) {
+  let total = activityTotalMs(state2, { mode, date });
+  if (!activeId) return total;
+  const active = activityById(state2, activeId);
+  if (!active || active.mode !== mode || active.date !== date) return total;
+  const live = studyActivityElapsedMs(state2, activeId, now, visible);
+  const flushed = Math.max(0, Number(active.activeMs) || 0);
+  return total + Math.max(0, live - flushed);
+}
 function formatStudyTime(ms) {
   const totalSeconds = Math.max(0, Math.floor(Number(ms) / 1e3));
   const hours = Math.floor(totalSeconds / 3600);
@@ -3984,10 +3993,15 @@ function activityMinutes2(mode = null, date = currentDayKey()) {
 function activeStudyActivityId() {
   return listen?.activityId || typeRun?.activityId || wholeSentenceRun?.activityId || sentenceRun?.activityId || freeListen?.activityId || null;
 }
+function moduleTimerLabel(mode) {
+  return mode === "listen" ? "\u4ECA\u65E5\u542C\u8BCD" : mode === "type" ? "\u4ECA\u65E5\u624B\u6253" : mode === "sentence" ? "\u4ECA\u65E5\u53E5\u5B50" : mode === "free" ? "\u4ECA\u65E5\u81EA\u7531\u542C" : "\u4ECA\u65E5\u5B66\u4E60";
+}
 function mountStudyTimer(activityId) {
   clearInterval(studyTimerInterval);
   studyTimerInterval = null;
   if (!activityId) return;
+  const activity = (state.activities || []).find((item) => item.id === activityId);
+  if (!activity) return;
   let badge = document.getElementById("studyTimer");
   if (!badge) {
     badge = document.createElement("span");
@@ -4003,7 +4017,10 @@ function mountStudyTimer(activityId) {
   }
   const draw = () => {
     const el = document.getElementById("studyTimer");
-    if (el) el.textContent = "\u672C\u8F6E " + formatStudyTime(studyActivityElapsedMs(state, activityId, Date.now(), !document.hidden));
+    if (!el) return;
+    const date = currentDayKey();
+    const elapsed = dailyModuleElapsedMs(state, activity.mode, date, activityId, Date.now(), !document.hidden);
+    el.textContent = moduleTimerLabel(activity.mode) + " " + formatStudyTime(elapsed);
   };
   draw();
   studyTimerInterval = setInterval(draw, 1e3);

@@ -87,6 +87,16 @@ export function activityMinutes(state, mode = null, date = null) {
   return ms ? Math.max(1, Math.round(ms / 60_000)) : 0;
 }
 
+export function dailyModuleElapsedMs(state, mode, date, activeId = null, now = Date.now(), visible = true) {
+  let total = activityTotalMs(state, { mode, date });
+  if (!activeId) return total;
+  const active = activityById(state, activeId);
+  if (!active || active.mode !== mode || active.date !== date) return total;
+  const live = studyActivityElapsedMs(state, activeId, now, visible);
+  const flushed = Math.max(0, Number(active.activeMs) || 0);
+  return total + Math.max(0, live - flushed);
+}
+
 export function formatStudyTime(ms) {
   const totalSeconds = Math.max(0, Math.floor(Number(ms) / 1000));
   const hours = Math.floor(totalSeconds / 3600);
