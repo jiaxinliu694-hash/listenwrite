@@ -1943,7 +1943,7 @@ function studyDayLabel() {
 }
 
 // src/sentencebooks.js
-var VALID_STATUS = /* @__PURE__ */ new Set(["familiar", "unfamiliar", "unknown"]);
+var VALID_STATUS = /* @__PURE__ */ new Set(["familiar", "unfamiliar"]);
 var VALID_PRACTICE_STATUS = /* @__PURE__ */ new Set(["unseen", "repeat", "done", "ignored"]);
 var VALID_MODE_STATUS = /* @__PURE__ */ new Set(["unseen", "repeat", "done"]);
 function id(prefix = "id") {
@@ -1981,6 +1981,13 @@ function markSimpleLexeme(state2, value, simple = true) {
 }
 function ensureSentenceBooks(state2) {
   if (!Array.isArray(state2.sentenceBooks)) state2.sentenceBooks = [];
+  for (const book of state2.sentenceBooks) {
+    for (const entry of book?.entries || []) {
+      for (const token of entry?.tokens || []) {
+        if (token?.status === "unknown") token.status = "unfamiliar";
+      }
+    }
+  }
   return state2.sentenceBooks;
 }
 function ensureSentenceBook(state2, name = "\u53E5\u5B50\u8BCD\u5E93") {
@@ -2076,7 +2083,8 @@ function recordSentenceToken(entry, tokenIndex, { input = "", spellingResult = n
   if (!token) return null;
   token.lastInput = String(input || "");
   token.lastSpellingResult = spellingResult === "good" ? "good" : spellingResult === "bad" ? "bad" : null;
-  if (status && VALID_STATUS.has(status)) token.status = status;
+  const nextStatus = status === "unknown" ? "unfamiliar" : status;
+  if (nextStatus && VALID_STATUS.has(nextStatus)) token.status = nextStatus;
   token.attempts = Array.isArray(token.attempts) ? token.attempts : [];
   token.attempts.push({ ts: Date.now(), input: token.lastInput, spellingResult: token.lastSpellingResult, status: token.status });
   entry.updatedAt = Date.now();
@@ -2084,8 +2092,9 @@ function recordSentenceToken(entry, tokenIndex, { input = "", spellingResult = n
 }
 function setSentenceTokenStatus(entry, tokenIndex, status) {
   const token = entry?.tokens?.[tokenIndex];
-  if (!token || !VALID_STATUS.has(status)) return null;
-  token.status = status;
+  const nextStatus = status === "unknown" ? "unfamiliar" : status;
+  if (!token || !VALID_STATUS.has(nextStatus)) return null;
+  token.status = nextStatus;
   entry.updatedAt = Date.now();
   return token;
 }
@@ -4796,7 +4805,7 @@ function errorBookNames() {
 }
 function errorBookSectionHtml() {
   const books = errorBookNames();
-  if (!books.length) return `<section class="card"><h2 class="section-title">\u9519\u9898\u672C</h2><div class="empty">\u8FD8\u6CA1\u6709\u9519\u9898\u672C\u3002\u53E5\u5B50\u542C\u5199\u7ED3\u675F\u540E\u53EF\u4EE5\u628A\u4E0D\u719F/\u4E0D\u8BA4\u8BC6\u7684\u8BCD\u4E00\u952E\u52A0\u5165\u3002</div></section>`;
+  if (!books.length) return `<section class="card"><h2 class="section-title">\u9519\u9898\u672C</h2><div class="empty">\u8FD8\u6CA1\u6709\u9519\u9898\u672C\u3002\u53E5\u5B50\u542C\u5199\u7ED3\u675F\u540E\u53EF\u4EE5\u628A\u4E0D\u719F\u6089\u7684\u8BCD\u4E00\u952E\u52A0\u5165\u3002</div></section>`;
   return `<section class="card"><div class="space"><div><h2 class="section-title">\u9519\u9898\u672C</h2><div class="small">\u9ED8\u8BA4\u6298\u53E0\uFF0C\u53EA\u663E\u793A\u540D\u79F0\u548C\u8BCD\u6570\uFF1B\u5C55\u5F00\u540E\u7528\u7D27\u51D1\u5217\u8868\u67E5\u770B\u3002</div></div></div><div class="error-books">${books.map((book) => {
     const words = state.words.filter((w) => (w.sources || []).includes(book));
     const preview = words.slice(0, 60).map((w) => `<div class="error-row"><span class="en">${esc(w.en)}</span><span class="zh">${esc(w.zh || "")}</span>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : "<span></span>"}</div>`).join("");
@@ -5690,7 +5699,7 @@ function renderSentenceRun() {
   const status = token.status, splitState = sentenceStateInfo(entry).split;
   const sameIndexes = entry.tokens.map((x, i) => ({ x, i })).filter(({ x }) => (x.normalized || String(x.surface).toLowerCase()) === (token.normalized || String(token.surface).toLowerCase())).map(({ i }) => i);
   const duplicateNote = sameIndexes.length > 1 ? ` \xB7 \u540C\u8BCD\u7B2C ${sameIndexes.indexOf(tokenIndex) + 1}/${sameIndexes.length} \u6B21` : "";
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="sentenceBack" class="back">\u2039</button><div class="studyprogress">${sentenceRun.cursor + 1} / ${sentenceRun.items.length} \xB7 ${esc(sentenceRun.label || book.name)}</div></div><div class="studybody"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${splitState.status}">\u62C6\u8BCD ${splitState.label}</span><span class="small">${esc(sentenceSourceLabel(entry))}${duplicateNote}${sentenceRun.skippedSimple ? ` \xB7 \u5DF2\u8DF3\u8FC7\u7B80\u5355\u8BCD ${sentenceRun.skippedSimple}` : ""}</span></div><button id="sentenceSpeak" class="speaker">\u25D6))</button>${!sentenceRun.revealed ? `<div class="small">\u542C\u5355\u8BCD\uFF0C\u5199\u51FA\u82F1\u6587\u62FC\u5199\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="sentenceAnswer" style="font-size:21px;text-align:center" placeholder="\u8F93\u5165\u82F1\u6587\u62FC\u5199\u2026" autocomplete="off" autocapitalize="off"><div class="grid2" style="margin-top:10px"><button id="sentenceSubmit" class="primary">\u63D0\u4EA4</button><button id="sentenceReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${sentenceRun.result === "good" ? "good" : "bad"}">${esc(token.surface)}</div><div class="typed"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(sentenceRun.input || "\uFF08\u76F4\u63A5\u770B\u7B54\u6848\uFF09")}</div></div><div class="statusline">${sentenceRun.result === "good" ? "\u62FC\u5199\u6B63\u786E" : "\u5DF2\u663E\u793A\u6B63\u786E\u62FC\u5199"} \xB7 \u518D\u6807\u8BB0\u771F\u5B9E\u719F\u6089\u5EA6</div><div class="judges" style="grid-template-columns:repeat(3,1fr)"><button id="sentenceFamiliar" class="${status === "familiar" ? "goodbtn" : "soft"}">\u719F\u6089</button><button id="sentenceUnfamiliar" class="${status === "unfamiliar" ? "badbtn" : "soft"}">\u4E0D\u719F\u6089</button><button id="sentenceUnknown" class="${status === "unknown" ? "badbtn" : "soft"}">\u4E0D\u8BA4\u8BC6</button></div><div class="move"><button id="sentenceSimple" class="soft">\u6807\u8BB0\u7B80\u5355</button><button id="sentenceReplay" class="soft">\u91CD\u542C</button><button id="sentenceNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>`}</div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="sentenceBack" class="back">\u2039</button><div class="studyprogress">${sentenceRun.cursor + 1} / ${sentenceRun.items.length} \xB7 ${esc(sentenceRun.label || book.name)}</div></div><div class="studybody"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${splitState.status}">\u62C6\u8BCD ${splitState.label}</span><span class="small">${esc(sentenceSourceLabel(entry))}${duplicateNote}${sentenceRun.skippedSimple ? ` \xB7 \u5DF2\u8DF3\u8FC7\u7B80\u5355\u8BCD ${sentenceRun.skippedSimple}` : ""}</span></div><button id="sentenceSpeak" class="speaker">\u25D6))</button>${!sentenceRun.revealed ? `<div class="small">\u542C\u5355\u8BCD\uFF0C\u5199\u51FA\u82F1\u6587\u62FC\u5199\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="sentenceAnswer" style="font-size:21px;text-align:center" placeholder="\u8F93\u5165\u82F1\u6587\u62FC\u5199\u2026" autocomplete="off" autocapitalize="off"><div class="grid2" style="margin-top:10px"><button id="sentenceSubmit" class="primary">\u63D0\u4EA4</button><button id="sentenceReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${sentenceRun.result === "good" ? "good" : "bad"}">${esc(token.surface)}</div><div class="typed"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(sentenceRun.input || "\uFF08\u76F4\u63A5\u770B\u7B54\u6848\uFF09")}</div></div><div class="statusline">${sentenceRun.result === "good" ? "\u62FC\u5199\u6B63\u786E" : "\u5DF2\u663E\u793A\u6B63\u786E\u62FC\u5199"} \xB7 \u518D\u6807\u8BB0\u771F\u5B9E\u719F\u6089\u5EA6</div><div class="judges"><button id="sentenceFamiliar" class="${status === "familiar" ? "goodbtn" : "soft"}">\u719F\u6089</button><button id="sentenceUnfamiliar" class="${["unfamiliar", "unknown"].includes(status) ? "badbtn" : "soft"}">\u4E0D\u719F\u6089</button></div><div class="move"><button id="sentenceSimple" class="soft">\u6807\u8BB0\u7B80\u5355</button><button id="sentenceNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>`}</div></main>`;
   mountStudyTimer(sentenceRun.activityId);
   document.getElementById("sentenceBack").onclick = () => {
     persist();
@@ -5711,7 +5720,7 @@ function renderSentenceRun() {
       sentenceRun.result = !peek && spellingMatches(sentenceRun.input, token.surface) ? "good" : "bad";
       if (sentenceRun.result === "good") sentenceRun.correct++;
       else sentenceRun.lookups++;
-      const defaultStatus = sentenceRun.result === "good" ? "familiar" : peek ? "unknown" : "unfamiliar";
+      const defaultStatus = sentenceRun.result === "good" ? "familiar" : "unfamiliar";
       recordSentenceToken(entry, tokenIndex, { input: sentenceRun.input, spellingResult: sentenceRun.result, status: defaultStatus });
       sentenceRun.revealed = true;
       persist();
@@ -5736,14 +5745,12 @@ function renderSentenceRun() {
     };
     document.getElementById("sentenceFamiliar").onclick = () => mark("familiar");
     document.getElementById("sentenceUnfamiliar").onclick = () => mark("unfamiliar");
-    document.getElementById("sentenceUnknown").onclick = () => mark("unknown");
     document.getElementById("sentenceSimple").onclick = () => {
       markSimpleLexeme(state, token.normalized || token.surface, true);
       setSentenceTokenStatus(entry, tokenIndex, "familiar");
       persist();
       advanceSentenceRun();
     };
-    document.getElementById("sentenceReplay").onclick = () => speak(token.surface);
     document.getElementById("sentenceNext").onclick = advanceSentenceRun;
   }
 }

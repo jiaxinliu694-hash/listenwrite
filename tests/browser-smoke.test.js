@@ -101,9 +101,12 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   await waitFor(() => document.querySelector('#sentenceReveal'));
 
   document.getElementById('sentenceReveal').click();
-  await waitFor(() => document.querySelector('#sentenceUnknown'));
+  await waitFor(() => document.querySelector('#sentenceUnfamiliar'));
   assert.ok(document.querySelector('#sentenceSimple'), 'sentence dictation should allow marking a lexeme simple');
-  document.getElementById('sentenceUnknown').click();
+  assert.ok(document.querySelector('#sentenceSpeak'), 'the top speaker remains the replay control');
+  assert.equal(document.querySelector('#sentenceUnknown'), null, 'sentence dictation should not expose a separate unknown button');
+  assert.equal(document.querySelector('#sentenceReplay'), null, 'sentence dictation should not duplicate replay below the answer');
+  document.getElementById('sentenceUnfamiliar').click();
   document.getElementById('sentenceNext').click();
   await waitFor(() => document.querySelector('#sentenceReveal'));
   document.getElementById('sentenceReveal').click();

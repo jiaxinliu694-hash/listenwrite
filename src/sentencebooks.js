@@ -1,4 +1,4 @@
-const VALID_STATUS = new Set(['familiar', 'unfamiliar', 'unknown']);
+const VALID_STATUS = new Set(['familiar', 'unfamiliar']);
 const VALID_PRACTICE_STATUS = new Set(['unseen', 'repeat', 'done', 'ignored']);
 const VALID_MODE_STATUS = new Set(['unseen', 'repeat', 'done']);
 
@@ -42,6 +42,13 @@ export function markSimpleLexeme(state, value, simple = true) {
 
 export function ensureSentenceBooks(state) {
   if (!Array.isArray(state.sentenceBooks)) state.sentenceBooks = [];
+  for (const book of state.sentenceBooks) {
+    for (const entry of book?.entries || []) {
+      for (const token of entry?.tokens || []) {
+        if (token?.status === 'unknown') token.status = 'unfamiliar';
+      }
+    }
+  }
   return state.sentenceBooks;
 }
 
@@ -145,7 +152,8 @@ export function recordSentenceToken(entry, tokenIndex, { input = '', spellingRes
   if (!token) return null;
   token.lastInput = String(input || '');
   token.lastSpellingResult = spellingResult === 'good' ? 'good' : spellingResult === 'bad' ? 'bad' : null;
-  if (status && VALID_STATUS.has(status)) token.status = status;
+  const nextStatus = status === 'unknown' ? 'unfamiliar' : status;
+  if (nextStatus && VALID_STATUS.has(nextStatus)) token.status = nextStatus;
   token.attempts = Array.isArray(token.attempts) ? token.attempts : [];
   token.attempts.push({ ts: Date.now(), input: token.lastInput, spellingResult: token.lastSpellingResult, status: token.status });
   entry.updatedAt = Date.now();
@@ -154,8 +162,9 @@ export function recordSentenceToken(entry, tokenIndex, { input = '', spellingRes
 
 export function setSentenceTokenStatus(entry, tokenIndex, status) {
   const token = entry?.tokens?.[tokenIndex];
-  if (!token || !VALID_STATUS.has(status)) return null;
-  token.status = status;
+  const nextStatus = status === 'unknown' ? 'unfamiliar' : status;
+  if (!token || !VALID_STATUS.has(nextStatus)) return null;
+  token.status = nextStatus;
   entry.updatedAt = Date.now();
   return token;
 }
