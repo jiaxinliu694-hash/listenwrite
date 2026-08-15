@@ -33,6 +33,17 @@ jobs:
           cp /tmp/datachart-payload/v25-browser.test.js tests/datachart-browser-v25.test.js
           cp /tmp/datachart-payload/apply-datachart-patch.mjs scripts/apply-datachart-v25.mjs
           node scripts/apply-datachart-v25.mjs
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/storage.js')
+          s=p.read_text()
+          s=s.replace("const STATE_VERSION = 11;\nconst SCHEDULING_STATE_VERSION = 10;", "const STATE_VERSION = 10;")
+          s=s.replace("const migrateScheduling = inputVersion < SCHEDULING_STATE_VERSION;", "const migrateScheduling = inputVersion < STATE_VERSION;")
+          p.write_text(s)
+          p=Path('index.html')
+          s=p.read_text().replace('?v=25','?v=24-datachart')
+          p.write_text(s)
+          PY
       - name: Validate and build
         run: |
           set -o pipefail
