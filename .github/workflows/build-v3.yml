@@ -2,7 +2,7 @@ name: Build Listenwrite v3
 
 on:
   push:
-    branches: [scheduler-v2-fsrs, main, v30-manual-sentence-status]
+    branches: [scheduler-v2-fsrs, main]
 
 permissions:
   contents: write
@@ -12,29 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Apply v30 sentence-status patch
-        if: github.ref_name == 'v30-manual-sentence-status'
-        run: python scripts/apply-v30.py
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: npm install
-      - run: node --check src/app.js
-      - run: node --check src/sentencebooks.js
-      - run: node --check src/textlibrary.js
       - run: npm test
       - run: npm run build
-      - name: Commit v30 source and browser bundle
-        if: github.ref_name == 'v30-manual-sentence-status'
-        run: |
-          if [ -z "$(git status --porcelain -- src/app.js src/sentencebooks.js src/textlibrary.js tests/v23_1.test.js tests/v24.test.js tests/v26.test.js tests/v30.test.js index.html app.bundle.js)" ]; then exit 0; fi
-          git config user.name "listenwrite-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add src/app.js src/sentencebooks.js src/textlibrary.js tests/v23_1.test.js tests/v24.test.js tests/v26.test.js tests/v30.test.js index.html app.bundle.js
-          git commit -m "Separate spelling from manual familiarity"
-          git push
       - name: Commit browser bundle
-        if: github.ref_name != 'v30-manual-sentence-status'
         run: |
           if [ -z "$(git status --porcelain -- app.bundle.js)" ]; then exit 0; fi
           git config user.name "listenwrite-bot"
