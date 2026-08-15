@@ -2,7 +2,7 @@ name: Build Listenwrite v3
 
 on:
   push:
-    branches: [scheduler-v2-fsrs, main, v26-sentence-controls]
+    branches: [scheduler-v2-fsrs, main]
 
 permissions:
   contents: write
@@ -12,88 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Apply v26 sentence-control patch
-        run: |
-          python <<'PY'
-          from pathlib import Path
-
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              if old in text:
-                  text = text.replace(old, new, 1)
-                  p.write_text(text)
-                  return
-              if new not in text:
-                  raise SystemExit(f'expected text not found in {path}: {old[:120]!r}')
-
-          app = 'src/app.js'
-          replace_once(app,
-              '句子听写结束后可以把不熟/不认识的词一键加入。',
-              '句子听写结束后可以把不熟悉的词一键加入。')
-          replace_once(app,
-              '<div class="judges" style="grid-template-columns:repeat(3,1fr)"><button id="sentenceFamiliar" class="${status===\'familiar\'?\'goodbtn\':\'soft\'}">熟悉</button><button id="sentenceUnfamiliar" class="${status===\'unfamiliar\'?\'badbtn\':\'soft\'}">不熟悉</button><button id="sentenceUnknown" class="${status===\'unknown\'?\'badbtn\':\'soft\'}">不认识</button></div><div class="move"><button id="sentenceSimple" class="soft">标记简单</button><button id="sentenceReplay" class="soft">重听</button><button id="sentenceNext" class="primary">下一词</button></div>',
-              '<div class="judges"><button id="sentenceFamiliar" class="${status===\'familiar\'?\'goodbtn\':\'soft\'}">熟悉</button><button id="sentenceUnfamiliar" class="${[\'unfamiliar\',\'unknown\'].includes(status)?\'badbtn\':\'soft\'}">不熟悉</button></div><div class="move"><button id="sentenceSimple" class="soft">标记简单</button><button id="sentenceNext" class="primary">下一词</button></div>')
-          replace_once(app,
-              "const defaultStatus=sentenceRun.result==='good'?'familiar':peek?'unknown':'unfamiliar';",
-              "const defaultStatus=sentenceRun.result==='good'?'familiar':'unfamiliar';")
-          replace_once(app,
-              "document.getElementById('sentenceUnknown').onclick=()=>mark('unknown');",
-              '')
-          replace_once(app,
-              "document.getElementById('sentenceReplay').onclick=()=>speak(token.surface);",
-              '')
-
-          books = 'src/sentencebooks.js'
-          replace_once(books,
-              "const VALID_STATUS = new Set(['familiar', 'unfamiliar', 'unknown']);",
-              "const VALID_STATUS = new Set(['familiar', 'unfamiliar']);")
-          replace_once(books,
-              "export function ensureSentenceBooks(state) {\n  if (!Array.isArray(state.sentenceBooks)) state.sentenceBooks = [];\n  return state.sentenceBooks;\n}",
-              "export function ensureSentenceBooks(state) {\n  if (!Array.isArray(state.sentenceBooks)) state.sentenceBooks = [];\n  for (const book of state.sentenceBooks) {\n    for (const entry of book?.entries || []) {\n      for (const token of entry?.tokens || []) {\n        if (token?.status === 'unknown') token.status = 'unfamiliar';\n      }\n    }\n  }\n  return state.sentenceBooks;\n}")
-          replace_once(books,
-              "  if (status && VALID_STATUS.has(status)) token.status = status;",
-              "  const nextStatus = status === 'unknown' ? 'unfamiliar' : status;\n  if (nextStatus && VALID_STATUS.has(nextStatus)) token.status = nextStatus;")
-          replace_once(books,
-              "export function setSentenceTokenStatus(entry, tokenIndex, status) {\n  const token = entry?.tokens?.[tokenIndex];\n  if (!token || !VALID_STATUS.has(status)) return null;\n  token.status = status;",
-              "export function setSentenceTokenStatus(entry, tokenIndex, status) {\n  const token = entry?.tokens?.[tokenIndex];\n  const nextStatus = status === 'unknown' ? 'unfamiliar' : status;\n  if (!token || !VALID_STATUS.has(nextStatus)) return null;\n  token.status = nextStatus;")
-
-          smoke = 'tests/browser-smoke.test.js'
-          replace_once(smoke,
-              "  await waitFor(() => document.querySelector('#sentenceUnknown'));",
-              "  await waitFor(() => document.querySelector('#sentenceUnfamiliar'));")
-          replace_once(smoke,
-              "  assert.ok(document.querySelector('#sentenceSimple'), 'sentence dictation should allow marking a lexeme simple');",
-              "  assert.ok(document.querySelector('#sentenceSimple'), 'sentence dictation should allow marking a lexeme simple');\n  assert.ok(document.querySelector('#sentenceSpeak'), 'the top speaker remains the replay control');\n  assert.equal(document.querySelector('#sentenceUnknown'), null, 'sentence dictation should not expose a separate unknown button');\n  assert.equal(document.querySelector('#sentenceReplay'), null, 'sentence dictation should not duplicate replay below the answer');")
-          replace_once(smoke,
-              "  document.getElementById('sentenceUnknown').click();",
-              "  document.getElementById('sentenceUnfamiliar').click();")
-
-          for path in ['tests/v23_1.test.js', 'tests/v24.test.js']:
-              replace_once(path,
-                  "  assert.ok(html.includes('app.bundle.js?v=24'));",
-                  "  assert.ok(html.includes('app.bundle.js?v=26'));" )
-          replace_once('index.html',
-              './app.bundle.js?v=24-datachart',
-              './app.bundle.js?v=26-sentence-controls')
-
-          v26 = Path('tests/v26.test.js')
-          if not v26.exists():
-              v26.write_text("""import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { ensureSentenceBooks, recordSentenceToken, sentenceProblemTokens, setSentenceTokenStatus } from '../src/sentencebooks.js';\n\ntest('legacy unknown sentence-token state collapses to unfamiliar without losing problem status', () => {\n  const state = { sentenceBooks: [{ id: 'b', entries: [{ id: 'e', tokens: [{ surface: 'rural', normalized: 'rural', status: 'unknown', attempts: [] }] }] }], words: [] };\n  ensureSentenceBooks(state);\n  const token = state.sentenceBooks[0].entries[0].tokens[0];\n  assert.equal(token.status, 'unfamiliar');\n  assert.equal(sentenceProblemTokens(state.sentenceBooks[0].entries[0]).length, 1);\n});\n\ntest('new sentence judgments keep only familiar and unfamiliar active states', () => {\n  const entry = { tokens: [{ surface: 'areas', normalized: 'areas', status: null, attempts: [] }] };\n  recordSentenceToken(entry, 0, { input: '', spellingResult: 'bad', status: 'unknown' });\n  assert.equal(entry.tokens[0].status, 'unfamiliar');\n  setSentenceTokenStatus(entry, 0, 'unknown');\n  assert.equal(entry.tokens[0].status, 'unfamiliar');\n  setSentenceTokenStatus(entry, 0, 'familiar');\n  assert.equal(entry.tokens[0].status, 'familiar');\n});\n""")
-          PY
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: npm install
-      - run: node --check src/app.js
-      - run: node --check src/sentencebooks.js
       - run: npm test
       - run: npm run build
-      - name: Commit v26 source and browser bundle
+      - name: Commit browser bundle
         run: |
-          if [ -z "$(git status --porcelain -- src/app.js src/sentencebooks.js tests/browser-smoke.test.js tests/v23_1.test.js tests/v24.test.js tests/v26.test.js index.html app.bundle.js)" ]; then exit 0; fi
+          if [ -z "$(git status --porcelain -- app.bundle.js)" ]; then exit 0; fi
           git config user.name "listenwrite-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/app.js src/sentencebooks.js tests/browser-smoke.test.js tests/v23_1.test.js tests/v24.test.js tests/v26.test.js index.html app.bundle.js
-          git commit -m "Simplify sentence dictation controls"
+          git add app.bundle.js
+          git commit -m "Build browser bundle"
           git push
