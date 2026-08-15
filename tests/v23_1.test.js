@@ -12,5 +12,5 @@ test('study timer is mounted inline with the study progress header',()=>{
 test('static assets are cache-busted for timer rollout',()=>{
   const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
   assert.ok(html.includes('styles.css?v=24'));
-  assert.ok(html.includes('app.bundle.js?v=29'));
+  assert.ok(html.includes('app.bundle.js?v=30'));
 });

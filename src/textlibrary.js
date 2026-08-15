@@ -72,6 +72,21 @@ export function textUnfamiliarTokens(state, textId) {
     }));
 }
 
+export function textLegacyUnfamiliarCandidates(state, textId) {
+  const byLexeme = new Map();
+  for (const { book, entry } of linkedTextEntries(state, textId)) {
+    for (let tokenIndex = 0; tokenIndex < (entry.tokens || []).length; tokenIndex += 1) {
+      const token = entry.tokens[tokenIndex];
+      const lexeme = normalizeLexeme(token?.normalized || token?.surface);
+      if (!lexeme || isSimpleLexeme(state, lexeme) || !token?.legacyUnfamiliarCandidate) continue;
+      const current = byLexeme.get(lexeme) || { surface: String(token.surface || lexeme), normalized: lexeme, sentence: entry.text || '', sourceTextId: textId, occurrences: [] };
+      current.occurrences.push({ bookId: book.id, entryId: entry.id, tokenIndex, sentenceIndex: entry.sentenceIndex, sentence: entry.text });
+      byLexeme.set(lexeme, current);
+    }
+  }
+  return [...byLexeme.values()].sort((a, b) => a.normalized.localeCompare(b.normalized));
+}
+
 export function textCollectionUnfamiliarTokens(state, collection) {
   const name = String(collection || '未分类').trim() || '未分类';
   const byLexeme = new Map();

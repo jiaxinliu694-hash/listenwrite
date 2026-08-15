@@ -116,6 +116,8 @@ export function addSentenceEntry(state, {
       lastInput: '',
       lastSpellingResult: null,
       attempts: [],
+      statusHistory: [],
+      legacyUnfamiliarCandidate: false,
     })),
   };
   book.entries.unshift(entry);
@@ -147,15 +149,13 @@ export function deleteSentenceBook(state, bookId) {
   return {deleted:true,removedEntries};
 }
 
-export function recordSentenceToken(entry, tokenIndex, { input = '', spellingResult = null, status = null } = {}) {
+export function recordSentenceToken(entry, tokenIndex, { input = '', spellingResult = null } = {}) {
   const token = entry?.tokens?.[tokenIndex];
   if (!token) return null;
   token.lastInput = String(input || '');
   token.lastSpellingResult = spellingResult === 'good' ? 'good' : spellingResult === 'bad' ? 'bad' : null;
-  const nextStatus = status === 'unknown' ? 'unfamiliar' : status;
-  if (nextStatus && VALID_STATUS.has(nextStatus)) token.status = nextStatus;
   token.attempts = Array.isArray(token.attempts) ? token.attempts : [];
-  token.attempts.push({ ts: Date.now(), input: token.lastInput, spellingResult: token.lastSpellingResult, status: token.status });
+  token.attempts.push({ ts: Date.now(), input: token.lastInput, spellingResult: token.lastSpellingResult });
   entry.updatedAt = Date.now();
   return token;
 }
@@ -164,8 +164,12 @@ export function setSentenceTokenStatus(entry, tokenIndex, status) {
   const token = entry?.tokens?.[tokenIndex];
   const nextStatus = status === 'unknown' ? 'unfamiliar' : status;
   if (!token || !VALID_STATUS.has(nextStatus)) return null;
+  const ts = Date.now();
   token.status = nextStatus;
-  entry.updatedAt = Date.now();
+  token.statusHistory = Array.isArray(token.statusHistory) ? token.statusHistory : [];
+  token.statusHistory.push({ ts, status: nextStatus });
+  token.legacyUnfamiliarCandidate = false;
+  entry.updatedAt = ts;
   return token;
 }
 
@@ -327,6 +331,10 @@ export function normalizeSentenceBooks(value) {
         lastInput: String(token.lastInput || ''),
         lastSpellingResult: token.lastSpellingResult === 'good' ? 'good' : token.lastSpellingResult === 'bad' ? 'bad' : null,
         attempts: Array.isArray(token.attempts) ? token.attempts : [],
+        statusHistory: Array.isArray(token.statusHistory)
+          ? token.statusHistory.filter((row) => VALID_STATUS.has(row?.status === 'unknown' ? 'unfamiliar' : row?.status)).map((row) => ({ ts: Number(row.ts) || 0, status: row.status === 'unknown' ? 'unfamiliar' : row.status }))
+          : (VALID_STATUS.has(token.status) ? [{ ts: Number((Array.isArray(token.attempts) ? token.attempts : []).at(-1)?.ts) || 0, status: token.status }] : []),
+        legacyUnfamiliarCandidate: Boolean(token.legacyUnfamiliarCandidate) || (!Array.isArray(token.statusHistory) && (Array.isArray(token.attempts) ? token.attempts : []).some((attempt) => attempt?.spellingResult === 'bad' || attempt?.status === 'unfamiliar' || attempt?.status === 'unknown')),
       })),
     })),
   }));

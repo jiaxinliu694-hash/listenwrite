@@ -12,8 +12,8 @@ test('legacy unknown sentence-token state collapses to unfamiliar without losing
 
 test('new sentence judgments keep only familiar and unfamiliar active states', () => {
   const entry = { tokens: [{ surface: 'areas', normalized: 'areas', status: null, attempts: [] }] };
-  recordSentenceToken(entry, 0, { input: '', spellingResult: 'bad', status: 'unknown' });
-  assert.equal(entry.tokens[0].status, 'unfamiliar');
+  recordSentenceToken(entry, 0, { input: '', spellingResult: 'bad' });
+  assert.equal(entry.tokens[0].status, null);
   setSentenceTokenStatus(entry, 0, 'unknown');
   assert.equal(entry.tokens[0].status, 'unfamiliar');
   setSentenceTokenStatus(entry, 0, 'familiar');
