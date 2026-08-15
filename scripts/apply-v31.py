@@ -44,6 +44,9 @@ for old,new in repls.items():
     replace_once(path,old,new)
 
 replace_once('index.html','app.bundle.js?v=30-manual-sentence-status','app.bundle.js?v=31-openable-csv')
+for test_path in ['tests/v23_1.test.js','tests/v24.test.js']:
+    p=Path(test_path)
+    p.write_text(p.read_text().replace("app.bundle.js?v=30", "app.bundle.js?v=31"))
 
 Path('tests/v31.test.js').write_text(r'''import test from 'node:test';
 import assert from 'node:assert/strict';
