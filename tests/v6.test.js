@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { emptyCard } from '../src/scheduler.js';
 import { recordAttempt } from '../src/engine.js';
 import { ensureDailyPlan, configureSequentialPlan, currentSequentialSegment, createRetrySession, pickNext } from '../src/queue.js';
-import { addSentenceEntry, recordSentenceToken, sentenceProblemTokens, problemTokensToTSV } from '../src/sentencebooks.js';
+import { addSentenceEntry, recordSentenceToken, setSentenceTokenStatus, sentenceProblemTokens, problemTokensToTSV } from '../src/sentencebooks.js';
 
 function word(id, sources) {
   return { id, en: id, zh: '', pos: '', def: '', sources, examples: [], retired: false, card: emptyCard() };
@@ -17,12 +17,15 @@ function state(words) {
   };
 }
 
-test('sentence dictation persists status and exports only problem words', () => {
+test('sentence dictation persists manual status and exports only problem words', () => {
   const S = state([]);
   const { entry } = addSentenceEntry(S, { bookName: '剑18句子', text: 'Rural areas decline.', tokens: ['Rural', 'areas', 'decline'] });
-  recordSentenceToken(entry, 0, { input: 'rural', spellingResult: 'good', status: 'familiar' });
-  recordSentenceToken(entry, 1, { input: 'area', spellingResult: 'bad', status: 'unfamiliar' });
-  recordSentenceToken(entry, 2, { input: '', spellingResult: 'bad', status: 'unknown' });
+  recordSentenceToken(entry, 0, { input: 'rural', spellingResult: 'good' });
+  setSentenceTokenStatus(entry, 0, 'familiar');
+  recordSentenceToken(entry, 1, { input: 'area', spellingResult: 'bad' });
+  setSentenceTokenStatus(entry, 1, 'unfamiliar');
+  recordSentenceToken(entry, 2, { input: '', spellingResult: 'bad' });
+  setSentenceTokenStatus(entry, 2, 'unfamiliar');
   const bad = sentenceProblemTokens(entry);
   assert.deepEqual(bad.map(x => x.normalized), ['areas', 'decline']);
   const tsv = problemTokensToTSV(bad, { source: '句子错题本', sentence: entry.text });
