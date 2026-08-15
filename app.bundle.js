@@ -4578,6 +4578,15 @@ function textPracticeWords(state2, textId) {
   }
   return [...byLexeme.values()].map((row) => ({ ...row, status: row.simple ? "simple" : row.unfamiliar ? "unfamiliar" : row.familiar ? "familiar" : "heard" })).sort((a, b) => (a.status === "unfamiliar" ? -1 : 0) - (b.status === "unfamiliar" ? -1 : 0) || b.lastPracticedAt - a.lastPracticedAt || a.lexeme.localeCompare(b.lexeme));
 }
+function textUnfamiliarTokens(state2, textId) {
+  return textPracticeWords(state2, textId).filter((word) => word.unfamiliar && !word.simple).map((word) => ({
+    surface: word.surface,
+    normalized: word.lexeme,
+    sentence: word.occurrences.find((occurrence) => occurrence.sentence)?.sentence || "",
+    sourceTextId: textId,
+    occurrences: word.occurrences.map((occurrence) => ({ ...occurrence }))
+  }));
+}
 function textCollectionSummaries(state2) {
   const groups = /* @__PURE__ */ new Map();
   for (const text of state2?.texts || []) {
@@ -6032,7 +6041,8 @@ function renderTextLibraryDetail() {
   }
   const sentences = linkedTextEntries(state, t.id, { practicedOnly: true });
   const words = textPracticeWords(state, t.id);
-  shell(`<div class="stack"><section class="card"><button id="backTextCollection" class="ghost">\u2039 ${esc(t.collection || "\u672A\u5206\u7C7B")}</button><h2 class="section-title" style="margin-top:8px">${esc(t.title)}</h2><div class="small">\u5B66\u4E60\u8BB0\u5F55\u53EA\u663E\u793A\u8FD9\u7BC7\u6587\u672C\u4EA7\u751F\u5E76\u5B9E\u9645\u7EC3\u8FC7\u7684\u53E5\u5B50\u548C\u5355\u8BCD\u3002</div><div class="grid3" style="margin-top:14px"><div class="statbox"><b>${sentences.length}</b><span>\u542C\u8FC7\u7684\u53E5\u5B50</span></div><div class="statbox"><b>${words.length}</b><span>\u542C\u8FC7\u7684\u5355\u8BCD</span></div><div class="statbox"><b>${words.filter((w) => w.simple).length}</b><span>\u6807\u8BB0\u7B80\u5355</span></div></div><div class="toolbar" style="margin-top:12px"><button id="continueText" class="primary">\u7EE7\u7EED\u542C\u6587\u672C</button></div></section><section class="card"><h2 class="section-title">\u542C\u8FC7\u7684\u53E5\u5B50</h2><div class="list" style="margin-top:12px">${sentences.length ? sentences.map(({ book, entry }) => {
+  const unfamiliar = textUnfamiliarTokens(state, t.id);
+  shell(`<div class="stack"><section class="card"><button id="backTextCollection" class="ghost">\u2039 ${esc(t.collection || "\u672A\u5206\u7C7B")}</button><h2 class="section-title" style="margin-top:8px">${esc(t.title)}</h2><div class="small">\u5B66\u4E60\u8BB0\u5F55\u53EA\u663E\u793A\u8FD9\u7BC7\u6587\u672C\u4EA7\u751F\u5E76\u5B9E\u9645\u7EC3\u8FC7\u7684\u53E5\u5B50\u548C\u5355\u8BCD\u3002</div><div class="grid3" style="margin-top:14px"><div class="statbox"><b>${sentences.length}</b><span>\u542C\u8FC7\u7684\u53E5\u5B50</span></div><div class="statbox"><b>${words.length}</b><span>\u542C\u8FC7\u7684\u5355\u8BCD</span></div><div class="statbox"><b>${words.filter((w) => w.simple).length}</b><span>\u6807\u8BB0\u7B80\u5355</span></div></div><div class="toolbar" style="margin-top:12px"><button id="continueText" class="primary">\u7EE7\u7EED\u542C\u6587\u672C</button><button id="exportTextUnfamiliar" class="soft" ${unfamiliar.length ? "" : "disabled"}>\u5BFC\u51FA\u4E0D\u719F\u6089 \xB7 ${unfamiliar.length}</button></div></section><section class="card"><h2 class="section-title">\u542C\u8FC7\u7684\u53E5\u5B50</h2><div class="list" style="margin-top:12px">${sentences.length ? sentences.map(({ book, entry }) => {
     const st = sentenceStateInfo(entry);
     return `<div class="sentence-entry"><div class="sentence-entry-meta"><span class="sentence-state ${st.whole.status}">\u6574\u53E5 ${st.whole.label}</span><span class="sentence-state ${st.split.status}">\u62C6\u8BCD ${st.split.label}</span><span class="small">\u7B2C ${Number(entry.sentenceIndex || 0) + 1} \u53E5</span></div><div class="sentence-entry-text">${esc(entry.text)}</div><div class="sentence-mode-row"><button class="soft" data-history-whole="${book.id}|${entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-history-split="${book.id}|${entry.id}">\u62C6\u8BCD\u542C\u5199</button></div></div>`;
   }).join("") : '<div class="empty">\u8FD9\u7BC7\u6587\u672C\u8FD8\u6CA1\u6709\u7EC3\u8FC7\u53E5\u5B50\u3002</div>'}</div></section><section class="card"><h2 class="section-title">\u542C\u8FC7\u7684\u5355\u8BCD</h2><div class="small">\u201C\u7B80\u5355\u201D\u662F\u5168\u5C40\u8BCD\u72B6\u6001\uFF1B\u8BEF\u6807\u540E\u5728\u8FD9\u91CC\u6062\u590D\uFF0C\u4F1A\u91CD\u65B0\u51FA\u73B0\u5728\u53E5\u5B50\u62C6\u8BCD\u548C\u666E\u901A\u8BCD\u5E93\u5B66\u4E60\u91CC\u3002</div><div class="list" style="margin-top:12px">${words.length ? words.map((w) => `<div class="listitem compact-word"><div class="space"><div><div class="word-main"><b>${esc(w.surface)}</b><span class="tag">${textHistoryStatusLabel(w.status)}</span></div><div class="small">\u51FA\u73B0 ${w.occurrences.length} \u6B21</div></div>${w.simple ? `<button class="soft" data-restore-simple="${esc(w.lexeme)}">\u6062\u590D</button>` : ""}</div></div>`).join("") : '<div class="empty">\u8FD9\u7BC7\u6587\u672C\u8FD8\u6CA1\u6709\u62C6\u8BCD\u8BB0\u5F55\u3002</div>'}</div></section></div>`);
@@ -6046,6 +6056,13 @@ function renderTextLibraryDetail() {
     t.lastOpened = Date.now();
     persist();
     renderTextReader();
+  };
+  document.getElementById("exportTextUnfamiliar").onclick = () => {
+    if (!unfamiliar.length) return;
+    const source = `${t.collection || "\u672A\u5206\u7C7B"} \xB7 ${t.title} \xB7 \u4E0D\u719F\u6089`;
+    const safe = String(t.title || "\u6587\u672C").replace(/[\/:*?"<>|]+/g, "-");
+    download(`${safe}-\u4E0D\u719F\u6089-${currentDayKey()}.tsv`, problemTokensToTSV(unfamiliar, { source }), "text/tab-separated-values;charset=utf-8");
+    toast(`\u5DF2\u5BFC\u51FA ${unfamiliar.length} \u4E2A\u4E0D\u719F\u6089\u8BCD`);
   };
   document.querySelectorAll("[data-history-whole]").forEach((b) => b.onclick = () => {
     const [bookId, entryId] = b.dataset.historyWhole.split("|");
