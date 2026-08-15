@@ -60,6 +60,18 @@ export function textPracticeWords(state, textId) {
     .sort((a, b) => (a.status === 'unfamiliar' ? -1 : 0) - (b.status === 'unfamiliar' ? -1 : 0) || b.lastPracticedAt - a.lastPracticedAt || a.lexeme.localeCompare(b.lexeme));
 }
 
+export function textUnfamiliarTokens(state, textId) {
+  return textPracticeWords(state, textId)
+    .filter((word) => word.unfamiliar && !word.simple)
+    .map((word) => ({
+      surface: word.surface,
+      normalized: word.lexeme,
+      sentence: word.occurrences.find((occurrence) => occurrence.sentence)?.sentence || '',
+      sourceTextId: textId,
+      occurrences: word.occurrences.map((occurrence) => ({ ...occurrence })),
+    }));
+}
+
 export function textCollectionSummaries(state) {
   const groups = new Map();
   for (const text of state?.texts || []) {
