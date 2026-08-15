@@ -2,6 +2,7 @@ import { emptyCard, rebuildCard } from './scheduler.js';
 import { calendarDayKey } from './studyday.js';
 import { normalizeSentenceBooks, ensureSimpleWords, normalizeLexeme } from './sentencebooks.js';
 import { normalizeTexts } from './textsentences.js';
+import { normalizeActivities } from './activity.js';
 
 const DB_NAME = 'listenwrite-v3';
 const DB_VERSION = 1;
@@ -170,12 +171,6 @@ function reindexEvents(events) {
   return events;
 }
 
-function normalizeActivities(list, preserveDate) {
-  return (Array.isArray(list) ? list : []).map((a) => ({
-    ...a,
-    date: preserveDate && a.date ? a.date : calendarDayKey(Number(a.start) || Number(a.lastTouch) || Date.now()),
-  }));
-}
 function normalizeSentenceSession(value){
   if(!value||typeof value!=='object')return null;
   const updatedAt=Number(value.updatedAt)||0;
@@ -222,7 +217,7 @@ export function normalizeState(input) {
   const inferredErrorBooks = new Set(Array.isArray(input?.errorBooks) ? input.errorBooks.map(String).filter(Boolean) : []);
   for (const word of state.words) for (const source of word.sources || []) if (/错题|错词|error/i.test(source)) inferredErrorBooks.add(source);
   state.errorBooks = [...inferredErrorBooks];
-  state.activities = normalizeActivities(input?.activities, preserveDates);
+  state.activities = normalizeActivities(input?.activities, preserveDates, calendarDayKey);
   state.dailyPlans = {};
   if (inputVersion >= 4 && input?.dailyPlans && typeof input.dailyPlans === 'object' && !Array.isArray(input.dailyPlans)) {
     for (const [key, plan] of Object.entries(input.dailyPlans)) state.dailyPlans[key] = normalizePlan(plan, key);

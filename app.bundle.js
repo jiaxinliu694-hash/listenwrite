@@ -2563,6 +2563,106 @@ function alignSentenceInput(expectedText, actualText) {
   return { expected, actual, normalizedExpected: normalizedWords(expectedText), normalizedActual: normalizedWords(actualText), operations, distance: dp[expected.length][actual.length], correct: dp[expected.length][actual.length] === 0, wrongExpectedIndexes };
 }
 
+// src/activity.js
+var MAX_ACTIVE_GAP_MS = 9e4;
+function activityById(state2, id3) {
+  return (state2?.activities || []).find((activity) => activity.id === id3) || null;
+}
+function startStudyActivity(state2, mode, label, books = [], now = Date.now()) {
+  if (!Array.isArray(state2.activities)) state2.activities = [];
+  const activity = {
+    id: `act_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    mode,
+    label,
+    books: [...books],
+    date: null,
+    start: now,
+    lastTouch: now,
+    activeMs: 0,
+    active: true,
+    end: null
+  };
+  state2.activities.push(activity);
+  return activity.id;
+}
+function setStudyActivityDate(state2, id3, date) {
+  const activity = activityById(state2, id3);
+  if (activity) activity.date = date;
+  return activity;
+}
+function flushStudyActivity(state2, id3, now = Date.now(), { maxGapMs = MAX_ACTIVE_GAP_MS } = {}) {
+  const activity = activityById(state2, id3);
+  if (!activity || !activity.active) return activity;
+  const last = Number(activity.lastTouch) || Number(activity.start) || now;
+  const delta = Math.max(0, Math.min(now - last, maxGapMs));
+  activity.activeMs = Math.max(0, Number(activity.activeMs) || 0) + delta;
+  activity.lastTouch = now;
+  return activity;
+}
+function pauseStudyActivity(state2, id3, now = Date.now()) {
+  const activity = flushStudyActivity(state2, id3, now);
+  if (!activity) return null;
+  activity.active = false;
+  activity.lastTouch = now;
+  return activity;
+}
+function resumeStudyActivity(state2, id3, now = Date.now()) {
+  const activity = activityById(state2, id3);
+  if (!activity || activity.end) return null;
+  activity.active = true;
+  activity.lastTouch = now;
+  return activity;
+}
+function finishStudyActivity(state2, id3, now = Date.now()) {
+  const activity = flushStudyActivity(state2, id3, now);
+  if (!activity) return null;
+  activity.active = false;
+  activity.end = now;
+  activity.lastTouch = now;
+  return activity;
+}
+function studyActivityElapsedMs(state2, id3, now = Date.now(), visible = true) {
+  const activity = activityById(state2, id3);
+  if (!activity) return 0;
+  let elapsed = Math.max(0, Number(activity.activeMs) || 0);
+  if (visible && activity.active && !activity.end) {
+    const last = Number(activity.lastTouch) || Number(activity.start) || now;
+    elapsed += Math.max(0, Math.min(now - last, MAX_ACTIVE_GAP_MS));
+  }
+  return elapsed;
+}
+function activityTotalMs(state2, { mode = null, date = null } = {}) {
+  return (state2?.activities || []).reduce((sum, activity) => {
+    if (mode && activity.mode !== mode) return sum;
+    if (date && activity.date !== date) return sum;
+    return sum + Math.max(0, Number(activity.activeMs) || 0);
+  }, 0);
+}
+function activityMinutes(state2, mode = null, date = null) {
+  const ms = activityTotalMs(state2, { mode, date });
+  return ms ? Math.max(1, Math.round(ms / 6e4)) : 0;
+}
+function formatStudyTime(ms) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms) / 1e3));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+function normalizeActivities(value, preserveDate, dayKey2) {
+  const now = Date.now();
+  return (Array.isArray(value) ? value : []).map((activity) => ({
+    ...activity,
+    date: preserveDate && activity.date ? activity.date : dayKey2(Number(activity.start) || Number(activity.lastTouch) || now),
+    start: Number(activity.start) || now,
+    lastTouch: Number(activity.lastTouch) || Number(activity.start) || now,
+    activeMs: Math.max(0, Number(activity.activeMs) || 0),
+    active: false,
+    end: activity.end ? Number(activity.end) : null
+  }));
+}
+
 // src/storage.js
 var DB_NAME = "listenwrite-v3";
 var DB_VERSION = 1;
@@ -2733,12 +2833,6 @@ function reindexEvents(events) {
   }
   return events;
 }
-function normalizeActivities(list, preserveDate) {
-  return (Array.isArray(list) ? list : []).map((a) => ({
-    ...a,
-    date: preserveDate && a.date ? a.date : calendarDayKey(Number(a.start) || Number(a.lastTouch) || Date.now())
-  }));
-}
 function normalizeSentenceSession(value) {
   if (!value || typeof value !== "object") return null;
   const updatedAt = Number(value.updatedAt) || 0;
@@ -2783,7 +2877,7 @@ function normalizeState(input) {
   const inferredErrorBooks = new Set(Array.isArray(input?.errorBooks) ? input.errorBooks.map(String).filter(Boolean) : []);
   for (const word of state2.words) for (const source of word.sources || []) if (/错题|错词|error/i.test(source)) inferredErrorBooks.add(source);
   state2.errorBooks = [...inferredErrorBooks];
-  state2.activities = normalizeActivities(input?.activities, preserveDates);
+  state2.activities = normalizeActivities(input?.activities, preserveDates, calendarDayKey);
   state2.dailyPlans = {};
   if (inputVersion >= 4 && input?.dailyPlans && typeof input.dailyPlans === "object" && !Array.isArray(input.dailyPlans)) {
     for (const [key, plan] of Object.entries(input.dailyPlans)) state2.dailyPlans[key] = normalizePlan(plan, key);
@@ -3756,6 +3850,7 @@ var saveFailureShown = false;
 var todayPlanPanelOpen = false;
 var typeFilterPanelOpen = false;
 var sentenceDraftTimer = null;
+var studyTimerInterval = null;
 var SENTENCE_DRAFT_KEY = "listenwrite-v3-sentence-session-draft";
 function currentDayKey(ts = Date.now()) {
   return state ? activeStudyDayKey(state, ts) : dayKey(ts);
@@ -3868,24 +3963,45 @@ function speak(text, rateOverride = null) {
   speechSynthesis.speak(u);
 }
 function startActivity(mode, label, books = []) {
-  const a = { id: uid("act"), mode, label, books: [...books], date: currentDayKey(), start: Date.now(), lastTouch: Date.now(), activeMs: 0 };
-  state.activities.push(a);
+  const id3 = startStudyActivity(state, mode, label, books);
+  setStudyActivityDate(state, id3, currentDayKey());
   persist();
-  return a.id;
+  return id3;
 }
 function touchActivity(id3) {
-  const a = state.activities.find((x) => x.id === id3);
-  if (!a) return;
-  const now = Date.now();
-  const last = a.lastTouch || a.start || now;
-  a.activeMs = (a.activeMs || 0) + Math.max(0, Math.min(now - last, 9e4));
-  a.lastTouch = now;
+  if (!id3) return;
+  flushStudyActivity(state, id3);
   persist();
 }
-function activityMinutes(mode = null, date = currentDayKey()) {
-  const list = state.activities.filter((a) => a.date === date && (!mode || a.mode === mode));
-  const ms = list.reduce((sum, a) => sum + (a.activeMs || Math.max(0, (a.end || a.start) - a.start) || 0), 0);
-  return ms ? Math.max(1, Math.round(ms / 6e4)) : 0;
+function finishActivity(id3) {
+  if (!id3) return;
+  finishStudyActivity(state, id3);
+  persist();
+}
+function activityMinutes2(mode = null, date = currentDayKey()) {
+  return activityMinutes(state, mode, date);
+}
+function activeStudyActivityId() {
+  return listen?.activityId || typeRun?.activityId || wholeSentenceRun?.activityId || sentenceRun?.activityId || freeListen?.activityId || null;
+}
+function mountStudyTimer(activityId) {
+  clearInterval(studyTimerInterval);
+  studyTimerInterval = null;
+  if (!activityId) return;
+  let badge = document.getElementById("studyTimer");
+  if (!badge) {
+    badge = document.createElement("div");
+    badge.id = "studyTimer";
+    badge.className = "study-timer";
+    document.querySelector(".immersive")?.appendChild(badge);
+  }
+  const draw = () => {
+    const el = document.getElementById("studyTimer");
+    if (el) el.textContent = "\u672C\u8F6E " + formatStudyTime(studyActivityElapsedMs(state, activityId, Date.now(), !document.hidden));
+  };
+  draw();
+  studyTimerInterval = setInterval(draw, 1e3);
+  studyTimerInterval?.unref?.();
 }
 function navHtml() {
   const items = [["home", "\u9996\u9875"], ["today", "\u4ECA\u65E5"], ["type", "\u624B\u6253"], ["text", "\u6587\u672C"], ["library", "\u8BCD\u5E93"]];
@@ -4000,7 +4116,7 @@ function renderToday() {
   persist();
   const prog = sessionProgress(state, plan, null);
   const td = todayListeningStats(state, books, date);
-  const mins = activityMinutes("listen", date);
+  const mins = activityMinutes2("listen", date);
   const selectedText = books.length ? books.join("\u3001") : "\u5168\u90E8\u8BCD\u4E66";
   const currentSeg = currentSequentialSegment(state, plan);
   const sequentialRows = plan.mode === "sequential" ? (plan.bookSegments || []).map((seg, i) => {
@@ -4138,6 +4254,7 @@ function renderListen() {
       touchActivity(listen.activityId);
       advanceListen();
     };
+    mountStudyTimer(listen.activityId);
     return;
   }
   const p = sessionProgress(state, listen.plan, listen.session);
@@ -4176,6 +4293,7 @@ function renderListen() {
     listen.answer = false;
     advanceListen();
   };
+  mountStudyTimer(listen.activityId);
   document.getElementById("judgeGood").onclick = () => judgeListen("good");
   document.getElementById("judgeBad").onclick = () => judgeListen("bad");
   if (answer) {
@@ -4233,7 +4351,9 @@ function advanceListen() {
   persist();
   const p = sessionProgress(state, listen.plan, listen.session);
   root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>\u4ECA\u65E5\u542C\u97F3\u5B8C\u6210</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.newDone}/${p.newTotal}</b><span>\u65B0\u8BCD</span></div><div class="statbox"><b>${p.reviewDone}/${p.reviewTotal}</b><span>\u590D\u4E60</span></div><div class="statbox"><b>${p.retry}</b><span>\u5F85\u5DE9\u56FA</span></div></div><button id="finishListen" class="primary">\u56DE\u5230\u4ECA\u65E5</button></div></div></main>`;
+  mountStudyTimer(listen.activityId);
   document.getElementById("finishListen").onclick = () => {
+    finishActivity(listen.activityId);
     listen = null;
     view = "today";
     renderToday();
@@ -4262,7 +4382,7 @@ function renderType() {
   const books = state.settings.typeBooks || [];
   const auto = typePreset("auto"), n = typePreset("todayNew"), rv = typePreset("todayReview"), l = typePreset("todayListen"), t = typePreset("todayType"), r = typePreset("repeat7");
   const typedToday = new Set(state.events.filter((e) => e.date === currentDayKey() && e.mode === "type").map((e) => e.wordId)).size;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u624B\u6253\u5F3A\u5316</h2><p>\u65B0\u8BCD\u548C\u590D\u4E60\u8BCD\u5206\u5F00\u770B\uFF1B\u53EA\u628A\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u653E\u8FDB\u201C\u4ECA\u65E5\u65B0\u8BCD/\u590D\u4E60\u201D\uFF0C\u4E0D\u4F1A\u63D0\u524D\u6CC4\u9732\u8FD8\u6CA1\u51B7\u542F\u52A8\u7684\u65B0\u8BCD\u3002</p></div><span class="tag">${books.length ? `${books.length} \u672C\u8BCD\u4E66` : "\u5168\u90E8\u8BCD\u4E66"}</span></div><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${n.length}</b><span>\u4ECA\u65E5\u65B0\u8BCD\u53EF\u624B\u6253</span></div><div class="statbox"><b>${rv.length}</b><span>\u4ECA\u65E5\u590D\u4E60\u53EF\u624B\u6253</span></div><div class="statbox"><b>${auto.length}</b><span>\u5EFA\u8BAE\u5F3A\u5316</span></div><div class="statbox"><b>${typedToday}</b><span>\u4ECA\u65E5\u5DF2\u624B\u6253</span></div></div><div class="small" style="margin-top:9px">\u624B\u6253\u7528\u65F6 ${activityMinutes("type")} \u5206\u949F</div><div class="row" style="margin-top:15px"><button id="typeStartAuto" class="primary">\u5F00\u59CB\u5EFA\u8BAE\u5F3A\u5316${auto.length ? ` \xB7 ${Math.min(30, auto.length)}` : ""}</button></div><details id="typeFilterDetails" class="details" ${typeFilterPanelOpen ? "open" : ""}><summary>\u8BCD\u4E66\u8303\u56F4\u4E0E\u9AD8\u7EA7\u7B5B\u9009</summary><div style="margin-top:12px">${bookChips(books, "type")}<div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u6307\u5B9A\u65E5\u671F</label><input id="typeDate" type="date" value="${currentDayKey()}"></div><div class="field"><label>\u5931\u8D25\u6765\u6E90</label><select id="typeMode"><option value="all">\u542C\u97F3 + \u624B\u6253</option><option value="listen">\u53EA\u770B\u542C\u97F3</option><option value="type">\u53EA\u770B\u624B\u6253</option></select></div><div class="field"><label>\u81F3\u5C11\u4E0D\u719F\u6B21\u6570</label><select id="typeMin"><option>1</option><option>2</option><option>3</option><option>5</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="typeLimit"><option>20</option><option selected>50</option><option>100</option><option value="0">\u5168\u90E8</option></select></div></div><div id="customTypePreview" style="margin-top:12px"></div></div></details></section><section class="card"><h2 class="section-title">\u6309\u65B0\u8BCD / \u590D\u4E60\u8FDB\u5165</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayNew"><span class="num">${n.length}</span><b>\u4ECA\u65E5\u65B0\u8BCD</b><span class="small">\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u65B0\u8BCD</span></button><button data-type-preset="todayReview"><span class="num">${rv.length}</span><b>\u4ECA\u65E5\u590D\u4E60\u8BCD</b><span class="small">\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u590D\u4E60\u8BCD</span></button></div></section><section class="card"><h2 class="section-title">\u56F0\u96BE\u8BCD\u5FEB\u6377\u5165\u53E3</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayListen"><span class="num">${l.length}</span><b>\u4ECA\u65E5\u542C\u97F3\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u542C\u97F3\u9636\u6BB5\u66B4\u9732\u51FA\u6765\u7684\u8BCD</span></button><button data-type-preset="todayType"><span class="num">${t.length}</span><b>\u4ECA\u65E5\u624B\u6253\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u624B\u6253\u540E\u4ECD\u7136\u5361\u4F4F</span></button><button data-type-preset="repeat7"><span class="num">${r.length}</span><b>\u8FD1 7 \u5929\u53CD\u590D\u4E0D\u719F</b><span class="small">\u8FD1\u671F\u91CD\u590D\u5931\u8D25\u7684\u8BCD</span></button><button data-type-preset="auto"><span class="num">${auto.length}</span><b>\u5168\u90E8\u56F0\u96BE\u8BCD</b><span class="small">\u6309\u8DE8\u5929\u5931\u8D25\u4E0E\u53EF\u63D0\u53D6\u7387\u6392\u5E8F</span></button></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u624B\u6253\u5F3A\u5316</h2><p>\u65B0\u8BCD\u548C\u590D\u4E60\u8BCD\u5206\u5F00\u770B\uFF1B\u53EA\u628A\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u8BCD\u653E\u8FDB\u201C\u4ECA\u65E5\u65B0\u8BCD/\u590D\u4E60\u201D\uFF0C\u4E0D\u4F1A\u63D0\u524D\u6CC4\u9732\u8FD8\u6CA1\u51B7\u542F\u52A8\u7684\u65B0\u8BCD\u3002</p></div><span class="tag">${books.length ? `${books.length} \u672C\u8BCD\u4E66` : "\u5168\u90E8\u8BCD\u4E66"}</span></div><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${n.length}</b><span>\u4ECA\u65E5\u65B0\u8BCD\u53EF\u624B\u6253</span></div><div class="statbox"><b>${rv.length}</b><span>\u4ECA\u65E5\u590D\u4E60\u53EF\u624B\u6253</span></div><div class="statbox"><b>${auto.length}</b><span>\u5EFA\u8BAE\u5F3A\u5316</span></div><div class="statbox"><b>${typedToday}</b><span>\u4ECA\u65E5\u5DF2\u624B\u6253</span></div></div><div class="small" style="margin-top:9px">\u624B\u6253\u7528\u65F6 ${activityMinutes2("type")} \u5206\u949F</div><div class="row" style="margin-top:15px"><button id="typeStartAuto" class="primary">\u5F00\u59CB\u5EFA\u8BAE\u5F3A\u5316${auto.length ? ` \xB7 ${Math.min(30, auto.length)}` : ""}</button></div><details id="typeFilterDetails" class="details" ${typeFilterPanelOpen ? "open" : ""}><summary>\u8BCD\u4E66\u8303\u56F4\u4E0E\u9AD8\u7EA7\u7B5B\u9009</summary><div style="margin-top:12px">${bookChips(books, "type")}<div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u6307\u5B9A\u65E5\u671F</label><input id="typeDate" type="date" value="${currentDayKey()}"></div><div class="field"><label>\u5931\u8D25\u6765\u6E90</label><select id="typeMode"><option value="all">\u542C\u97F3 + \u624B\u6253</option><option value="listen">\u53EA\u770B\u542C\u97F3</option><option value="type">\u53EA\u770B\u624B\u6253</option></select></div><div class="field"><label>\u81F3\u5C11\u4E0D\u719F\u6B21\u6570</label><select id="typeMin"><option>1</option><option>2</option><option>3</option><option>5</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="typeLimit"><option>20</option><option selected>50</option><option>100</option><option value="0">\u5168\u90E8</option></select></div></div><div id="customTypePreview" style="margin-top:12px"></div></div></details></section><section class="card"><h2 class="section-title">\u6309\u65B0\u8BCD / \u590D\u4E60\u8FDB\u5165</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayNew"><span class="num">${n.length}</span><b>\u4ECA\u65E5\u65B0\u8BCD</b><span class="small">\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u65B0\u8BCD</span></button><button data-type-preset="todayReview"><span class="num">${rv.length}</span><b>\u4ECA\u65E5\u590D\u4E60\u8BCD</b><span class="small">\u4ECA\u5929\u5DF2\u7ECF\u542C\u8FC7\u7684\u590D\u4E60\u8BCD</span></button></div></section><section class="card"><h2 class="section-title">\u56F0\u96BE\u8BCD\u5FEB\u6377\u5165\u53E3</h2><div class="quick" style="margin-top:12px"><button data-type-preset="todayListen"><span class="num">${l.length}</span><b>\u4ECA\u65E5\u542C\u97F3\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u542C\u97F3\u9636\u6BB5\u66B4\u9732\u51FA\u6765\u7684\u8BCD</span></button><button data-type-preset="todayType"><span class="num">${t.length}</span><b>\u4ECA\u65E5\u624B\u6253\u4E0D\u719F</b><span class="small">\u4ECA\u5929\u624B\u6253\u540E\u4ECD\u7136\u5361\u4F4F</span></button><button data-type-preset="repeat7"><span class="num">${r.length}</span><b>\u8FD1 7 \u5929\u53CD\u590D\u4E0D\u719F</b><span class="small">\u8FD1\u671F\u91CD\u590D\u5931\u8D25\u7684\u8BCD</span></button><button data-type-preset="auto"><span class="num">${auto.length}</span><b>\u5168\u90E8\u56F0\u96BE\u8BCD</b><span class="small">\u6309\u8DE8\u5929\u5931\u8D25\u4E0E\u53EF\u63D0\u53D6\u7387\u6392\u5E8F</span></button></div></section></div>`);
   const typeFilterDetails = document.getElementById("typeFilterDetails");
   if (typeFilterDetails) typeFilterDetails.ontoggle = () => {
     typeFilterPanelOpen = typeFilterDetails.open;
@@ -4333,11 +4453,13 @@ function renderTypeRun() {
         speak(wordById(typeRun.session.current.wordId).en);
       }
     };
+    mountStudyTimer(typeRun.activityId);
     return;
   }
   root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">${p.done} / ${p.total}${p.bad ? `\u3000\u5F85\u5DE9\u56FA ${p.bad}` : ""} \xB7 ${esc(typeRun.label)}</div></div><div class="studybody"><button id="typeSpeak" class="speaker">\u25D6))</button>${!typeRun.answer ? `<div class="small">\u542C\u97F3\u540E\u5199\u51FA\u4F60\u76F4\u63A5\u60F3\u5230\u7684\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="typeAnswer" style="font-size:21px;text-align:center" placeholder="\u5199\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u2026" autocomplete="off"><div class="grid2" style="margin-top:10px"><button id="typeSubmit" class="primary">\u63D0\u4EA4</button><button id="typeReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${typeRun.result === "good" ? "good" : typeRun.result === "bad" ? "bad" : ""}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc(w.pos)}${w.def ? ` \xB7 ${esc(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc(s)}</span>`).join("")}</div><div class="typed"><b>\u4F60\u521A\u624D\u5199\u7684\u662F</b><div>${esc(typeRun.input || "\uFF08\u76F4\u63A5\u770B\u4E86\u7B54\u6848\uFF09")}</div></div><div class="judges"><button id="typeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="typeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div><div class="move"><button id="typeReplay" class="soft">\u91CD\u542C</button><button id="typeNext" class="primary" ${typeRun.result ? "" : "disabled"}>\u4E0B\u4E00\u8BCD</button></div>${gapShortfall ? `<div class="statusline">\u961F\u5217\u5DF2\u5230\u5C3E\u90E8\uFF0C\u53EF\u7528\u95F4\u9694\u8BCD\u4E0D\u8DB3\uFF0C\u8FD8\u5DEE\u7EA6 ${gapShortfall} \u4E2A\uFF1B\u4ECD\u9700\u91CD\u65B0\u5224\u65AD\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u7B97\u901A\u8FC7\u3002</div>` : ""}<div class="statusline">\u4E0D\u81EA\u52A8\u5224\u4E2D\u6587\u540C\u4E49\u8BCD\u5BF9\u9519\uFF1B\u719F\u6089/\u4E0D\u719F\u6089\u4ECD\u7136\u4F5C\u7528\u4E8E\u540C\u4E00\u4E2A\u5355\u8BCD\u5386\u53F2\u3002</div>`}</div></main>`;
+  mountStudyTimer(typeRun.activityId);
   document.getElementById("typeBack").onclick = () => {
-    touchActivity(typeRun.activityId);
+    finishActivity(typeRun.activityId);
     typeRun = null;
     view = "type";
     renderType();
@@ -4410,7 +4532,9 @@ function finishType() {
     typeRun = null;
     startType(copy, label);
   };
+  mountStudyTimer(typeRun.activityId);
   document.getElementById("finishType").onclick = () => {
+    finishActivity(typeRun.activityId);
     typeRun = null;
     view = "type";
     renderType();
@@ -4616,7 +4740,8 @@ function startWholeSentenceEntry(bookId, entryId, { returnTextId = null, preserv
   if (!preserveQueue) wholeQueue = [];
   const { book, entry } = getSentenceEntry(state, bookId, entryId);
   if (!book || !entry) return toast("\u6CA1\u6709\u627E\u5230\u8FD9\u53E5\u8BB0\u5F55");
-  wholeSentenceRun = { bookId, entryId, returnTextId, input: "", alignment: null, revealed: false, peek: false };
+  const priorActivity = preserveQueue ? wholeSentenceRun?.activityId : null;
+  wholeSentenceRun = { bookId, entryId, returnTextId, input: "", alignment: null, revealed: false, peek: false, activityId: priorActivity || startActivity("sentence", "\u6574\u53E5\u542C\u5199", []) };
   sentenceRun = null;
   persist();
   renderWholeSentenceRun();
@@ -4632,7 +4757,8 @@ function startWholeSequence(items, returnTextId = null) {
 function continueWholeSequence(run) {
   if (wholeQueue.length) {
     const next = wholeQueue.shift();
-    wholeSentenceRun = null;
+    const activityId = run?.activityId || null;
+    wholeSentenceRun = { activityId };
     startWholeSentenceEntry(next.bookId, next.entryId, { returnTextId: run?.returnTextId || null, preserveQueue: true });
     return;
   }
@@ -4658,6 +4784,7 @@ function wholeDiffHtml(alignment) {
   return `<div class="sentence-diff">${alignment.operations.map((op) => op.type === "equal" ? `<span class="equal">${esc(op.expected)}</span>` : op.type === "replace" ? `<span class="replace">${esc(op.expected)} \u2192 ${esc(op.actual)}</span>` : op.type === "missing" ? `<span class="missing">${esc(op.expected)}\uFF08\u6F0F\uFF09</span>` : `<span class="extra">+ ${esc(op.actual)}</span>`).join("")}</div>`;
 }
 function returnFromWholeSentenceRun(run) {
+  finishActivity(run?.activityId);
   wholeSentenceRun = null;
   wholeQueue = [];
   persist();
@@ -4681,6 +4808,7 @@ function renderWholeSentenceRun() {
   const st = sentenceStateInfo(entry), modeStatus = st.whole;
   const problems = sentenceProblemTokens(entry).filter((token) => !isSimpleLexeme(state, token.normalized || token.surface));
   root.innerHTML = `<main class="immersive"><div class="studytop"><button id="wholeBack" class="back">\u2039</button><div class="studyprogress">\u6574\u53E5\u542C\u5199 \xB7 ${esc(sentenceSourceLabel(entry))}</div><button id="wholeIgnore" class="retire">${st.status === "ignored" ? "\u6062\u590D\u672C\u53E5" : "\u5FFD\u7565\u672C\u53E5"}</button></div><div class="studybody" style="max-width:820px"><span class="sentence-state ${modeStatus.status}">\u6574\u53E5 ${modeStatus.label}</span><button id="wholeSpeak" class="speaker">\u25D6))</button><button id="wholeSlow" class="soft" style="margin-top:8px">\u6162\u901F\u91CD\u542C \xB7 0.75\xD7</button>${!run.revealed ? `<div class="small">\u5148\u542C\u5B8C\u6574\u53E5\u5B50\uFF0C\u518D\u628A\u6574\u53E5\u5199\u4E0B\u6765\u3002\u6807\u70B9\u4E0D\u53C2\u4E0E\u5BF9\u9519\uFF1B\u6309\u5355\u8BCD\u987A\u5E8F\u505A\u5BF9\u9F50\u3002</div><textarea id="wholeSentenceAnswer" class="whole-answer" placeholder="\u8F93\u5165\u4F60\u542C\u5230\u7684\u5B8C\u6574\u82F1\u6587\u53E5\u5B50\u2026" autocomplete="off" autocapitalize="off">${esc(run.input)}</textarea><div class="grid2" style="width:100%;max-width:720px;margin-top:10px"><button id="wholeSubmit" class="primary">\u63D0\u4EA4\u6574\u53E5</button><button id="wholeReveal" class="soft">\u770B\u539F\u53E5</button></div>` : `${run.peek ? `<div class="small">\u672C\u6B21\u76F4\u63A5\u770B\u4E86\u539F\u53E5\uFF0C\u8FD9\u53E5\u6807\u8BB0\u4E3A\u201C\u9700\u91CD\u7EC3\u201D\u3002</div><div class="sentence" style="max-width:720px">${esc(entry.text)}</div>` : `<div class="small">${run.alignment?.correct ? "\u6574\u53E5\u6B63\u786E" : "\u6309\u5355\u8BCD\u5BF9\u9F50\u7ED3\u679C\u5982\u4E0B"}</div>${wholeDiffHtml(run.alignment)}<div class="typed" style="max-width:720px"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(run.input || "\uFF08\u7A7A\uFF09")}</div></div>`}<div class="sentence-mode-row" style="justify-content:center"><button id="wholeReplay" class="soft">\u91CD\u542C\u6574\u53E5</button><button id="wholeRedoSplit" class="soft">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button>${problems.length ? `<button id="wholeProblems" class="soft">\u53EA\u7EC3\u9519\u8BCD \xB7 ${problems.length}</button>` : ""}<button id="wholeRetry" class="primary">\u518D\u5199\u4E00\u6B21\u6574\u53E5</button><button id="wholeFinish" class="soft">${wholeQueue.length ? `\u4E0B\u4E00\u53E5 \xB7 ${wholeQueue.length}` : `\u8FD4\u56DE`}</button></div>`}</div></main>`;
+  mountStudyTimer(run.activityId);
   document.getElementById("wholeBack").onclick = () => returnFromWholeSentenceRun(run);
   document.getElementById("wholeSpeak").onclick = () => speak(entry.text);
   document.getElementById("wholeSlow").onclick = () => speak(entry.text, (Number(state.settings.speechRate) || 0.92) * 0.75);
@@ -4777,7 +4905,7 @@ function startSentenceProblemRows(rows, unique3 = true, label = "\u53E5\u5B50\u9
   startSentenceItems(items, label, { returnTextId });
 }
 function startSentenceItems(items, label, { returnTextId = null, skippedSimple = 0 } = {}) {
-  sentenceRun = { items: [...items], cursor: 0, label, input: "", result: null, revealed: false, lookups: 0, correct: 0, returnTextId, skippedSimple, completed: false };
+  sentenceRun = { items: [...items], cursor: 0, label, input: "", result: null, revealed: false, lookups: 0, correct: 0, returnTextId, skippedSimple, completed: false, activityId: startActivity("sentence", "\u62C6\u8BCD\u542C\u5199", []) };
   wholeSentenceRun = null;
   wholeQueue = [];
   persist();
@@ -4818,6 +4946,7 @@ function sentenceRunProblemItems(run, unique3 = true) {
   return out;
 }
 function returnFromSentenceRun(run) {
+  finishActivity(run?.activityId);
   sentenceRun = null;
   persist();
   if (run?.returnTextId) {
@@ -4853,6 +4982,7 @@ function renderSentenceRun() {
   const sameIndexes = entry.tokens.map((x, i) => ({ x, i })).filter(({ x }) => (x.normalized || String(x.surface).toLowerCase()) === (token.normalized || String(token.surface).toLowerCase())).map(({ i }) => i);
   const duplicateNote = sameIndexes.length > 1 ? ` \xB7 \u540C\u8BCD\u7B2C ${sameIndexes.indexOf(tokenIndex) + 1}/${sameIndexes.length} \u6B21` : "";
   root.innerHTML = `<main class="immersive"><div class="studytop"><button id="sentenceBack" class="back">\u2039</button><div class="studyprogress">${sentenceRun.cursor + 1} / ${sentenceRun.items.length} \xB7 ${esc(sentenceRun.label || book.name)}</div></div><div class="studybody"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${splitState.status}">\u62C6\u8BCD ${splitState.label}</span><span class="small">${esc(sentenceSourceLabel(entry))}${duplicateNote}${sentenceRun.skippedSimple ? ` \xB7 \u5DF2\u8DF3\u8FC7\u7B80\u5355\u8BCD ${sentenceRun.skippedSimple}` : ""}</span></div><button id="sentenceSpeak" class="speaker">\u25D6))</button>${!sentenceRun.revealed ? `<div class="small">\u542C\u5355\u8BCD\uFF0C\u5199\u51FA\u82F1\u6587\u62FC\u5199\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="sentenceAnswer" style="font-size:21px;text-align:center" placeholder="\u8F93\u5165\u82F1\u6587\u62FC\u5199\u2026" autocomplete="off" autocapitalize="off"><div class="grid2" style="margin-top:10px"><button id="sentenceSubmit" class="primary">\u63D0\u4EA4</button><button id="sentenceReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${sentenceRun.result === "good" ? "good" : "bad"}">${esc(token.surface)}</div><div class="typed"><b>\u4F60\u5199\u7684\u662F</b><div>${esc(sentenceRun.input || "\uFF08\u76F4\u63A5\u770B\u7B54\u6848\uFF09")}</div></div><div class="statusline">${sentenceRun.result === "good" ? "\u62FC\u5199\u6B63\u786E" : "\u5DF2\u663E\u793A\u6B63\u786E\u62FC\u5199"} \xB7 \u518D\u6807\u8BB0\u771F\u5B9E\u719F\u6089\u5EA6</div><div class="judges" style="grid-template-columns:repeat(3,1fr)"><button id="sentenceFamiliar" class="${status === "familiar" ? "goodbtn" : "soft"}">\u719F\u6089</button><button id="sentenceUnfamiliar" class="${status === "unfamiliar" ? "badbtn" : "soft"}">\u4E0D\u719F\u6089</button><button id="sentenceUnknown" class="${status === "unknown" ? "badbtn" : "soft"}">\u4E0D\u8BA4\u8BC6</button></div><div class="move"><button id="sentenceSimple" class="soft">\u6807\u8BB0\u7B80\u5355</button><button id="sentenceReplay" class="soft">\u91CD\u542C</button><button id="sentenceNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>`}</div></main>`;
+  mountStudyTimer(sentenceRun.activityId);
   document.getElementById("sentenceBack").onclick = () => {
     persist();
     const run = sentenceRun;
@@ -4959,6 +5089,7 @@ function finishSentenceRun() {
     const returnTextId = run.returnTextId;
     startSentenceItems(redoItems, "\u672C\u8F6E\u53E5\u5B50\u9519\u8BCD", { returnTextId });
   };
+  mountStudyTimer(run.activityId);
   document.getElementById("finishSentence").onclick = () => returnFromSentenceRun(run);
 }
 function drawTextList() {
@@ -5235,7 +5366,7 @@ function startFreeListen(book, { scope = "all", limit = 0, resume = false } = {}
   if (!ids.length) return toast(scope === "unheard" ? "\u8FD9\u672C\u8BCD\u4E66\u6CA1\u6709\u201C\u4ECE\u672A\u6B63\u5F0F\u542C\u8FC7\u201D\u7684\u8BCD" : "\u8FD9\u672C\u8BCD\u4E66\u6CA1\u6709\u53EF\u81EA\u7531\u542C\u7684\u8BCD");
   const saved = freeProgressMap()[book];
   let index = resume && saved && saved.scope === scope && Number(saved.limit || 0) === Number(limit || 0) ? Math.max(0, Math.min(ids.length - 1, Number(saved.index) || 0)) : 0;
-  freeListen = { book, ids, index, scope, limit: Number(limit) || 0, revealed: false, result: null, bad: [] };
+  freeListen = { book, ids, index, scope, limit: Number(limit) || 0, revealed: false, result: null, bad: [], activityId: startActivity("free", `\u81EA\u7531\u542C \xB7 ${book}`, [book]) };
   saveFreeProgress();
   renderFreeListen();
   speak(wordById(ids[index]).en);
@@ -5243,7 +5374,7 @@ function startFreeListen(book, { scope = "all", limit = 0, resume = false } = {}
 function startFreeListenBatch(ids, label = "\u672C\u8F6E\u53E5\u5B50\u9519\u8BCD") {
   ids = [...new Set(ids || [])].filter((id3) => wordById(id3) && !wordById(id3).retired);
   if (!ids.length) return toast("\u8FD9\u6279\u6CA1\u6709\u53EF\u81EA\u7531\u542C\u7684\u8BCD");
-  freeListen = { book: label, ids, index: 0, scope: "batch", limit: ids.length, revealed: false, result: null, bad: [], batch: true };
+  freeListen = { book: label, ids, index: 0, scope: "batch", limit: ids.length, revealed: false, result: null, bad: [], batch: true, activityId: startActivity("free", label, []) };
   renderFreeListen();
   speak(wordById(ids[0]).en);
 }
@@ -5254,7 +5385,9 @@ function renderFreeListen() {
   const w = freeListenCurrent();
   if (!freeListen || !w) return finishFreeListen();
   root.innerHTML = `<main class="immersive"><div class="studytop"><button id="freeBack" class="back">\u2039</button><div class="studyprogress">\u81EA\u7531\u542C \xB7 ${esc(freeListen.book)} \xB7 ${freeListen.index + 1}/${freeListen.ids.length}</div><div></div></div><div class="studybody"><div class="small">\u672C\u6A21\u5F0F\u4E0D\u5199\u5165 FSRS\u3001\u4E0D\u5360\u4ECA\u65E5\u8BA1\u5212\uFF1B\u9000\u51FA\u540E\u53EF\u4EE5\u4ECE\u672C\u4E66\u4E0A\u6B21\u4F4D\u7F6E\u7EE7\u7EED\u3002</div><button id="freeSpeak" class="speaker">\u25D6))</button>${freeListen.revealed ? `<div class="word ${freeListen.result === "good" ? "good" : "bad"}">${esc(w.en)}</div><div class="meaning">${esc(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div><div class="move"><button id="freePrev" class="soft" ${freeListen.index === 0 ? "disabled" : ""}>\u4E0A\u4E00\u8BCD</button><button id="freeReplay" class="soft">\u91CD\u542C</button><button id="freeNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>` : `<div class="small">\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div><div class="judges"><button id="freeGood" class="goodbtn">\u719F\u6089</button><button id="freeBad" class="badbtn">\u4E0D\u719F\u6089</button></div>`}</div></main>`;
+  mountStudyTimer(freeListen.activityId);
   document.getElementById("freeBack").onclick = () => {
+    finishActivity(freeListen.activityId);
     saveFreeProgress();
     freeListen = null;
     view = "library";
@@ -5328,6 +5461,7 @@ function addFreeBadToToday(ids) {
 function finishFreeListen() {
   if (!freeListen) return;
   const run = freeListen;
+  finishActivity(run.activityId);
   const bad = [...run.bad];
   if (!run.batch) freeProgressMap()[run.book] = { scope: run.scope, limit: run.limit, index: 0, updatedAt: Date.now(), completedAt: Date.now() };
   persist();
@@ -5453,8 +5587,8 @@ function filteredEvents() {
   return state.events.filter((e) => e.date >= key);
 }
 function renderStats() {
-  const E = filteredEvents(), cold = E.filter((e) => e.cold), good = cold.filter((e) => e.result === "good").length, listenCold = cold.filter((e) => e.mode === "listen"), typeCold = cold.filter((e) => e.mode === "type"), uniq = new Set(E.map((e) => e.wordId)).size, forecast = dueForecast(state, 7);
-  shell(`<div class="stack"><section><div class="toolbar"><button class="chip ${statRange === 7 ? "on" : ""}" data-range="7">7\u5929</button><button class="chip ${statRange === 30 ? "on" : ""}" data-range="30">30\u5929</button><button class="chip ${statRange === 0 ? "on" : ""}" data-range="0">\u5168\u90E8</button></div></section><section class="grid4"><div class="statbox"><b>${pct(good, cold.length)}</b><span>\u9996\u8F6E\u719F\u6089\u7387</span></div><div class="statbox"><b>${uniq}</b><span>\u533A\u95F4\u5B66\u4E60\u8BCD\u6570</span></div><div class="statbox"><b>${pct(listenCold.filter((e) => e.result === "good").length, listenCold.length)}</b><span>\u542C\u97F3\u9996\u8F6E</span></div><div class="statbox"><b>${pct(typeCold.filter((e) => e.result === "good").length, typeCold.length)}</b><span>\u624B\u6253\u9996\u8F6E</span></div></section>${calendarHtml()}${dayDetailHtml()}<section class="card"><h2 class="section-title">\u672A\u6765 7 \u5929\u590D\u4E60\u91CF</h2><div class="forecast">${forecast.map((x, i) => {
+  const E = filteredEvents(), cold = E.filter((e) => e.cold), good = cold.filter((e) => e.result === "good").length, listenCold = cold.filter((e) => e.mode === "listen"), typeCold = cold.filter((e) => e.mode === "type"), uniq = new Set(E.map((e) => e.wordId)).size, forecast = dueForecast(state, 7), totalStudy = formatStudyTime(activityTotalMs(state, { date: statDay }));
+  shell(`<section class="card"><div class="space"><div><h2 class="section-title">${statDay} \u5B66\u4E60\u65F6\u957F</h2><div class="small">\u542C\u8BCD\u3001\u624B\u6253\u3001\u6574\u53E5\u3001\u62C6\u8BCD\u548C\u81EA\u7531\u542C\u7EDF\u4E00\u7D2F\u8BA1</div></div><b style="font-size:28px">${totalStudy}</b></div></section><div class="stack"><section><div class="toolbar"><button class="chip ${statRange === 7 ? "on" : ""}" data-range="7">7\u5929</button><button class="chip ${statRange === 30 ? "on" : ""}" data-range="30">30\u5929</button><button class="chip ${statRange === 0 ? "on" : ""}" data-range="0">\u5168\u90E8</button></div></section><section class="grid4"><div class="statbox"><b>${pct(good, cold.length)}</b><span>\u9996\u8F6E\u719F\u6089\u7387</span></div><div class="statbox"><b>${uniq}</b><span>\u533A\u95F4\u5B66\u4E60\u8BCD\u6570</span></div><div class="statbox"><b>${pct(listenCold.filter((e) => e.result === "good").length, listenCold.length)}</b><span>\u542C\u97F3\u9996\u8F6E</span></div><div class="statbox"><b>${pct(typeCold.filter((e) => e.result === "good").length, typeCold.length)}</b><span>\u624B\u6253\u9996\u8F6E</span></div></section>${calendarHtml()}${dayDetailHtml()}<section class="card"><h2 class="section-title">\u672A\u6765 7 \u5929\u590D\u4E60\u91CF</h2><div class="forecast">${forecast.map((x, i) => {
     const max = Math.max(1, ...forecast.map((y) => y.count));
     return `<div class="forecastrow"><span>${i === 0 ? "\u4ECA\u5929" : i === 1 ? "\u660E\u5929" : x.date.slice(5)}</span><div class="bar"><i style="width:${x.count * 100 / max}%"></i></div><b>${x.count}</b></div>`;
   }).join("")}</div></section>${hardWordsHtml(E)}</div>`);
@@ -5613,12 +5747,18 @@ window.addEventListener("keydown", (e) => {
   }
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && (wholeSentenceRun || sentenceRun)) {
+  const activityId = activeStudyActivityId();
+  if (document.hidden) {
+    if (activityId) pauseStudyActivity(state, activityId);
     const wholeInput = document.getElementById("wholeSentenceAnswer");
     if (wholeSentenceRun && wholeInput) wholeSentenceRun.input = wholeInput.value;
     const splitInput = document.getElementById("sentenceAnswer");
     if (sentenceRun && splitInput) sentenceRun.input = splitInput.value;
     persist();
+  } else if (activityId) {
+    resumeStudyActivity(state, activityId);
+    persist();
+    mountStudyTimer(activityId);
   }
 });
 (async function init() {
