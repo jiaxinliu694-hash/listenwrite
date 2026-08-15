@@ -300,6 +300,23 @@ export function problemTokensToTSV(tokens, { source = '句子错题本', sentenc
   return rows.join('\n');
 }
 
+function csvCell(value) {
+  const text = String(value ?? '').replace(/\r/g, ' ').replace(/\n/g, ' ');
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+export function problemTokensToCSV(tokens, { source = '句子错题本', sentence = '' } = {}) {
+  const rows = [['en','zh','pos','def','source','example']];
+  const seen = new Set();
+  for (const token of tokens) {
+    const en = token.normalized || normalizeLexeme(token.surface);
+    if (!en || seen.has(en)) continue;
+    seen.add(en);
+    rows.push([en, '', '', '', source, token.sentence || sentence || '']);
+  }
+  return '\ufeff' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+}
+
 export function normalizeSentenceBooks(value) {
   if (!Array.isArray(value)) return [];
   return value.map((book, bi) => ({
