@@ -2,7 +2,7 @@ name: Build Listenwrite v3
 
 on:
   push:
-    branches: [scheduler-v2-fsrs, main, v31-openable-csv-export]
+    branches: [scheduler-v2-fsrs, main]
 
 permissions:
   contents: write
@@ -12,28 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Apply v31 CSV export patch
-        if: github.ref_name == 'v31-openable-csv-export'
-        run: python scripts/apply-v31.py
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: npm install
-      - run: node --check src/app.js
-      - run: node --check src/sentencebooks.js
       - run: npm test
       - run: npm run build
-      - name: Commit v31 source and browser bundle
-        if: github.ref_name == 'v31-openable-csv-export'
-        run: |
-          if [ -z "$(git status --porcelain -- src/app.js src/sentencebooks.js tests/v31.test.js index.html app.bundle.js)" ]; then exit 0; fi
-          git config user.name "listenwrite-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add src/app.js src/sentencebooks.js tests/v31.test.js index.html app.bundle.js
-          git commit -m "Export sentence unfamiliar words as CSV"
-          git push
       - name: Commit browser bundle
-        if: github.ref_name != 'v31-openable-csv-export'
         run: |
           if [ -z "$(git status --porcelain -- app.bundle.js)" ]; then exit 0; fi
           git config user.name "listenwrite-bot"
