@@ -72,6 +72,32 @@ export function textUnfamiliarTokens(state, textId) {
     }));
 }
 
+export function textCollectionUnfamiliarTokens(state, collection) {
+  const name = String(collection || '未分类').trim() || '未分类';
+  const byLexeme = new Map();
+  for (const text of state?.texts || []) {
+    if ((String(text?.collection || '未分类').trim() || '未分类') !== name) continue;
+    for (const token of textUnfamiliarTokens(state, text.id)) {
+      const key = normalizeLexeme(token.normalized || token.surface);
+      if (!key) continue;
+      const current = byLexeme.get(key);
+      if (!current) {
+        byLexeme.set(key, {
+          ...token,
+          normalized: key,
+          sourceTextIds: [text.id],
+          occurrences: (token.occurrences || []).map((occurrence) => ({ ...occurrence })),
+        });
+        continue;
+      }
+      if (!current.sourceTextIds.includes(text.id)) current.sourceTextIds.push(text.id);
+      current.occurrences.push(...(token.occurrences || []).map((occurrence) => ({ ...occurrence })));
+      if (!current.sentence && token.sentence) current.sentence = token.sentence;
+    }
+  }
+  return [...byLexeme.values()].sort((a, b) => a.normalized.localeCompare(b.normalized));
+}
+
 export function textCollectionSummaries(state) {
   const groups = new Map();
   for (const text of state?.texts || []) {
