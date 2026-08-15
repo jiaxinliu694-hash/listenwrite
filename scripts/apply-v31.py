@@ -10,9 +10,9 @@ def replace_once(path, old, new):
 
 path='src/sentencebooks.js'
 marker='export function normalizeSentenceBooks(value) {'
-addition="""function csvCell(value) {
-  const text = String(value ?? '').replace(/\r?\n/g, ' ');
-  return /[\",\r\n]/.test(text) ? `\"${text.replace(/\"/g, '\"\"')}\"` : text;
+addition=r'''function csvCell(value) {
+  const text = String(value ?? '').replace(/\r/g, ' ').replace(/\n/g, ' ');
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 export function problemTokensToCSV(tokens, { source = '句子错题本', sentence = '' } = {}) {
@@ -27,7 +27,7 @@ export function problemTokensToCSV(tokens, { source = '句子错题本', sentenc
   return '\ufeff' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
 }
 
-"""
+'''
 replace_once(path,marker,addition+marker)
 
 path='src/app.js'
@@ -45,7 +45,7 @@ for old,new in repls.items():
 
 replace_once('index.html','app.bundle.js?v=30-manual-sentence-status','app.bundle.js?v=31-openable-csv')
 
-Path('tests/v31.test.js').write_text("""import test from 'node:test';
+Path('tests/v31.test.js').write_text(r'''import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { problemTokensToCSV } from '../src/sentencebooks.js';
@@ -53,7 +53,7 @@ import { problemTokensToCSV } from '../src/sentencebooks.js';
 test('sentence unfamiliar export is Excel/Numbers-friendly UTF-8 CSV with BOM',()=>{
   const csv=problemTokensToCSV([
     {normalized:'collars',sentence:'Collars, which were fitted, helped track them.'},
-    {normalized:'matriarch',sentence:'The \"matriarch\" led the group.'},
+    {normalized:'matriarch',sentence:'The "matriarch" led the group.'},
     {normalized:'collars',sentence:'duplicate'},
   ],{source:'剑18 · Test1Part4 · 当前不熟悉'});
   assert.equal(csv.charCodeAt(0),0xfeff);
@@ -71,4 +71,4 @@ test('text unfamiliar download buttons use csv rather than tsv',()=>{
   assert.ok(app.includes('-旧版不熟候选-${currentDayKey()}.csv'));
   assert.ok(app.includes("'text/csv;charset=utf-8'"));
 });
-""")
+''')
