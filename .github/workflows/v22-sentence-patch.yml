@@ -15,7 +15,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node scripts/v22_sentence_patch.mjs
+      - name: Check patcher syntax
+        run: python -m py_compile scripts/v22_sentence_patch.py
+      - name: Apply v22 sentence patch
+        run: python scripts/v22_sentence_patch.py
       - run: npm install
       - run: npm test
       - run: npm run build
@@ -23,7 +26,7 @@ jobs:
         run: |
           git config user.name "listenwrite-bot"
           git config user.email "actions@users.noreply.github.com"
-          git rm scripts/v22_sentence_patch.mjs .github/workflows/v22-sentence-patch.yml
+          git rm scripts/v22_sentence_patch.mjs scripts/v22_sentence_patch.py .github/workflows/v22-sentence-patch.yml
           git add src tests app.bundle.js
           git commit -m "Polish sentence daily-use flow"
           git push
