@@ -2,7 +2,7 @@ name: Build Listenwrite v3
 
 on:
   push:
-    branches: [scheduler-v2-fsrs, main]
+    branches: [scheduler-v2-fsrs, main, v29-collection-unfamiliar-export]
 
 permissions:
   contents: write
@@ -12,17 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: python scripts/apply-v29.py
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: npm install
+      - run: node --check src/app.js
+      - run: node --check src/textlibrary.js
       - run: npm test
       - run: npm run build
-      - name: Commit browser bundle
+      - name: Commit v29 source and browser bundle
         run: |
-          if [ -z "$(git status --porcelain -- app.bundle.js)" ]; then exit 0; fi
+          if [ -z "$(git status --porcelain -- src/app.js src/textlibrary.js tests/v27.test.js tests/v23_1.test.js tests/v24.test.js index.html app.bundle.js)" ]; then exit 0; fi
           git config user.name "listenwrite-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add app.bundle.js
-          git commit -m "Build browser bundle"
+          git add src/app.js src/textlibrary.js tests/v27.test.js tests/v23_1.test.js tests/v24.test.js index.html app.bundle.js
+          git commit -m "Add collection unfamiliar export"
           git push
