@@ -8,27 +8,9 @@ def replace_once(path, old, new):
         raise SystemExit(f'marker missing in {path}: {old[:140]!r}')
     p.write_text(text.replace(old, new, 1))
 
-# Add CSV serializer while keeping TSV import/export compatibility elsewhere.
 path='src/sentencebooks.js'
-insert="""export function problemTokensToTSV(tokens, { source = '句子错题本', sentence = '' } = {}) {
-  const rows = ['en\tzh\tpos\tdef\tsource\texample'];
-  const seen = new Set();
-  for (const token of tokens) {
-    const en = token.normalized || normalizeLexeme(token.surface);
-    if (!en || seen.has(en)) continue;
-    seen.add(en);
-    rows.push([
-      en,
-      '', '', '',
-      source,
-      token.sentence || sentence || '',
-    ].map(tsvCell).join('\t'));
-  }
-  return rows.join('\n');
-}
-"""
-addition=insert+"""
-function csvCell(value) {
+marker='export function normalizeSentenceBooks(value) {'
+addition="""function csvCell(value) {
   const text = String(value ?? '').replace(/\r?\n/g, ' ');
   return /[\",\r\n]/.test(text) ? `\"${text.replace(/\"/g, '\"\"')}\"` : text;
 }
@@ -44,8 +26,9 @@ export function problemTokensToCSV(tokens, { source = '句子错题本', sentenc
   }
   return '\ufeff' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
 }
+
 """
-replace_once(path,insert,addition)
+replace_once(path,marker,addition+marker)
 
 path='src/app.js'
 replace_once(path,
