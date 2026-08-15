@@ -3,6 +3,7 @@ import { calendarDayKey } from './studyday.js';
 import { normalizeSentenceBooks, ensureSimpleWords, normalizeLexeme } from './sentencebooks.js';
 import { normalizeTexts } from './textsentences.js';
 import { normalizeActivities } from './activity.js';
+import { normalizeDataChartState } from './datachart.js';
 
 const DB_NAME = 'listenwrite-v3';
 const DB_VERSION = 1;
@@ -63,6 +64,7 @@ export function defaultState() {
     errorBooks: [],
     dailyPlans: {},
     activities: [],
+    dataChart: normalizeDataChartState(null),
     settings: {
       defaultNewTarget: 30,
       defaultReviewTarget: 80,
@@ -182,6 +184,7 @@ function normalizeSentenceSession(value){
 export function normalizeState(input) {
   const base = defaultState();
   const inputVersion = Number(input?.version) || 0;
+  // Adding unrelated state fields must never rebuild existing word FSRS cards.
   const migrateScheduling = inputVersion < STATE_VERSION;
   const oldSettings = input?.settings || input?.set || {};
   const state = { ...base, ...(input || {}) };
@@ -218,6 +221,7 @@ export function normalizeState(input) {
   for (const word of state.words) for (const source of word.sources || []) if (/错题|错词|error/i.test(source)) inferredErrorBooks.add(source);
   state.errorBooks = [...inferredErrorBooks];
   state.activities = normalizeActivities(input?.activities, preserveDates, calendarDayKey);
+  state.dataChart = normalizeDataChartState(input?.dataChart);
   state.dailyPlans = {};
   if (inputVersion >= 4 && input?.dailyPlans && typeof input.dailyPlans === 'object' && !Array.isArray(input.dailyPlans)) {
     for (const [key, plan] of Object.entries(input.dailyPlans)) state.dailyPlans[key] = normalizePlan(plan, key);
