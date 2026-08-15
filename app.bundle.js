@@ -2293,6 +2293,21 @@ function problemTokensToTSV(tokens, { source = "\u53E5\u5B50\u9519\u9898\u672C",
   }
   return rows.join("\n");
 }
+function csvCell(value) {
+  const text = String(value ?? "").replace(/\r/g, " ").replace(/\n/g, " ");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+function problemTokensToCSV(tokens, { source = "\u53E5\u5B50\u9519\u9898\u672C", sentence = "" } = {}) {
+  const rows = [["en", "zh", "pos", "def", "source", "example"]];
+  const seen = /* @__PURE__ */ new Set();
+  for (const token of tokens) {
+    const en = token.normalized || normalizeLexeme(token.surface);
+    if (!en || seen.has(en)) continue;
+    seen.add(en);
+    rows.push([en, "", "", "", source, token.sentence || sentence || ""]);
+  }
+  return "\uFEFF" + rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+}
 function normalizeSentenceBooks(value) {
   if (!Array.isArray(value)) return [];
   return value.map((book, bi) => ({
@@ -6090,7 +6105,7 @@ function renderTextCollection() {
   document.getElementById("exportCollectionUnfamiliar").onclick = () => {
     if (!collectionUnfamiliar.length) return;
     const safe = String(name || "\u6587\u672C\u5E93").replace(/[\/:*?"<>|]+/g, "-");
-    download(`${safe}-\u6574\u5E93\u4E0D\u719F\u6089-${currentDayKey()}.tsv`, problemTokensToTSV(collectionUnfamiliar, { source: `${name} \xB7 \u6574\u5E93\u4E0D\u719F\u6089` }), "text/tab-separated-values;charset=utf-8");
+    download(`${safe}-\u6574\u5E93\u4E0D\u719F\u6089-${currentDayKey()}.csv`, problemTokensToCSV(collectionUnfamiliar, { source: `${name} \xB7 \u6574\u5E93\u4E0D\u719F\u6089` }), "text/csv;charset=utf-8");
     toast(`\u5DF2\u5BFC\u51FA\u6574\u5E93 ${collectionUnfamiliar.length} \u4E2A\u4E0D\u719F\u6089\u8BCD`);
   };
   document.getElementById("newTextInCollection").onclick = () => {
@@ -6150,13 +6165,13 @@ function renderTextLibraryDetail() {
     if (!unfamiliar.length) return;
     const source = `${t.collection || "\u672A\u5206\u7C7B"} \xB7 ${t.title} \xB7 \u5F53\u524D\u4E0D\u719F\u6089`;
     const safe = String(t.title || "\u6587\u672C").replace(/[\/:*?"<>|]+/g, "-");
-    download(`${safe}-\u5F53\u524D\u4E0D\u719F\u6089-${currentDayKey()}.tsv`, problemTokensToTSV(unfamiliar, { source }), "text/tab-separated-values;charset=utf-8");
+    download(`${safe}-\u5F53\u524D\u4E0D\u719F\u6089-${currentDayKey()}.csv`, problemTokensToCSV(unfamiliar, { source }), "text/csv;charset=utf-8");
     toast(`\u5DF2\u5BFC\u51FA ${unfamiliar.length} \u4E2A\u5F53\u524D\u4E0D\u719F\u6089\u8BCD`);
   };
   if (document.getElementById("exportLegacyUnfamiliar")) document.getElementById("exportLegacyUnfamiliar").onclick = () => {
     const source = `${t.collection || "\u672A\u5206\u7C7B"} \xB7 ${t.title} \xB7 \u65E7\u7248\u4E0D\u719F\u5019\u9009`;
     const safe = String(t.title || "\u6587\u672C").replace(/[\/:*?"<>|]+/g, "-");
-    download(`${safe}-\u65E7\u7248\u4E0D\u719F\u5019\u9009-${currentDayKey()}.tsv`, problemTokensToTSV(legacyCandidates, { source }), "text/tab-separated-values;charset=utf-8");
+    download(`${safe}-\u65E7\u7248\u4E0D\u719F\u5019\u9009-${currentDayKey()}.csv`, problemTokensToCSV(legacyCandidates, { source }), "text/csv;charset=utf-8");
     toast(`\u5DF2\u5BFC\u51FA ${legacyCandidates.length} \u4E2A\u65E7\u7248\u4E0D\u719F\u5019\u9009`);
   };
   document.querySelectorAll("[data-history-whole]").forEach((b) => b.onclick = () => {
