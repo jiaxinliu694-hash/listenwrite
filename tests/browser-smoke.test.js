@@ -8,7 +8,7 @@ function waitFor(check, timeout = 2500) {
   return new Promise((resolve, reject) => {
     const tick = () => {
       try { if (check()) return resolve(); } catch {}
-      if (Date.now() - start > timeout) return reject(new Error('Timed out waiting for app render'));
+      if (Date.now() - start > timeout) return reject(new Error('Timed out waiting for app render: '+String(check)));
       setTimeout(tick, 20);
     };
     tick();
@@ -92,6 +92,10 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   assert.ok(document.querySelector('[data-type-preset="todayReview"]'), 'hand-writing should have a review entry');
 
   document.querySelector('[data-nav="text"]').click();
+  await waitFor(() => document.querySelector('#openSentenceTools'));
+  assert.match(document.getElementById('app').textContent, /文本库/);
+  assert.equal(document.querySelector('#sentenceBookName'), null, 'global sentence tools should not be spread across the text-library home');
+  document.getElementById('openSentenceTools').click();
   await waitFor(() => document.querySelector('#sentenceBookName'));
   assert.ok(document.querySelector('#sentenceProblemSearch'), 'sentence problems should be searchable');
   document.getElementById('sentenceBookName').value = '测试句子库';
@@ -148,7 +152,12 @@ test('browser shell renders core study and persistent sentence-book workflow', a
   document.getElementById('textCollection').value = '剑18';
   document.getElementById('textBody').value = 'The rural area is quiet. Another sentence follows.';
   document.getElementById('saveText').click();
+  await waitFor(() => document.querySelector('#backToTextLibrary'));
+  document.getElementById('backToTextLibrary').click();
+  await waitFor(() => document.querySelector('[data-text-collection="剑18"]'));
+  document.querySelector('[data-text-collection="剑18"]').click();
   await waitFor(() => document.querySelector('[data-open-text]'));
+  assert.ok(document.querySelector('[data-text-history]'), 'each text should expose its own sentence/word history');
   document.querySelector('[data-open-text]').click();
   await waitFor(() => document.querySelector('#dictateSentence'));
   assert.match(document.getElementById('dictateSentence').textContent, /拆词听写/);

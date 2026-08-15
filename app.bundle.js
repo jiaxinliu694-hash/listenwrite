@@ -4524,6 +4524,99 @@ function createDataChartUI(deps) {
   return { render: render2, renderHome: renderHome2, activeActivityId, handleKeydown, resetToHome };
 }
 
+// src/textlibrary.js
+function tokenAttemptTime(token) {
+  return Math.max(0, ...(Array.isArray(token?.attempts) ? token.attempts : []).map((attempt) => Number(attempt?.ts) || 0));
+}
+function sentenceEntryPracticeTime(entry) {
+  const whole = Math.max(0, ...(Array.isArray(entry?.wholeAttempts) ? entry.wholeAttempts : []).map((attempt) => Number(attempt?.ts) || 0));
+  const split = Math.max(0, ...(Array.isArray(entry?.tokens) ? entry.tokens : []).map(tokenAttemptTime));
+  return Math.max(Number(entry?.lastPracticedAt) || 0, whole, split);
+}
+function isSentenceEntryPracticed(entry) {
+  if (!entry) return false;
+  if (sentenceEntryPracticeTime(entry) > 0) return true;
+  return (entry.tokens || []).some((token) => token?.status === "familiar" || token?.status === "unfamiliar" || token?.status === "unknown");
+}
+function linkedTextEntries(state2, textId, { practicedOnly = false } = {}) {
+  const rows = [];
+  for (const book of state2?.sentenceBooks || []) {
+    for (const entry of book?.entries || []) {
+      if (String(entry?.sourceTextId || "") !== String(textId || "")) continue;
+      if (practicedOnly && !isSentenceEntryPracticed(entry)) continue;
+      rows.push({ book, entry, practicedAt: sentenceEntryPracticeTime(entry) });
+    }
+  }
+  return rows.sort((a, b) => Number(a.entry?.sentenceIndex ?? 1e9) - Number(b.entry?.sentenceIndex ?? 1e9) || b.practicedAt - a.practicedAt);
+}
+function textPracticeWords(state2, textId) {
+  const byLexeme = /* @__PURE__ */ new Map();
+  for (const { book, entry, practicedAt } of linkedTextEntries(state2, textId)) {
+    for (let tokenIndex = 0; tokenIndex < (entry.tokens || []).length; tokenIndex += 1) {
+      const token = entry.tokens[tokenIndex];
+      const attempts = Array.isArray(token?.attempts) ? token.attempts : [];
+      const hasPractice = attempts.length > 0 || token?.status === "familiar" || token?.status === "unfamiliar" || token?.status === "unknown";
+      if (!hasPractice) continue;
+      const lexeme = normalizeLexeme(token?.normalized || token?.surface);
+      if (!lexeme) continue;
+      const row = byLexeme.get(lexeme) || {
+        lexeme,
+        surface: String(token?.surface || lexeme),
+        familiar: false,
+        unfamiliar: false,
+        simple: false,
+        lastPracticedAt: 0,
+        occurrences: []
+      };
+      row.familiar ||= token?.status === "familiar";
+      row.unfamiliar ||= token?.status === "unfamiliar" || token?.status === "unknown";
+      row.simple = isSimpleLexeme(state2, lexeme);
+      row.lastPracticedAt = Math.max(row.lastPracticedAt, tokenAttemptTime(token), practicedAt);
+      row.occurrences.push({ bookId: book.id, entryId: entry.id, tokenIndex, sentenceIndex: entry.sentenceIndex, sentence: entry.text });
+      byLexeme.set(lexeme, row);
+    }
+  }
+  return [...byLexeme.values()].map((row) => ({ ...row, status: row.simple ? "simple" : row.unfamiliar ? "unfamiliar" : row.familiar ? "familiar" : "heard" })).sort((a, b) => (a.status === "unfamiliar" ? -1 : 0) - (b.status === "unfamiliar" ? -1 : 0) || b.lastPracticedAt - a.lastPracticedAt || a.lexeme.localeCompare(b.lexeme));
+}
+function textCollectionSummaries(state2) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const text of state2?.texts || []) {
+    const name = String(text?.collection || "\u672A\u5206\u7C7B").trim() || "\u672A\u5206\u7C7B";
+    const group = groups.get(name) || { name, texts: [], textCount: 0, sentenceCount: 0, practicedSentenceCount: 0, wordCount: 0, weakCount: 0, simpleCount: 0, lastActivity: 0 };
+    group.texts.push(text);
+    group.textCount += 1;
+    group.sentenceCount += Array.isArray(text?.sentences) && text.sentences.length ? text.sentences.length : 0;
+    group.lastActivity = Math.max(group.lastActivity, Number(text?.lastOpened) || 0, Number(text?.updatedAt) || 0);
+    groups.set(name, group);
+  }
+  for (const group of groups.values()) {
+    const sentenceIds = /* @__PURE__ */ new Set();
+    const words = /* @__PURE__ */ new Map();
+    for (const text of group.texts) {
+      for (const row of linkedTextEntries(state2, text.id, { practicedOnly: true })) {
+        sentenceIds.add(`${row.book.id}|${row.entry.id}`);
+        group.lastActivity = Math.max(group.lastActivity, row.practicedAt);
+      }
+      for (const word of textPracticeWords(state2, text.id)) {
+        const current = words.get(word.lexeme);
+        if (!current) words.set(word.lexeme, word);
+        else words.set(word.lexeme, {
+          ...current,
+          simple: current.simple || word.simple,
+          unfamiliar: current.unfamiliar || word.unfamiliar,
+          status: current.simple || word.simple ? "simple" : current.unfamiliar || word.unfamiliar ? "unfamiliar" : "familiar"
+        });
+      }
+    }
+    group.practicedSentenceCount = sentenceIds.size;
+    group.wordCount = words.size;
+    group.weakCount = [...words.values()].filter((word) => !word.simple && word.unfamiliar).length;
+    group.simpleCount = [...words.values()].filter((word) => word.simple).length;
+    group.texts.sort((a, b) => Number(b.lastOpened || b.updatedAt || 0) - Number(a.lastOpened || a.updatedAt || 0) || String(a.title || "").localeCompare(String(b.title || "")));
+  }
+  return [...groups.values()].sort((a, b) => b.lastActivity - a.lastActivity || a.name.localeCompare(b.name));
+}
+
 // src/app.js
 var root = document.getElementById("app");
 var restoreInput = document.getElementById("file-restore");
@@ -4536,6 +4629,9 @@ var typeRun = null;
 var textReaderId = null;
 var textEditId = null;
 var textFormOpen = false;
+var textLibraryCollection = null;
+var textLibraryDetailId = null;
+var textToolsOpen = false;
 var sentenceRun = null;
 var wholeSentenceRun = null;
 var wholeQueue = [];
@@ -4739,6 +4835,11 @@ function go(next) {
   wholeQueue = [];
   freeListen = null;
   textReaderId = null;
+  if (next !== "text") {
+    textLibraryCollection = null;
+    textLibraryDetailId = null;
+    textToolsOpen = false;
+  }
   dataChartUI?.resetToHome?.();
   render();
 }
@@ -5320,7 +5421,7 @@ function bindSentenceLibraryActions() {
     renderText();
   });
 }
-function renderText() {
+function renderTextLegacy() {
   if (textReaderId) return renderTextReader();
   ensureSentenceBooks(state);
   ensureSimpleWords(state);
@@ -5329,7 +5430,13 @@ function renderText() {
   const sentenceBookNames = state.sentenceBooks.map((b) => b.name);
   const sentenceBookRows = state.sentenceBooks.map(sentenceLibraryBookHtml).join("");
   const staleSentenceLinks = staleLinkedSentenceCount(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u4E0E\u53E5\u5B50</h2><p>\u6587\u7AE0 \u2192 \u7A33\u5B9A\u53E5\u5B50 \u2192 \u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u9519\u8BCD\u91CD\u542C\u3002\u53E5\u5B50\u672C\u8EAB\u4E0D\u8FDB\u5165 FSRS\uFF1B\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u9519\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u590D\u4E60\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div></section><section class="card"><h2 class="section-title">\u5FEB\u901F\u4FDD\u5B58\u4E00\u53E5\u5E76\u62C6\u8BCD</h2><div class="small">\u9002\u5408\u4E34\u65F6\u53E5\u5B50\u3002\u9ED8\u8BA4\u4FDD\u7559\u91CD\u590D\u8BCD\u4F4D\u7F6E\uFF1B\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u81EA\u52A8\u8DF3\u8FC7\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u62C6\u8BCD</label><button id="startQuickWhole" class="primary">\u4FDD\u5B58\u5E76\u6574\u53E5\u542C\u5199</button><button id="startSentenceDictation" class="soft">\u4FDD\u5B58\u5E76\u62C6\u8BCD\u542C\u5199</button><button id="saveQuickOnly" class="ghost">\u53EA\u4FDD\u5B58</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u9519\u8BCD\u5B9A\u4F4D\u4E0E\u91CD\u542C</h2><div class="small">\u53EF\u4EE5\u641C\u6587\u7AE0\u6807\u9898\u3001\u53E5\u5B50\u539F\u6587\u6216\u5355\u8BCD\uFF1B\u4ECE\u6587\u7AE0\u4EA7\u751F\u7684\u53E5\u5B50\u4F7F\u7528\u7A33\u5B9A\u53E5\u5B50 ID \u5173\u8054\uFF0C\u4E0D\u518D\u53EA\u9760\u201C\u7B2C\u51E0\u53E5\u201D\u3002</div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u53E5\u5B50\u5E93</label><select id="sentenceProblemBook"><option value="">\u5168\u90E8\u53E5\u5B50\u5E93</option>${state.sentenceBooks.map((book) => `<option value="${book.id}">${esc(book.name)}</option>`).join("")}</select></div><div class="field"><label>\u68C0\u7D22</label><input id="sentenceProblemSearch" placeholder="\u6587\u7AE0\u6807\u9898 / \u53E5\u5B50 / \u9519\u8BCD"></div></div><label class="small" style="display:block;margin-top:10px"><input id="sentenceProblemUnique" type="checkbox" checked style="width:auto"> \u9519\u8BCD\u91CD\u542C\u65F6\u53BB\u91CD</label><div id="sentenceProblemList" style="margin-top:12px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u5E93</h2><div class="space"><div class="small">\u9ED8\u8BA4\u6309\u201C\u9700\u91CD\u7EC3 \u2192 \u672A\u7EC3 \u2192 \u5DF2\u901A\u8FC7 \u2192 \u5FFD\u7565\u201D\u6392\u5217\u3002\u6765\u6E90\u88AB\u5220\u9664\u6216\u539F\u6587\u5DF2\u4FEE\u6539\u7684\u65E7\u53E5\u4F1A\u660E\u786E\u6807\u51FA\u6765\u3002</div>${staleSentenceLinks ? `<button id="cleanupStaleSentences" class="ghost">\u6E05\u7406\u5931\u6548\u65E7\u53E5 \xB7 ${staleSentenceLinks}</button>` : ""}</div><div class="sentence-library">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6253\u5F00\u6587\u7AE0\u540E\uFF0C\u6BCF\u4E00\u53E5\u90FD\u6709\u201C\u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u672C\u53E5\u9519\u8BCD\u201D\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><button id="backToTextLibrary" class="ghost">\u2039 \u6587\u672C\u5E93</button><h2>\u72EC\u7ACB\u53E5\u5B50\u5DE5\u5177</h2><p>\u6587\u7AE0 \u2192 \u7A33\u5B9A\u53E5\u5B50 \u2192 \u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u9519\u8BCD\u91CD\u542C\u3002\u53E5\u5B50\u672C\u8EAB\u4E0D\u8FDB\u5165 FSRS\uFF1B\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u9519\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u590D\u4E60\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div></section><section class="card"><h2 class="section-title">\u5FEB\u901F\u4FDD\u5B58\u4E00\u53E5\u5E76\u62C6\u8BCD</h2><div class="small">\u9002\u5408\u4E34\u65F6\u53E5\u5B50\u3002\u9ED8\u8BA4\u4FDD\u7559\u91CD\u590D\u8BCD\u4F4D\u7F6E\uFF1B\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u81EA\u52A8\u8DF3\u8FC7\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u62C6\u8BCD</label><button id="startQuickWhole" class="primary">\u4FDD\u5B58\u5E76\u6574\u53E5\u542C\u5199</button><button id="startSentenceDictation" class="soft">\u4FDD\u5B58\u5E76\u62C6\u8BCD\u542C\u5199</button><button id="saveQuickOnly" class="ghost">\u53EA\u4FDD\u5B58</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u9519\u8BCD\u5B9A\u4F4D\u4E0E\u91CD\u542C</h2><div class="small">\u53EF\u4EE5\u641C\u6587\u7AE0\u6807\u9898\u3001\u53E5\u5B50\u539F\u6587\u6216\u5355\u8BCD\uFF1B\u4ECE\u6587\u7AE0\u4EA7\u751F\u7684\u53E5\u5B50\u4F7F\u7528\u7A33\u5B9A\u53E5\u5B50 ID \u5173\u8054\uFF0C\u4E0D\u518D\u53EA\u9760\u201C\u7B2C\u51E0\u53E5\u201D\u3002</div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u53E5\u5B50\u5E93</label><select id="sentenceProblemBook"><option value="">\u5168\u90E8\u53E5\u5B50\u5E93</option>${state.sentenceBooks.map((book) => `<option value="${book.id}">${esc(book.name)}</option>`).join("")}</select></div><div class="field"><label>\u68C0\u7D22</label><input id="sentenceProblemSearch" placeholder="\u6587\u7AE0\u6807\u9898 / \u53E5\u5B50 / \u9519\u8BCD"></div></div><label class="small" style="display:block;margin-top:10px"><input id="sentenceProblemUnique" type="checkbox" checked style="width:auto"> \u9519\u8BCD\u91CD\u542C\u65F6\u53BB\u91CD</label><div id="sentenceProblemList" style="margin-top:12px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u5E93</h2><div class="space"><div class="small">\u9ED8\u8BA4\u6309\u201C\u9700\u91CD\u7EC3 \u2192 \u672A\u7EC3 \u2192 \u5DF2\u901A\u8FC7 \u2192 \u5FFD\u7565\u201D\u6392\u5217\u3002\u6765\u6E90\u88AB\u5220\u9664\u6216\u539F\u6587\u5DF2\u4FEE\u6539\u7684\u65E7\u53E5\u4F1A\u660E\u786E\u6807\u51FA\u6765\u3002</div>${staleSentenceLinks ? `<button id="cleanupStaleSentences" class="ghost">\u6E05\u7406\u5931\u6548\u65E7\u53E5 \xB7 ${staleSentenceLinks}</button>` : ""}</div><div class="sentence-library">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6253\u5F00\u6587\u7AE0\u540E\uFF0C\u6BCF\u4E00\u53E5\u90FD\u6709\u201C\u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u672C\u53E5\u9519\u8BCD\u201D\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
+  document.getElementById("backToTextLibrary").onclick = () => {
+    textToolsOpen = false;
+    textFormOpen = false;
+    textEditId = null;
+    renderText();
+  };
   document.getElementById("newText").onclick = () => {
     textFormOpen = !textFormOpen;
     if (!textFormOpen) textEditId = null;
@@ -5852,6 +5959,115 @@ function saveTextItem() {
   textFormOpen = false;
   persist();
   renderText();
+}
+function textHistoryStatusLabel(status) {
+  return status === "simple" ? "\u7B80\u5355" : status === "unfamiliar" ? "\u4E0D\u719F\u6089" : status === "familiar" ? "\u719F\u6089" : "\u542C\u8FC7";
+}
+function renderTextLibraryHome() {
+  ensureSentenceBooks(state);
+  ensureSimpleWords(state);
+  const groups = textCollectionSummaries(state);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u5148\u6309\u6587\u672C\u5E93\u627E\u6587\u7AE0\uFF1B\u53E5\u5B50\u548C\u5355\u8BCD\u5B66\u4E60\u8BB0\u5F55\u53EA\u5728\u5BF9\u5E94\u6587\u7AE0\u91CC\u9762\u663E\u793A\u3002</p></div><button id="newText" class="primary">\u65B0\u5EFA\u6587\u672C</button></div></section><section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C\u5E93</h2><div class="small">${state.texts.length} \u7BC7\u6587\u672C \xB7 ${groups.length} \u4E2A\u5E93</div></div></div><div class="list" style="margin-top:12px">${groups.length ? groups.map((g) => `<button class="entry" data-text-collection="${esc(g.name)}"><div><b>${esc(g.name)}</b><div class="small" style="margin-top:6px">${g.textCount} \u7BC7 \xB7 \u5DF2\u542C ${g.practicedSentenceCount} \u53E5 \xB7 \u542C\u8FC7 ${g.wordCount} \u8BCD${g.weakCount ? ` \xB7 ${g.weakCount} \u4E2A\u4E0D\u719F\u6089` : ""}</div></div><span>\u8FDB\u5165\u6587\u672C\u5E93 \u203A</span></button>`).join("") : '<div class="empty">\u8FD8\u6CA1\u6709\u6587\u672C\u3002\u5148\u65B0\u5EFA\u4E00\u7BC7\u3002</div>'}</div></section><section class="card"><div class="space"><div><h2 class="section-title">\u72EC\u7ACB\u53E5\u5B50\u5DE5\u5177</h2><div class="small">\u4E34\u65F6\u53E5\u5B50\u3001\u5168\u5C40\u53E5\u5B50\u5E93\u548C\u9519\u8BCD\u68C0\u7D22\u653E\u5728\u8FD9\u91CC\uFF0C\u4E0D\u518D\u94FA\u5728\u6587\u672C\u4E3B\u9875\u3002</div></div><button id="openSentenceTools" class="soft">\u8FDB\u5165</button></div></section></div>`);
+  document.getElementById("newText").onclick = () => {
+    textToolsOpen = true;
+    textFormOpen = true;
+    textEditId = null;
+    renderText();
+  };
+  document.getElementById("openSentenceTools").onclick = () => {
+    textToolsOpen = true;
+    renderText();
+  };
+  document.querySelectorAll("[data-text-collection]").forEach((b) => b.onclick = () => {
+    textLibraryCollection = b.dataset.textCollection;
+    textLibraryDetailId = null;
+    renderText();
+  });
+}
+function renderTextCollection() {
+  const name = textLibraryCollection || "\u672A\u5206\u7C7B";
+  const texts = [...state.texts].filter((t) => (t.collection || "\u672A\u5206\u7C7B") === name).sort((a, b) => (b.lastOpened || b.updatedAt || 0) - (a.lastOpened || a.updatedAt || 0));
+  shell(`<div class="stack"><section class="card"><div class="space"><div><button id="backTextLibraries" class="ghost">\u2039 \u6587\u672C\u5E93</button><h2 class="section-title">${esc(name)}</h2><div class="small">${texts.length} \u7BC7\u6587\u672C</div></div><button id="newTextInCollection" class="primary">\u65B0\u5EFA\u6587\u672C</button></div></section><section class="card"><div class="list">${texts.length ? texts.map((t) => {
+    const practiced = linkedTextEntries(state, t.id, { practicedOnly: true });
+    const words = textPracticeWords(state, t.id);
+    return `<article class="textitem"><div class="space"><div><h3>${esc(t.title)}</h3><div class="small">${splitSentences(t.body).length} \u53E5 \xB7 \u5DF2\u542C ${practiced.length} \u53E5 \xB7 \u542C\u8FC7 ${words.length} \u8BCD</div></div></div><p class="snippet">${esc(t.body.replace(/\s+/g, " "))}</p><div class="toolbar"><button class="primary" data-open-text="${t.id}">\u7EE7\u7EED\u542C${t.sentence ? ` \xB7 \u7B2C ${t.sentence + 1} \u53E5` : ""}</button><button class="soft" data-text-history="${t.id}">\u5B66\u4E60\u8BB0\u5F55</button><button class="ghost" data-edit-text="${t.id}">\u7F16\u8F91</button></div></article>`;
+  }).join("") : '<div class="empty">\u8FD9\u4E2A\u6587\u672C\u5E93\u8FD8\u6CA1\u6709\u6587\u7AE0\u3002</div>'}</div></section></div>`);
+  document.getElementById("backTextLibraries").onclick = () => {
+    textLibraryCollection = null;
+    renderText();
+  };
+  document.getElementById("newTextInCollection").onclick = () => {
+    textToolsOpen = true;
+    textFormOpen = true;
+    textEditId = null;
+    renderText();
+    setTimeout(() => {
+      const el = document.getElementById("textCollection");
+      if (el) el.value = name;
+    }, 0);
+  };
+  document.querySelectorAll("[data-open-text]").forEach((b) => b.onclick = () => {
+    textReaderId = b.dataset.openText;
+    const t = state.texts.find((x) => x.id === textReaderId);
+    if (t) t.lastOpened = Date.now();
+    persist();
+    renderTextReader();
+  });
+  document.querySelectorAll("[data-text-history]").forEach((b) => b.onclick = () => {
+    textLibraryDetailId = b.dataset.textHistory;
+    renderText();
+  });
+  document.querySelectorAll("[data-edit-text]").forEach((b) => b.onclick = () => {
+    textEditId = b.dataset.editText;
+    textToolsOpen = true;
+    textFormOpen = true;
+    renderText();
+  });
+}
+function renderTextLibraryDetail() {
+  const t = state.texts.find((x) => x.id === textLibraryDetailId);
+  if (!t) {
+    textLibraryDetailId = null;
+    return renderText();
+  }
+  const sentences = linkedTextEntries(state, t.id, { practicedOnly: true });
+  const words = textPracticeWords(state, t.id);
+  shell(`<div class="stack"><section class="card"><button id="backTextCollection" class="ghost">\u2039 ${esc(t.collection || "\u672A\u5206\u7C7B")}</button><h2 class="section-title" style="margin-top:8px">${esc(t.title)}</h2><div class="small">\u5B66\u4E60\u8BB0\u5F55\u53EA\u663E\u793A\u8FD9\u7BC7\u6587\u672C\u4EA7\u751F\u5E76\u5B9E\u9645\u7EC3\u8FC7\u7684\u53E5\u5B50\u548C\u5355\u8BCD\u3002</div><div class="grid3" style="margin-top:14px"><div class="statbox"><b>${sentences.length}</b><span>\u542C\u8FC7\u7684\u53E5\u5B50</span></div><div class="statbox"><b>${words.length}</b><span>\u542C\u8FC7\u7684\u5355\u8BCD</span></div><div class="statbox"><b>${words.filter((w) => w.simple).length}</b><span>\u6807\u8BB0\u7B80\u5355</span></div></div><div class="toolbar" style="margin-top:12px"><button id="continueText" class="primary">\u7EE7\u7EED\u542C\u6587\u672C</button></div></section><section class="card"><h2 class="section-title">\u542C\u8FC7\u7684\u53E5\u5B50</h2><div class="list" style="margin-top:12px">${sentences.length ? sentences.map(({ book, entry }) => {
+    const st = sentenceStateInfo(entry);
+    return `<div class="sentence-entry"><div class="sentence-entry-meta"><span class="sentence-state ${st.whole.status}">\u6574\u53E5 ${st.whole.label}</span><span class="sentence-state ${st.split.status}">\u62C6\u8BCD ${st.split.label}</span><span class="small">\u7B2C ${Number(entry.sentenceIndex || 0) + 1} \u53E5</span></div><div class="sentence-entry-text">${esc(entry.text)}</div><div class="sentence-mode-row"><button class="soft" data-history-whole="${book.id}|${entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-history-split="${book.id}|${entry.id}">\u62C6\u8BCD\u542C\u5199</button></div></div>`;
+  }).join("") : '<div class="empty">\u8FD9\u7BC7\u6587\u672C\u8FD8\u6CA1\u6709\u7EC3\u8FC7\u53E5\u5B50\u3002</div>'}</div></section><section class="card"><h2 class="section-title">\u542C\u8FC7\u7684\u5355\u8BCD</h2><div class="small">\u201C\u7B80\u5355\u201D\u662F\u5168\u5C40\u8BCD\u72B6\u6001\uFF1B\u8BEF\u6807\u540E\u5728\u8FD9\u91CC\u6062\u590D\uFF0C\u4F1A\u91CD\u65B0\u51FA\u73B0\u5728\u53E5\u5B50\u62C6\u8BCD\u548C\u666E\u901A\u8BCD\u5E93\u5B66\u4E60\u91CC\u3002</div><div class="list" style="margin-top:12px">${words.length ? words.map((w) => `<div class="listitem compact-word"><div class="space"><div><div class="word-main"><b>${esc(w.surface)}</b><span class="tag">${textHistoryStatusLabel(w.status)}</span></div><div class="small">\u51FA\u73B0 ${w.occurrences.length} \u6B21</div></div>${w.simple ? `<button class="soft" data-restore-simple="${esc(w.lexeme)}">\u6062\u590D</button>` : ""}</div></div>`).join("") : '<div class="empty">\u8FD9\u7BC7\u6587\u672C\u8FD8\u6CA1\u6709\u62C6\u8BCD\u8BB0\u5F55\u3002</div>'}</div></section></div>`);
+  document.getElementById("backTextCollection").onclick = () => {
+    textLibraryDetailId = null;
+    textLibraryCollection = t.collection || "\u672A\u5206\u7C7B";
+    renderText();
+  };
+  document.getElementById("continueText").onclick = () => {
+    textReaderId = t.id;
+    t.lastOpened = Date.now();
+    persist();
+    renderTextReader();
+  };
+  document.querySelectorAll("[data-history-whole]").forEach((b) => b.onclick = () => {
+    const [bookId, entryId] = b.dataset.historyWhole.split("|");
+    startWholeSentenceEntry(bookId, entryId, { returnTextId: t.id });
+  });
+  document.querySelectorAll("[data-history-split]").forEach((b) => b.onclick = () => {
+    const [bookId, entryId] = b.dataset.historySplit.split("|");
+    startSavedEntryDictation(bookId, entryId, { returnTextId: t.id });
+  });
+  document.querySelectorAll("[data-restore-simple]").forEach((b) => b.onclick = () => {
+    markSimpleLexeme(state, b.dataset.restoreSimple, false);
+    persist();
+    toast("\u5DF2\u6062\u590D\uFF0C\u4F1A\u91CD\u65B0\u8FDB\u5165\u76F8\u5173\u7EC3\u4E60");
+    renderTextLibraryDetail();
+  });
+}
+function renderText() {
+  if (textReaderId) return renderTextReader();
+  if (textToolsOpen) return renderTextLegacy();
+  if (textLibraryDetailId) return renderTextLibraryDetail();
+  if (textLibraryCollection != null) return renderTextCollection();
+  return renderTextLibraryHome();
 }
 function renderTextReader() {
   const t = state.texts.find((x) => x.id === textReaderId);
