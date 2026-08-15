@@ -1,0 +1,25 @@
+.nav{grid-template-columns:repeat(6,1fr)}
+.dc-summary .statbox b{font-size:23px}
+.dc-curriculum{display:grid;gap:10px}
+.dc-chapter{border:1px solid rgba(90,80,65,.1);background:#fffdfa;border-radius:16px;overflow:hidden}
+.dc-chapter>summary{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:13px 14px;cursor:pointer}
+.dc-section-list{border-top:1px solid rgba(90,80,65,.08)}
+.dc-section-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:12px 14px;border-top:1px solid rgba(90,80,65,.06)}
+.dc-section-row:first-child{border-top:0}
+.dc-section-main{min-width:0;display:grid;gap:5px}
+.dc-section-main b{font-size:14px;line-height:1.4}
+.dc-section-main .progressline{margin-top:1px;height:5px}
+.dc-checklist{display:grid;grid-template-columns:1fr 1fr;gap:7px 12px;margin-top:12px;max-height:330px;overflow:auto}
+.dc-checklist label{display:flex;align-items:flex-start;gap:8px;border:1px solid rgba(90,80,65,.08);border-radius:12px;padding:9px 10px;font-size:13px;line-height:1.45;background:#fffdfa}
+.dc-checklist input{width:auto;margin-top:2px}
+.dc-studybody{max-width:760px}
+.dc-cue{font-size:31px;font-weight:720;line-height:1.45;max-width:720px;margin:26px auto}
+.dc-reveal{min-width:180px;padding:15px 20px;margin:6px 0 12px}
+.dc-answer{font-size:28px;font-weight:690;line-height:1.55;max-width:760px;margin:26px auto 10px;white-space:pre-wrap}
+.dc-note{max-width:680px;margin:12px auto 0;padding:10px 12px;border:1px solid var(--line);border-radius:13px;background:#fffdfa;color:#55574f;line-height:1.55}
+.dc-pairs{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+.dc-pairs span{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:6px 9px;background:#fffdfa;color:var(--muted)}
+.dc-audio-row{justify-content:center;margin:14px 0 2px}
+.dc-reinforce{color:var(--red);border-color:#e1beb8;background:var(--red-bg)}
+.dc-finish{max-width:650px}
+@media(max-width:620px){.nav{grid-template-columns:repeat(6,1fr)}.nav button{font-size:12px}.dc-summary{grid-template-columns:1fr 1fr}.dc-checklist{grid-template-columns:1fr}.dc-cue{font-size:27px}.dc-answer{font-size:24px}.dc-section-row{padding:11px 10px}.dc-section-row button{padding:8px 10px}}
