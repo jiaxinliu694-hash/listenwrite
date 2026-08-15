@@ -1,4 +1,4 @@
-import { tokenizeEnglish } from './tokenizer.js';
+import { tokenizeEnglish, spellingMatches } from './tokenizer.js';
 
 function id(prefix = 'sentence') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
@@ -126,51 +126,36 @@ function normalizedWords(value) {
 export function alignSentenceInput(expectedText, actualText) {
   const expected = tokenizeEnglish(expectedText);
   const actual = tokenizeEnglish(actualText);
-  const a = expected.map((word) => word.toLowerCase().replace(/’/g, "'"));
-  const b = actual.map((word) => word.toLowerCase().replace(/’/g, "'"));
-  const rows = a.length + 1;
-  const cols = b.length + 1;
-  const dp = Array.from({ length: rows }, () => Array(cols).fill(0));
-  for (let i = 0; i < rows; i += 1) dp[i][0] = i;
-  for (let j = 0; j < cols; j += 1) dp[0][j] = j;
-  for (let i = 1; i < rows; i += 1) {
-    for (let j = 1; j < cols; j += 1) {
-      const replace = dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
-      const missing = dp[i - 1][j] + 1;
-      const extra = dp[i][j - 1] + 1;
-      dp[i][j] = Math.min(replace, missing, extra);
-    }
-  }
-  const operations = [];
-  let i = a.length;
-  let j = b.length;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && a[i - 1] === b[j - 1] && dp[i][j] === dp[i - 1][j - 1]) {
-      operations.push({ type: 'equal', expected: expected[i - 1], actual: actual[j - 1], expectedIndex: i - 1, actualIndex: j - 1 });
-      i -= 1; j -= 1; continue;
-    }
-    if (i > 0 && j > 0 && dp[i][j] === dp[i - 1][j - 1] + 1) {
-      operations.push({ type: 'replace', expected: expected[i - 1], actual: actual[j - 1], expectedIndex: i - 1, actualIndex: j - 1 });
-      i -= 1; j -= 1; continue;
-    }
-    if (i > 0 && dp[i][j] === dp[i - 1][j] + 1) {
-      operations.push({ type: 'missing', expected: expected[i - 1], actual: '', expectedIndex: i - 1, actualIndex: null });
-      i -= 1; continue;
-    }
-    operations.push({ type: 'extra', expected: '', actual: actual[j - 1], expectedIndex: null, actualIndex: j - 1 });
-    j -= 1;
-  }
-  operations.reverse();
-  const correct = operations.length === expected.length && operations.every((op) => op.type === 'equal');
-  const wrongExpectedIndexes = [...new Set(operations.filter((op) => op.type === 'replace' || op.type === 'missing').map((op) => op.expectedIndex).filter(Number.isInteger))];
-  return {
-    expected,
-    actual,
-    normalizedExpected: normalizedWords(expectedText),
-    normalizedActual: normalizedWords(actualText),
-    operations,
-    distance: dp[a.length][b.length],
-    correct,
-    wrongExpectedIndexes,
+  const rows = expected.length + 1;
+  const cols = actual.length + 1;
+  const dp = Array.from({ length: rows }, () => Array(cols).fill(Infinity));
+  const back = Array.from({ length: rows }, () => Array(cols).fill(null));
+  dp[0][0] = 0;
+  const consider = (i, j, cost, step) => {
+    const current = dp[i][j];
+    const preferEqual = cost === current && step.type === 'equal' && back[i][j]?.type !== 'equal';
+    if (cost < current || preferEqual) { dp[i][j] = cost; back[i][j] = step; }
   };
+  for (let i = 0; i < rows; i += 1) {
+    for (let j = 0; j < cols; j += 1) {
+      if (i === 0 && j === 0) continue;
+      if (i > 0) consider(i, j, dp[i - 1][j] + 1, {type:'missing',expected:expected[i-1],actual:'',expectedIndex:i-1,actualIndex:null,expectedIndexes:[i-1],actualIndexes:[],prevI:i-1,prevJ:j});
+      if (j > 0) consider(i, j, dp[i][j - 1] + 1, {type:'extra',expected:'',actual:actual[j-1],expectedIndex:null,actualIndex:j-1,expectedIndexes:[],actualIndexes:[j-1],prevI:i,prevJ:j-1});
+      if (i > 0 && j > 0) {
+        const equal = spellingMatches(actual[j - 1], expected[i - 1]);
+        consider(i, j, dp[i-1][j-1] + (equal ? 0 : 1), {type:equal?'equal':'replace',expected:expected[i-1],actual:actual[j-1],expectedIndex:i-1,actualIndex:j-1,expectedIndexes:[i-1],actualIndexes:[j-1],prevI:i-1,prevJ:j-1});
+      }
+      for (let es = 1; es <= Math.min(4, i); es += 1) for (let as = 1; as <= Math.min(4, j); as += 1) {
+        if (es + as <= 2 || (es > 1 && as > 1)) continue;
+        const ei=i-es, aj=j-as, eSurface=expected.slice(ei,i).join(' '), aSurface=actual.slice(aj,j).join(' ');
+        if (!spellingMatches(aSurface,eSurface)) continue;
+        consider(i,j,dp[ei][aj],{type:'equal',expected:eSurface,actual:aSurface,expectedIndex:es===1?ei:null,actualIndex:as===1?aj:null,expectedIndexes:Array.from({length:es},(_,k)=>ei+k),actualIndexes:Array.from({length:as},(_,k)=>aj+k),prevI:ei,prevJ:aj});
+      }
+    }
+  }
+  const operations=[]; let i=expected.length,j=actual.length;
+  while(i>0||j>0){const step=back[i][j];if(!step)throw new Error('Sentence alignment path missing');const {prevI,prevJ,...op}=step;operations.push(op);i=prevI;j=prevJ;}
+  operations.reverse();
+  const wrongExpectedIndexes=[...new Set(operations.filter(op=>op.type==='replace'||op.type==='missing').flatMap(op=>op.expectedIndexes||(Number.isInteger(op.expectedIndex)?[op.expectedIndex]:[])))];
+  return {expected,actual,normalizedExpected:normalizedWords(expectedText),normalizedActual:normalizedWords(actualText),operations,distance:dp[expected.length][actual.length],correct:dp[expected.length][actual.length]===0,wrongExpectedIndexes};
 }

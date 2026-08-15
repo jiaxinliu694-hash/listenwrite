@@ -57,6 +57,7 @@ export function defaultState() {
     events: [],
     texts: [],
     sentenceBooks: [],
+    sentenceSession: null,
     simpleWords: [],
     errorBooks: [],
     dailyPlans: {},
@@ -175,6 +176,13 @@ function normalizeActivities(list, preserveDate) {
     date: preserveDate && a.date ? a.date : calendarDayKey(Number(a.start) || Number(a.lastTouch) || Date.now()),
   }));
 }
+function normalizeSentenceSession(value){
+  if(!value||typeof value!=='object')return null;
+  const updatedAt=Number(value.updatedAt)||0;
+  if(value.mode==='whole'&&value.run?.bookId&&value.run?.entryId)return {mode:'whole',updatedAt,run:{...value.run,input:String(value.run.input||''),revealed:Boolean(value.run.revealed),peek:Boolean(value.run.peek)},queue:(Array.isArray(value.queue)?value.queue:[]).filter(item=>item?.bookId&&item?.entryId).map(item=>({bookId:item.bookId,entryId:item.entryId}))};
+  if(value.mode==='split'&&Array.isArray(value.run?.items))return {mode:'split',updatedAt,run:{...value.run,items:value.run.items.filter(item=>item?.bookId&&item?.entryId&&Number.isInteger(Number(item.tokenIndex))).map(item=>({bookId:item.bookId,entryId:item.entryId,tokenIndex:Number(item.tokenIndex)})),cursor:Math.max(0,Number(value.run.cursor)||0),input:String(value.run.input||''),revealed:Boolean(value.run.revealed),completed:Boolean(value.run.completed)}};
+  return null;
+}
 
 export function normalizeState(input) {
   const base = defaultState();
@@ -208,6 +216,7 @@ export function normalizeState(input) {
   state.events = reindexEvents((input?.events || []).map((e, i) => normalizeEvent(e, i, preserveDates)).filter((e) => e.wordId));
   state.texts = normalizeTexts(input?.texts);
   state.sentenceBooks = normalizeSentenceBooks(input?.sentenceBooks);
+  state.sentenceSession = normalizeSentenceSession(input?.sentenceSession);
   state.simpleWords = Array.isArray(input?.simpleWords) ? [...new Set(input.simpleWords.map(normalizeLexeme).filter(Boolean))] : [];
   ensureSimpleWords(state);
   const inferredErrorBooks = new Set(Array.isArray(input?.errorBooks) ? input.errorBooks.map(String).filter(Boolean) : []);

@@ -1,5 +1,6 @@
 const VALID_STATUS = new Set(['familiar', 'unfamiliar', 'unknown']);
 const VALID_PRACTICE_STATUS = new Set(['unseen', 'repeat', 'done', 'ignored']);
+const VALID_MODE_STATUS = new Set(['unseen', 'repeat', 'done']);
 
 function id(prefix = 'id') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
@@ -96,6 +97,8 @@ export function addSentenceEntry(state, {
     updatedAt: Date.now(),
     lastPracticedAt: 0,
     practiceStatus: 'unseen',
+    wholeStatus: 'unseen',
+    splitStatus: 'unseen',
     wholeAttempts: [],
     tokens: tokens.map((surface, index) => ({
       id: id(`tok${index}`),
@@ -119,6 +122,24 @@ export function getSentenceEntry(state, bookId, entryId) {
   return { book: book || null, entry };
 }
 
+export function deleteSentenceEntry(state, bookId, entryId) {
+  const book = ensureSentenceBooks(state).find((b) => b.id === bookId);
+  if (!book) return { deleted:false, removedEntries:0 };
+  const before=(book.entries||[]).length;
+  book.entries=(book.entries||[]).filter((entry)=>entry.id!==entryId);
+  const removedEntries=before-book.entries.length;
+  if(removedEntries)book.updatedAt=Date.now();
+  return { deleted:Boolean(removedEntries), removedEntries };
+}
+
+export function deleteSentenceBook(state, bookId) {
+  const books=ensureSentenceBooks(state), book=books.find((candidate)=>candidate.id===bookId);
+  if(!book)return {deleted:false,removedEntries:0};
+  const removedEntries=(book.entries||[]).length;
+  state.sentenceBooks=books.filter((candidate)=>candidate.id!==bookId);
+  return {deleted:true,removedEntries};
+}
+
 export function recordSentenceToken(entry, tokenIndex, { input = '', spellingResult = null, status = null } = {}) {
   const token = entry?.tokens?.[tokenIndex];
   if (!token) return null;
@@ -139,47 +160,14 @@ export function setSentenceTokenStatus(entry, tokenIndex, status) {
   return token;
 }
 
-export function deriveSentencePracticeStatus(entry) {
-  if (!entry) return 'unseen';
-  if (entry.practiceStatus === 'ignored') return 'ignored';
-  if (entry.practiceStatus === 'done' || entry.practiceStatus === 'repeat') return entry.practiceStatus;
-  const tokens = Array.isArray(entry.tokens) ? entry.tokens : [];
-  if (tokens.some((token) => token.status === 'unfamiliar' || token.status === 'unknown')) return 'repeat';
-  if ((Array.isArray(entry.wholeAttempts) && entry.wholeAttempts.length) || tokens.some((token) => Array.isArray(token.attempts) && token.attempts.length)) return 'done';
-  return 'unseen';
-}
-
-export function setSentencePracticeStatus(entry, status) {
-  if (!entry || !VALID_PRACTICE_STATUS.has(status)) return null;
-  entry.practiceStatus = status;
-  entry.lastPracticedAt = Date.now();
-  entry.updatedAt = Date.now();
-  return entry.practiceStatus;
-}
-
-export function recordWholeSentenceAttempt(entry, { input = '', alignment = null, revealed = false } = {}) {
-  if (!entry) return null;
-  entry.wholeAttempts = Array.isArray(entry.wholeAttempts) ? entry.wholeAttempts : [];
-  const attempt = {
-    ts: Date.now(),
-    input: String(input || ''),
-    revealed: Boolean(revealed),
-    correct: Boolean(!revealed && alignment?.correct),
-    distance: Number(alignment?.distance) || 0,
-    operations: Array.isArray(alignment?.operations) ? alignment.operations.map((op) => ({
-      type: op.type,
-      expected: op.expected || '',
-      actual: op.actual || '',
-      expectedIndex: Number.isInteger(op.expectedIndex) ? op.expectedIndex : null,
-      actualIndex: Number.isInteger(op.actualIndex) ? op.actualIndex : null,
-    })) : [],
-  };
-  entry.wholeAttempts.push(attempt);
-  entry.practiceStatus = attempt.correct ? 'done' : 'repeat';
-  entry.lastPracticedAt = attempt.ts;
-  entry.updatedAt = attempt.ts;
-  return attempt;
-}
+function inferWholeStatus(entry){const attempts=Array.isArray(entry?.wholeAttempts)?entry.wholeAttempts:[];if(!attempts.length)return 'unseen';return attempts.at(-1)?.correct?'done':'repeat';}
+function inferSplitStatus(entry){const tokens=Array.isArray(entry?.tokens)?entry.tokens:[];if(!tokens.some(token=>Array.isArray(token.attempts)&&token.attempts.length))return 'unseen';return tokens.some(token=>token.status==='unfamiliar'||token.status==='unknown')?'repeat':'done';}
+export function deriveWholeSentenceStatus(entry){if(!entry)return'unseen';if(entry.practiceStatus==='ignored')return'ignored';return VALID_MODE_STATUS.has(entry.wholeStatus)?entry.wholeStatus:inferWholeStatus(entry);}
+export function deriveSplitSentenceStatus(entry){if(!entry)return'unseen';if(entry.practiceStatus==='ignored')return'ignored';return VALID_MODE_STATUS.has(entry.splitStatus)?entry.splitStatus:inferSplitStatus(entry);}
+export function deriveSentencePracticeStatus(entry){if(!entry)return'unseen';if(entry.practiceStatus==='ignored')return'ignored';const whole=deriveWholeSentenceStatus(entry),split=deriveSplitSentenceStatus(entry);if(whole==='repeat'||split==='repeat')return'repeat';if(whole==='done'||split==='done')return'done';return'unseen';}
+export function setSentencePracticeStatus(entry,status){if(!entry||!VALID_PRACTICE_STATUS.has(status))return null;entry.practiceStatus=status==='ignored'?'ignored':'unseen';entry.lastPracticedAt=Date.now();entry.updatedAt=Date.now();return deriveSentencePracticeStatus(entry);}
+export function setSplitSentencePracticeStatus(entry,status){if(!entry||!VALID_MODE_STATUS.has(status))return null;entry.splitStatus=status;if(entry.practiceStatus!=='ignored')entry.practiceStatus='unseen';entry.lastPracticedAt=Date.now();entry.updatedAt=Date.now();return entry.splitStatus;}
+export function recordWholeSentenceAttempt(entry,{input='',alignment=null,revealed=false}={}){if(!entry)return null;entry.wholeAttempts=Array.isArray(entry.wholeAttempts)?entry.wholeAttempts:[];const attempt={ts:Date.now(),input:String(input||''),revealed:Boolean(revealed),correct:Boolean(!revealed&&alignment?.correct),distance:Number(alignment?.distance)||0,operations:Array.isArray(alignment?.operations)?alignment.operations.map(op=>({type:op.type,expected:op.expected||'',actual:op.actual||'',expectedIndex:Number.isInteger(op.expectedIndex)?op.expectedIndex:null,actualIndex:Number.isInteger(op.actualIndex)?op.actualIndex:null})):[]};entry.wholeAttempts.push(attempt);entry.wholeStatus=attempt.correct?'done':'repeat';if(entry.practiceStatus!=='ignored')entry.practiceStatus='unseen';entry.lastPracticedAt=attempt.ts;entry.updatedAt=attempt.ts;return attempt;}
 
 export function sentencePracticeIndexes(state, entry, {
   onlyProblems = false,
@@ -317,7 +305,9 @@ export function normalizeSentenceBooks(value) {
       createdAt: Number(entry.createdAt) || Date.now(),
       updatedAt: Number(entry.updatedAt) || Date.now(),
       lastPracticedAt: Number(entry.lastPracticedAt) || 0,
-      practiceStatus: VALID_PRACTICE_STATUS.has(entry.practiceStatus) ? entry.practiceStatus : 'unseen',
+      practiceStatus: entry.practiceStatus === 'ignored' ? 'ignored' : 'unseen',
+      wholeStatus: VALID_MODE_STATUS.has(entry.wholeStatus) ? entry.wholeStatus : (Array.isArray(entry.wholeAttempts) && entry.wholeAttempts.length ? (entry.wholeAttempts.at(-1)?.correct ? 'done' : 'repeat') : 'unseen'),
+      splitStatus: VALID_MODE_STATUS.has(entry.splitStatus) ? entry.splitStatus : ((Array.isArray(entry.tokens) ? entry.tokens : []).some(token => Array.isArray(token.attempts) && token.attempts.length) ? ((Array.isArray(entry.tokens) ? entry.tokens : []).some(token => token.status === 'unfamiliar' || token.status === 'unknown') ? 'repeat' : 'done') : (!Array.isArray(entry.wholeAttempts) || !entry.wholeAttempts.length) && (entry.practiceStatus === 'done' || entry.practiceStatus === 'repeat') ? entry.practiceStatus : 'unseen'),
       wholeAttempts: Array.isArray(entry.wholeAttempts) ? entry.wholeAttempts : [],
       tokens: (Array.isArray(entry.tokens) ? entry.tokens : []).map((token, ti) => ({
         id: token.id || `tok_legacy_${bi}_${ei}_${ti}`,

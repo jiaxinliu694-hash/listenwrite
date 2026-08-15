@@ -38,25 +38,29 @@ function numericValue(text){
   if(/^\d+(?:\.\d+)?$/.test(clean))return Number(clean);
   return wordsToNumber(clean);
 }
-function numericCanonical(value){
+export function numericCanonicals(value){
   const s=normalizeToken(value).replace(/[–—]/g,'-').replace(/,/g,'').trim();
-  let m=s.match(/^£\s*(\d+(?:\.\d+)?)$/); if(m)return 'gbp:'+Number(m[1]);
-  m=s.match(/^(.*?)\s*(?:pounds?|gbp)$/); if(m){const n=numericValue(m[1]);if(n!=null)return 'gbp:'+n;}
-  m=s.match(/^\$\s*(\d+(?:\.\d+)?)$/); if(m)return 'usd:'+Number(m[1]);
-  m=s.match(/^(.*?)\s*(?:dollars?|usd)$/); if(m){const n=numericValue(m[1]);if(n!=null)return 'usd:'+n;}
-  m=s.match(/^(\d+(?:\.\d+)?)%$/); if(m)return 'pct:'+Number(m[1]);
-  m=s.match(/^(.*?)\s*(?:percent|per cent)$/); if(m){const n=numericValue(m[1]);if(n!=null)return 'pct:'+n;}
-  m=s.match(/^(\d{1,2}):(\d{1,2})$/); if(m)return 'time:'+Number(m[1])+':'+String(Number(m[2])).padStart(2,'0');
-  m=s.match(/^(.*?)\s+(.*?)$/); if(m){const h=numericValue(m[1]),min=numericValue(m[2]);if(h!=null&&min!=null&&h<=24&&min<60)return 'time:'+h+':'+String(min).padStart(2,'0');}
-  m=s.match(/^(\d+)(?:st|nd|rd|th)$/); if(m)return 'ord:'+Number(m[1]);
-  if(s in ORDINAL)return 'ord:'+ORDINAL[s];
-  const n=numericValue(s); return n==null?null:'num:'+n;
+  const out=new Set();
+  let m=s.match(/^£\s*(\d+(?:\.\d+)?)$/); if(m){out.add('gbp:'+Number(m[1]));return [...out];}
+  m=s.match(/^(.*?)\s*(?:pounds?|gbp)$/); if(m){const n=numericValue(m[1]);if(n!=null){out.add('gbp:'+n);return [...out];}}
+  m=s.match(/^\$\s*(\d+(?:\.\d+)?)$/); if(m){out.add('usd:'+Number(m[1]));return [...out];}
+  m=s.match(/^(.*?)\s*(?:dollars?|usd)$/); if(m){const n=numericValue(m[1]);if(n!=null){out.add('usd:'+n);return [...out];}}
+  m=s.match(/^(\d+(?:\.\d+)?)%$/); if(m){out.add('pct:'+Number(m[1]));return [...out];}
+  m=s.match(/^(.*?)\s*(?:percent|per cent)$/); if(m){const n=numericValue(m[1]);if(n!=null){out.add('pct:'+n);return [...out];}}
+  m=s.match(/^(\d{1,2}):(\d{1,2})$/); if(m){out.add('time:'+Number(m[1])+':'+String(Number(m[2])).padStart(2,'0'));return [...out];}
+  m=s.match(/^(\d+)(?:st|nd|rd|th)$/); if(m){out.add('ord:'+Number(m[1]));return [...out];}
+  if(s in ORDINAL){out.add('ord:'+ORDINAL[s]);return [...out];}
+  const n=numericValue(s); if(n!=null)out.add('num:'+n);
+  m=s.match(/^(.*?)\s+(.*?)$/); if(m){const h=numericValue(m[1]),min=numericValue(m[2]);if(h!=null&&min!=null&&h<=24&&min<60)out.add('time:'+h+':'+String(min).padStart(2,'0'));}
+  return [...out];
 }
 
+export function numericCanonical(value){return numericCanonicals(value)[0]||null;}
+
 export function spellingMatches(input, answer) {
-  const exact = normalizeToken(input) === normalizeToken(answer);
-  if (exact) return true;
-  if (!/[0-9$£€¥%]/.test(String(answer))) return false;
-  const a=numericCanonical(answer), b=numericCanonical(input);
-  return Boolean(a && b && a===b);
+  if (normalizeToken(input) === normalizeToken(answer)) return true;
+  const a=numericCanonicals(answer), b=numericCanonicals(input);
+  if(!a.length||!b.length)return false;
+  const wanted=new Set(a);
+  return b.some(value=>wanted.has(value));
 }
