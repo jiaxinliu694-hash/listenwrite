@@ -64,6 +64,9 @@ app.write_text(s.replace(old,new,1))
 # Force Safari/PWA to fetch the new timer semantics.
 idx=Path('index.html'); s=idx.read_text(); s=s.replace('styles.css?v=23.1','styles.css?v=24').replace('app.bundle.js?v=23.1','app.bundle.js?v=24'); idx.write_text(s)
 
+# Update the previous timer rollout regression: its placement stays the same, but the label and asset version evolved.
+v231=Path('tests/v23_1.test.js'); s=v231.read_text(); s=s.replace('assert.ok(app.includes("本轮 "));','assert.ok(app.includes("今日听词"));').replace("styles.css?v=23.1","styles.css?v=24").replace("app.bundle.js?v=23.1","app.bundle.js?v=24"); v231.write_text(s)
+
 Path('tests/v24.test.js').write_text('''import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -78,10 +81,10 @@ test('daily module timer accumulates multiple sessions and live current delta',(
 
 test('daily module timer keeps modes separate',()=>{
   const s={activities:[]};
-  const l=startStudyActivity(s,'listen','listen',[],0);setStudyActivityDate(s,l,'2026-08-15');flushStudyActivity(s,l,30000);
-  const t=startStudyActivity(s,'type','type',[],0);setStudyActivityDate(s,t,'2026-08-15');flushStudyActivity(s,t,45000);
-  assert.equal(dailyModuleElapsedMs(s,'listen','2026-08-15',l,30000,false),30000);
-  assert.equal(dailyModuleElapsedMs(s,'type','2026-08-15',t,45000,false),45000);
+  const l=startStudyActivity(s,'listen','listen',[],1000);setStudyActivityDate(s,l,'2026-08-15');flushStudyActivity(s,l,31000);
+  const t=startStudyActivity(s,'type','type',[],1000);setStudyActivityDate(s,t,'2026-08-15');flushStudyActivity(s,t,46000);
+  assert.equal(dailyModuleElapsedMs(s,'listen','2026-08-15',l,31000,false),30000);
+  assert.equal(dailyModuleElapsedMs(s,'type','2026-08-15',t,46000,false),45000);
 });
 
 test('study UI labels the timer as today module time rather than current round',()=>{
