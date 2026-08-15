@@ -1,0 +1,29 @@
+name: V22 Sentence Integration
+
+on:
+  push:
+    branches: [v22-sentence-daily-use]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/v22_sentence_patch.mjs
+      - run: npm install
+      - run: npm test
+      - run: npm run build
+      - name: Commit final v22 source and bundle
+        run: |
+          git config user.name "listenwrite-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git rm scripts/v22_sentence_patch.mjs .github/workflows/v22-sentence-patch.yml
+          git add src tests app.bundle.js
+          git commit -m "Polish sentence daily-use flow"
+          git push
