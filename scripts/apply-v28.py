@@ -22,6 +22,11 @@ ip=Path('index.html')
 html=ip.read_text().replace('app.bundle.js?v=27-text-library','app.bundle.js?v=28-export-unfamiliar')
 ip.write_text(html)
 
+for test_path in ['tests/v23_1.test.js','tests/v24.test.js']:
+    tp=Path(test_path)
+    tt=tp.read_text().replace("app.bundle.js?v=27", "app.bundle.js?v=28")
+    tp.write_text(tt)
+
 v=Path('tests/v27.test.js')
 t=v.read_text()
 t=t.replace(
