@@ -1,4 +1,4 @@
-import { isSimpleLexeme, normalizeLexeme } from './sentencebooks.js';
+import { isSimpleLexeme, normalizeLexeme, setSentenceTokenStatus } from './sentencebooks.js';
 
 function tokenAttemptTime(token) {
   return Math.max(0, ...(Array.isArray(token?.attempts) ? token.attempts : []).map((attempt) => Number(attempt?.ts) || 0));
@@ -85,6 +85,24 @@ export function textLegacyUnfamiliarCandidates(state, textId) {
     }
   }
   return [...byLexeme.values()].sort((a, b) => a.normalized.localeCompare(b.normalized));
+}
+
+export function setTextLexemeStatus(state, textId, lexeme, status) {
+  const key = normalizeLexeme(lexeme);
+  const nextStatus = status === 'unknown' ? 'unfamiliar' : status;
+  if (!key || !['familiar', 'unfamiliar'].includes(nextStatus)) return 0;
+  let changed = 0;
+  for (const { entry } of linkedTextEntries(state, textId)) {
+    for (let tokenIndex = 0; tokenIndex < (entry.tokens || []).length; tokenIndex += 1) {
+      const token = entry.tokens[tokenIndex];
+      if (normalizeLexeme(token?.normalized || token?.surface) !== key) continue;
+      const attempts = Array.isArray(token?.attempts) ? token.attempts : [];
+      const practiced = attempts.length > 0 || ['familiar', 'unfamiliar', 'unknown'].includes(token?.status) || Boolean(token?.legacyUnfamiliarCandidate);
+      if (!practiced) continue;
+      if (setSentenceTokenStatus(entry, tokenIndex, nextStatus)) changed += 1;
+    }
+  }
+  return changed;
 }
 
 export function textCollectionUnfamiliarTokens(state, collection) {
