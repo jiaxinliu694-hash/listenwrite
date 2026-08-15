@@ -88,7 +88,13 @@ function activityMinutes(mode = null, date = currentDayKey()) { return activityM
 function activeStudyActivityId(){return listen?.activityId||typeRun?.activityId||wholeSentenceRun?.activityId||sentenceRun?.activityId||freeListen?.activityId||null;}
 function mountStudyTimer(activityId){
   clearInterval(studyTimerInterval);studyTimerInterval=null;if(!activityId)return;
-  let badge=document.getElementById('studyTimer');if(!badge){badge=document.createElement('div');badge.id='studyTimer';badge.className='study-timer';document.querySelector('.immersive')?.appendChild(badge);}
+  let badge=document.getElementById('studyTimer');
+  if(!badge){
+    badge=document.createElement('span');badge.id='studyTimer';
+    const progress=document.querySelector('.studyprogress');
+    if(progress){badge.className='study-timer study-timer-inline';progress.appendChild(badge);}
+    else{badge.className='study-timer study-timer-float';document.querySelector('.immersive')?.appendChild(badge);}
+  }
   const draw=()=>{const el=document.getElementById('studyTimer');if(el)el.textContent='本轮 '+formatStudyTime(studyActivityElapsedMs(state,activityId,Date.now(),!document.hidden));};draw();studyTimerInterval=setInterval(draw,1000);studyTimerInterval?.unref?.();
 }
 
