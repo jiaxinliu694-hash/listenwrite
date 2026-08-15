@@ -3990,10 +3990,16 @@ function mountStudyTimer(activityId) {
   if (!activityId) return;
   let badge = document.getElementById("studyTimer");
   if (!badge) {
-    badge = document.createElement("div");
+    badge = document.createElement("span");
     badge.id = "studyTimer";
-    badge.className = "study-timer";
-    document.querySelector(".immersive")?.appendChild(badge);
+    const progress = document.querySelector(".studyprogress");
+    if (progress) {
+      badge.className = "study-timer study-timer-inline";
+      progress.appendChild(badge);
+    } else {
+      badge.className = "study-timer study-timer-float";
+      document.querySelector(".immersive")?.appendChild(badge);
+    }
   }
   const draw = () => {
     const el = document.getElementById("studyTimer");
