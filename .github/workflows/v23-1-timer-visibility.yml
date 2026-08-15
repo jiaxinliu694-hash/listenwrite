@@ -1,0 +1,28 @@
+name: V23.1 Timer Visibility
+on:
+  push:
+    branches: [v23-visible-study-timer]
+  workflow_dispatch:
+jobs:
+  patch-test-build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: python3 scripts/v23_1_timer_visibility.py
+      - run: npm install
+      - run: npm test
+      - run: npm run build
+      - name: Commit hotfix source
+        run: |
+          rm -f scripts/v23_1_timer_visibility.py .github/workflows/v23-1-timer-visibility.yml
+          git config user.name listenwrite-bot
+          git config user.email actions@users.noreply.github.com
+          git add src/app.js styles.css index.html app.bundle.js tests/v23_1.test.js scripts/v23_1_timer_visibility.py .github/workflows/v23-1-timer-visibility.yml
+          git commit -m "Make study timer unmistakably visible" || exit 0
+          git push
