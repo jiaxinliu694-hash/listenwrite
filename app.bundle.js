@@ -35,495 +35,6 @@ setItem(
 );
 DATA_CHART_SEED.contentVersion = "2026-08-15-v2";
 
-// src/cloudsync.js
-var SUPABASE_URL = "https://bsuilpygojnqxntrxgnm.supabase.co";
-var SUPABASE_KEY = "sb_publishable_Y_nFcIW0Sg0pB2zEhMU50g_LVQMX2Am";
-var SESSION_KEY = "listenwrite-supabase-session-v1";
-var META_KEY = "listenwrite-cloud-meta-v1";
-var DB_NAME = "listenwrite-v3";
-var DB_VERSION = 1;
-var STORE = "kv";
-var STATE_KEY = "state";
-var POLL_MS = 5e3;
-var CLOUD_POLL_MS = 15e3;
-var session = null;
-var syncStatus = "offline";
-var syncMessage = "\u672A\u767B\u5F55\u4E91\u540C\u6B65";
-var conflict = null;
-var syncBusy = false;
-var lastCloudCheck = 0;
-var dbPromise = null;
-function nowSec() {
-  return Math.floor(Date.now() / 1e3);
-}
-function parseJson(text, fallback = null) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return fallback;
-  }
-}
-function readStored(key) {
-  try {
-    return parseJson(localStorage.getItem(key) || "", null);
-  } catch {
-    return null;
-  }
-}
-function writeStored(key, value) {
-  try {
-    value == null ? localStorage.removeItem(key) : localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-  }
-}
-function stateFingerprint(state2) {
-  const text = JSON.stringify(state2 || null);
-  let h = 2166136261;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return `${text.length}:${(h >>> 0).toString(16)}`;
-}
-function hasCloudUserData(state2) {
-  if (!state2 || typeof state2 !== "object") return false;
-  if ((state2.texts || []).length) return true;
-  if ((state2.events || []).length) return true;
-  if ((state2.activities || []).length) return true;
-  if ((state2.simpleWords || []).length || (state2.errorBooks || []).length) return true;
-  if (Object.keys(state2.dailyPlans || {}).length) return true;
-  if ((state2.sentenceBooks || []).some((book) => (book?.entries || []).length)) return true;
-  if ((state2.words || []).some((word) => !String(word?.id || "").startsWith("sample_"))) return true;
-  const chart = state2.dataChart;
-  if (chart && typeof chart === "object") {
-    const stack = [chart];
-    const seen = /* @__PURE__ */ new Set();
-    while (stack.length) {
-      const value = stack.pop();
-      if (!value || typeof value !== "object" || seen.has(value)) continue;
-      seen.add(value);
-      if (Array.isArray(value)) {
-        if (value.length) return true;
-        continue;
-      }
-      for (const child of Object.values(value)) {
-        if (Array.isArray(child) && child.length) return true;
-        if (child && typeof child === "object") stack.push(child);
-      }
-    }
-  }
-  return false;
-}
-function openDB() {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
-    };
-    req.onsuccess = () => {
-      const db = req.result;
-      db.onversionchange = () => {
-        db.close();
-        dbPromise = null;
-      };
-      resolve(db);
-    };
-    req.onerror = () => {
-      dbPromise = null;
-      reject(req.error);
-    };
-  });
-  return dbPromise;
-}
-async function localStateGet() {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readonly");
-    const req = tx.objectStore(STORE).get(STATE_KEY);
-    req.onsuccess = () => resolve(req.result ?? null);
-    req.onerror = () => reject(req.error);
-  });
-}
-async function localStateSet(value) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(value, STATE_KEY);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-function normalizeSession(raw) {
-  if (!raw?.access_token || !raw?.refresh_token) return null;
-  const expiresAt = Number(raw.expires_at) || nowSec() + Number(raw.expires_in || 3600);
-  return { ...raw, expires_at: expiresAt };
-}
-function saveSession(raw) {
-  session = normalizeSession(raw);
-  writeStored(SESSION_KEY, session);
-  updateCloudButton();
-  return session;
-}
-function clearSession() {
-  session = null;
-  conflict = null;
-  syncStatus = "offline";
-  syncMessage = "\u672A\u767B\u5F55\u4E91\u540C\u6B65";
-  writeStored(SESSION_KEY, null);
-  updateCloudButton();
-}
-async function authRequest(path, body) {
-  const response = await fetch(`${SUPABASE_URL}${path}`, {
-    method: "POST",
-    headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `\u8BF7\u6C42\u5931\u8D25 ${response.status}`);
-  return data;
-}
-async function refreshSession() {
-  if (!session?.refresh_token) return null;
-  try {
-    const data = await authRequest("/auth/v1/token?grant_type=refresh_token", { refresh_token: session.refresh_token });
-    return saveSession(data);
-  } catch (error) {
-    clearSession();
-    throw error;
-  }
-}
-async function ensureSession() {
-  if (!session) session = normalizeSession(readStored(SESSION_KEY));
-  if (!session) return null;
-  if (Number(session.expires_at || 0) <= nowSec() + 60) await refreshSession();
-  return session;
-}
-async function rpcRequest(path, body = {}) {
-  const current = await ensureSession();
-  if (!current) throw new Error("\u8BF7\u5148\u767B\u5F55\u4E91\u540C\u6B65");
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${path}`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${current.access_token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  if (response.status === 401) {
-    await refreshSession();
-    return rpcRequest(path, body);
-  }
-  const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(data?.message || data?.hint || `\u4E91\u7AEF\u8BF7\u6C42\u5931\u8D25 ${response.status}`);
-  return data;
-}
-async function pullCloud() {
-  const rows = await rpcRequest("listenwrite_pull_state");
-  return Array.isArray(rows) && rows.length ? rows[0] : null;
-}
-async function pushCloud(state2, expectedRevision = null) {
-  const rows = await rpcRequest("listenwrite_push_state", {
-    p_state: state2,
-    p_state_updated_at: Date.now(),
-    p_expected_revision: expectedRevision
-  });
-  return Array.isArray(rows) && rows.length ? rows[0] : null;
-}
-function metaForUser() {
-  const meta = readStored(META_KEY) || {};
-  const uid2 = session?.user?.id || null;
-  return meta.userId === uid2 ? meta : { userId: uid2, revision: 0, lastSyncedHash: null, cloudUpdatedAt: 0 };
-}
-function saveMeta(meta) {
-  writeStored(META_KEY, { ...meta, userId: session?.user?.id || meta.userId || null });
-}
-function cloudLabel() {
-  if (!session) return "\u4E91\u540C\u6B65";
-  if (syncStatus === "conflict") return "\u4E91\u51B2\u7A81";
-  if (syncStatus === "syncing") return "\u540C\u6B65\u4E2D";
-  if (syncStatus === "error") return "\u4E91\u5F02\u5E38";
-  if (syncStatus === "synced") return "\u4E91\u5DF2\u540C\u6B65";
-  return "\u4E91\u5DF2\u767B\u5F55";
-}
-function updateCloudButton() {
-  const button = document.getElementById("cloudSyncTop");
-  if (!button) return;
-  button.textContent = cloudLabel();
-  button.classList.toggle("cloud-alert", syncStatus === "conflict" || syncStatus === "error");
-}
-function setStatus(status, message) {
-  syncStatus = status;
-  syncMessage = message || "";
-  updateCloudButton();
-  const statusEl = document.getElementById("lwCloudStatus");
-  if (statusEl) statusEl.textContent = syncMessage;
-}
-async function applyCloudState(row) {
-  if (!row?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
-  await localStateSet(row.state);
-  saveMeta({
-    userId: session.user.id,
-    revision: Number(row.revision) || 0,
-    lastSyncedHash: stateFingerprint(row.state),
-    cloudUpdatedAt: Number(row.state_updated_at) || 0
-  });
-  setStatus("synced", "\u5DF2\u4ECE\u4E91\u7AEF\u6062\u590D\uFF0C\u6B63\u5728\u91CD\u65B0\u8F7D\u5165");
-  location.reload();
-}
-async function overwriteCloudWithLocal(local, cloud = null) {
-  const expected = cloud ? Number(cloud.revision) || 0 : null;
-  const result = await pushCloud(local, expected);
-  if (result?.status === "conflict") {
-    conflict = { local, cloud: { state: result.cloud_state, state_updated_at: result.cloud_updated_at, revision: result.revision } };
-    setStatus("conflict", "\u4E91\u7AEF\u548C\u672C\u673A\u90FD\u6709\u65B0\u8BB0\u5F55\uFF0C\u8BF7\u9009\u62E9\u4FDD\u7559\u54EA\u4E00\u4EFD");
-    return false;
-  }
-  saveMeta({
-    userId: session.user.id,
-    revision: Number(result?.revision) || 1,
-    lastSyncedHash: stateFingerprint(local),
-    cloudUpdatedAt: Number(result?.cloud_updated_at) || Date.now()
-  });
-  conflict = null;
-  setStatus("synced", "\u5DF2\u540C\u6B65\u5230\u4E91\u7AEF");
-  return true;
-}
-async function reconcileCloud({ force = false } = {}) {
-  if (syncBusy) return;
-  const current = await ensureSession().catch(() => null);
-  if (!current) return setStatus("offline", "\u672A\u767B\u5F55\u4E91\u540C\u6B65");
-  syncBusy = true;
-  setStatus("syncing", "\u6B63\u5728\u68C0\u67E5\u4E91\u7AEF\u2026");
-  try {
-    const local = await localStateGet();
-    const localHash = stateFingerprint(local);
-    const localHasData = hasCloudUserData(local);
-    const meta = metaForUser();
-    const shouldCheckCloud = force || Date.now() - lastCloudCheck >= CLOUD_POLL_MS || !meta.revision;
-    let cloud = null;
-    if (shouldCheckCloud) {
-      cloud = await pullCloud();
-      lastCloudCheck = Date.now();
-    }
-    if (!cloud && shouldCheckCloud) {
-      if (localHasData) await overwriteCloudWithLocal(local, null);
-      else setStatus("ready", "\u5DF2\u767B\u5F55\uFF1B\u5F53\u524D\u672C\u673A\u548C\u4E91\u7AEF\u90FD\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
-      return;
-    }
-    if (!shouldCheckCloud) {
-      if (meta.lastSyncedHash && localHash !== meta.lastSyncedHash) {
-        const result = await pushCloud(local, Number(meta.revision) || null);
-        if (result?.status === "conflict") {
-          conflict = { local, cloud: { state: result.cloud_state, state_updated_at: result.cloud_updated_at, revision: result.revision } };
-          setStatus("conflict", "\u53E6\u4E00\u53F0\u8BBE\u5907\u4E5F\u6709\u65B0\u8BB0\u5F55\uFF0C\u8BF7\u9009\u62E9\u4FDD\u7559\u54EA\u4E00\u4EFD");
-          return;
-        }
-        saveMeta({
-          userId: current.user.id,
-          revision: Number(result?.revision) || meta.revision,
-          lastSyncedHash: localHash,
-          cloudUpdatedAt: Number(result?.cloud_updated_at) || Date.now()
-        });
-        setStatus("synced", "\u5DF2\u81EA\u52A8\u540C\u6B65");
-      } else setStatus("synced", "\u5DF2\u540C\u6B65");
-      return;
-    }
-    const cloudRevision = Number(cloud?.revision) || 0;
-    const sameUserMeta = (readStored(META_KEY) || {}).userId === current.user.id;
-    if (!localHasData && cloud?.state) return applyCloudState(cloud);
-    if (!sameUserMeta && localHasData && cloud?.state) {
-      conflict = { local, cloud };
-      setStatus("conflict", "\u672C\u673A\u548C\u4E91\u7AEF\u90FD\u6709\u8BB0\u5F55\uFF0C\u8BF7\u5148\u9009\u62E9\u4FDD\u7559\u54EA\u4E00\u4EFD");
-      return;
-    }
-    if (meta.lastSyncedHash === localHash) {
-      if (cloudRevision > Number(meta.revision || 0)) return applyCloudState(cloud);
-      saveMeta({ ...meta, userId: current.user.id, revision: cloudRevision, cloudUpdatedAt: Number(cloud.state_updated_at) || meta.cloudUpdatedAt, lastSyncedHash: localHash });
-      setStatus("synced", "\u5DF2\u540C\u6B65");
-      return;
-    }
-    if (cloudRevision === Number(meta.revision || 0)) {
-      await overwriteCloudWithLocal(local, cloud);
-      return;
-    }
-    conflict = { local, cloud };
-    setStatus("conflict", "\u672C\u673A\u548C\u4E91\u7AEF\u90FD\u6709\u65B0\u8BB0\u5F55\uFF0C\u8BF7\u9009\u62E9\u4FDD\u7559\u54EA\u4E00\u4EFD");
-  } catch (error) {
-    console.error("Listenwrite cloud sync failed", error);
-    setStatus("error", error?.message || "\u4E91\u540C\u6B65\u5931\u8D25");
-  } finally {
-    syncBusy = false;
-    renderCloudModalIfOpen();
-  }
-}
-async function cloudSignIn(email, password) {
-  const data = await authRequest("/auth/v1/token?grant_type=password", { email, password });
-  saveSession(data);
-  conflict = null;
-  await reconcileCloud({ force: true });
-}
-async function cloudSignUp(email, password) {
-  const data = await authRequest("/auth/v1/signup", { email, password });
-  if (data?.access_token) {
-    saveSession(data);
-    await reconcileCloud({ force: true });
-    return "\u6CE8\u518C\u5E76\u767B\u5F55\u6210\u529F";
-  }
-  return "\u6CE8\u518C\u6210\u529F\u3002\u8BF7\u5148\u53BB\u90AE\u7BB1\u786E\u8BA4\u8D26\u53F7\uFF0C\u518D\u56DE\u6765\u767B\u5F55\u3002";
-}
-async function cloudSignOut() {
-  try {
-    if (session?.access_token) {
-      await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
-        method: "POST",
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${session.access_token}` }
-      });
-    }
-  } catch {
-  }
-  clearSession();
-  renderCloudModalIfOpen();
-}
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-}
-function injectStyles() {
-  if (document.getElementById("lwCloudStyles")) return;
-  const style = document.createElement("style");
-  style.id = "lwCloudStyles";
-  style.textContent = `
-  .cloud-alert{border-color:#c66559!important;color:#9f463d!important}
-  .lw-cloud-mask{position:fixed;inset:0;z-index:9998;background:rgba(35,33,28,.36);display:flex;align-items:flex-end;justify-content:center;padding:18px}
-  .lw-cloud-panel{width:min(560px,100%);max-height:84vh;overflow:auto;background:#fffdf8;border:1px solid rgba(90,80,65,.16);border-radius:24px;padding:20px;box-shadow:0 22px 70px rgba(20,18,14,.2)}
-  .lw-cloud-panel h2{margin:0 0 6px;font-size:24px}.lw-cloud-panel p{color:#76776f;line-height:1.6;margin:0 0 14px}
-  .lw-cloud-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.lw-cloud-field{display:grid;gap:6px;margin:10px 0}.lw-cloud-field input{width:100%;box-sizing:border-box;padding:12px 13px;border:1px solid #d8d3ca;border-radius:13px;background:#fff;font:inherit}
-  .lw-cloud-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:14px}.lw-cloud-actions button{padding:10px 14px;border-radius:13px;border:1px solid #d8d3ca;background:#fff;font:inherit}.lw-cloud-actions .primary{background:#292a26;color:#fff;border-color:#292a26}
-  .lw-cloud-status{padding:10px 12px;border-radius:13px;background:#f3efe7;margin:10px 0;color:#55574f}.lw-cloud-warning{background:#f9e9e6;color:#9f463d}
-  @media(max-width:520px){.lw-cloud-grid{grid-template-columns:1fr}.lw-cloud-panel{padding:17px;border-radius:20px}.lw-cloud-mask{padding:10px}}
-  `;
-  document.head.appendChild(style);
-}
-function closeCloudModal() {
-  document.getElementById("lwCloudMask")?.remove();
-}
-function renderCloudModalIfOpen() {
-  if (document.getElementById("lwCloudMask")) openCloudModal();
-}
-function openCloudModal() {
-  closeCloudModal();
-  const mask = document.createElement("div");
-  mask.id = "lwCloudMask";
-  mask.className = "lw-cloud-mask";
-  const email = session?.user?.email || "";
-  const conflictHtml = conflict ? '<div class="lw-cloud-status lw-cloud-warning"><b>\u68C0\u6D4B\u5230\u4E24\u4EFD\u4E0D\u540C\u8BB0\u5F55</b><br>\u8BF7\u9009\u62E9\u201C\u4F7F\u7528\u4E91\u7AEF\u201D\u6216\u201C\u4E0A\u4F20\u672C\u673A\u201D\u3002\u9009\u62E9\u524D\u4E0D\u4F1A\u81EA\u52A8\u8986\u76D6\u4EFB\u4F55\u4E00\u8FB9\u3002</div>' : "";
-  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true">
-    <div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>\u4E91\u540C\u6B65</h2><p>Supabase \u53EA\u4FDD\u5B58\u4F60\u7684\u5B66\u4E60\u72B6\u6001\uFF1B\u672C\u5730 IndexedDB \u4ECD\u7136\u4FDD\u7559\u3002\u7535\u8111\u3001iPhone Safari \u548C\u4E3B\u5C4F\u5E55 App \u7528\u540C\u4E00\u8D26\u53F7\u5373\u53EF\u540C\u6B65\u3002</p></div><button id="lwCloudClose" aria-label="\u5173\u95ED" style="border:0;background:transparent;font-size:24px">\xD7</button></div>
-    ${session ? `<div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div>${conflictHtml}<div class="small">\u5DF2\u767B\u5F55\uFF1A${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">\u7ACB\u5373\u540C\u6B65</button><button id="lwCloudPull">\u4F7F\u7528\u4E91\u7AEF</button><button id="lwCloudPush">\u4E0A\u4F20\u672C\u673A</button><button id="lwCloudLogout">\u9000\u51FA\u4E91\u540C\u6B65</button></div><p style="margin-top:12px">\u201C\u4F7F\u7528\u4E91\u7AEF\u201D\u4F1A\u7528\u4E91\u7AEF\u5B8C\u6574\u72B6\u6001\u66FF\u6362\u5F53\u524D\u6D4F\u89C8\u5668\u672C\u5730\u72B6\u6001\uFF1B\u201C\u4E0A\u4F20\u672C\u673A\u201D\u4F1A\u628A\u5F53\u524D\u6D4F\u89C8\u5668\u72B6\u6001\u8986\u76D6\u5230\u4E91\u7AEF\u3002\u6B63\u5E38\u60C5\u51B5\u4E0B\u4E0D\u9700\u8981\u624B\u52A8\u70B9\uFF0C\u7CFB\u7EDF\u4F1A\u81EA\u52A8\u540C\u6B65\u3002</p>` : `<div class="lw-cloud-grid"><label class="lw-cloud-field">\u90AE\u7BB1<input id="lwCloudEmail" type="email" autocomplete="email" placeholder="\u4F60\u7684\u90AE\u7BB1"></label><label class="lw-cloud-field">\u5BC6\u7801<input id="lwCloudPassword" type="password" autocomplete="current-password" placeholder="\u81F3\u5C11 6 \u4F4D"></label></div><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudLogin" class="primary">\u767B\u5F55</button><button id="lwCloudSignup">\u6CE8\u518C\u8D26\u53F7</button></div><p style="margin-top:12px">\u7B2C\u4E00\u6B21\u5EFA\u8BAE\u5728\u201C\u6709\u539F\u8BB0\u5F55\u201D\u7684\u8BBE\u5907\u767B\u5F55\uFF0C\u8BA9\u5B83\u5148\u4E0A\u4F20\uFF1B\u7136\u540E\u5728 iPhone Safari \u767B\u5F55\u540C\u4E00\u8D26\u53F7\uFF0C\u7A7A\u5E93\u4F1A\u81EA\u52A8\u4ECE\u4E91\u7AEF\u6062\u590D\u3002</p>`}
-  </div>`;
-  mask.addEventListener("click", (event) => {
-    if (event.target === mask) closeCloudModal();
-  });
-  document.body.appendChild(mask);
-  document.getElementById("lwCloudClose").onclick = closeCloudModal;
-  if (session) {
-    document.getElementById("lwCloudNow").onclick = () => reconcileCloud({ force: true });
-    document.getElementById("lwCloudPull").onclick = async () => {
-      try {
-        setStatus("syncing", "\u6B63\u5728\u8BFB\u53D6\u4E91\u7AEF\u2026");
-        const cloud = conflict?.cloud || await pullCloud();
-        if (!cloud?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
-        await applyCloudState(cloud);
-      } catch (error) {
-        setStatus("error", error.message);
-      }
-    };
-    document.getElementById("lwCloudPush").onclick = async () => {
-      try {
-        setStatus("syncing", "\u6B63\u5728\u4E0A\u4F20\u672C\u673A\u2026");
-        const local = conflict?.local || await localStateGet();
-        const cloud = conflict?.cloud || await pullCloud();
-        await overwriteCloudWithLocal(local, cloud);
-        conflict = null;
-        renderCloudModalIfOpen();
-      } catch (error) {
-        setStatus("error", error.message);
-      }
-    };
-    document.getElementById("lwCloudLogout").onclick = cloudSignOut;
-  } else {
-    const credentials = () => ({
-      email: document.getElementById("lwCloudEmail").value.trim(),
-      password: document.getElementById("lwCloudPassword").value
-    });
-    document.getElementById("lwCloudLogin").onclick = async () => {
-      const { email: value, password } = credentials();
-      if (!value || !password) return setStatus("error", "\u8BF7\u8F93\u5165\u90AE\u7BB1\u548C\u5BC6\u7801");
-      try {
-        setStatus("syncing", "\u6B63\u5728\u767B\u5F55\u2026");
-        await cloudSignIn(value, password);
-        openCloudModal();
-      } catch (error) {
-        setStatus("error", error.message);
-      }
-    };
-    document.getElementById("lwCloudSignup").onclick = async () => {
-      const { email: value, password } = credentials();
-      if (!value || password.length < 6) return setStatus("error", "\u8BF7\u8F93\u5165\u90AE\u7BB1\uFF0C\u5BC6\u7801\u81F3\u5C11 6 \u4F4D");
-      try {
-        setStatus("syncing", "\u6B63\u5728\u6CE8\u518C\u2026");
-        const message = await cloudSignUp(value, password);
-        setStatus(session ? "synced" : "ready", message);
-        openCloudModal();
-      } catch (error) {
-        setStatus("error", error.message);
-      }
-    };
-  }
-}
-function ensureCloudButton() {
-  const toolbar = document.querySelector(".topbar .toolbar");
-  if (!toolbar || document.getElementById("cloudSyncTop")) return;
-  const button = document.createElement("button");
-  button.id = "cloudSyncTop";
-  button.className = "soft";
-  button.textContent = cloudLabel();
-  button.onclick = openCloudModal;
-  toolbar.prepend(button);
-  updateCloudButton();
-}
-async function periodicSync(force = false) {
-  if (document.hidden && !force) return;
-  await reconcileCloud({ force }).catch(() => {
-  });
-}
-function startObservers() {
-  injectStyles();
-  ensureCloudButton();
-  const observer = new MutationObserver(ensureCloudButton);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  const timer = setInterval(() => periodicSync(false), POLL_MS);
-  timer?.unref?.();
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) periodicSync(true);
-  });
-  window.addEventListener("online", () => periodicSync(true));
-}
-async function initCloudSync() {
-  if (typeof window === "undefined" || typeof document === "undefined" || typeof indexedDB === "undefined") return;
-  session = normalizeSession(readStored(SESSION_KEY));
-  startObservers();
-  if (session) await periodicSync(true);
-}
-if (typeof window !== "undefined" && typeof document !== "undefined") {
-  queueMicrotask(() => initCloudSync().catch((error) => {
-    console.error("Listenwrite cloud init failed", error);
-    setStatus("error", error?.message || "\u4E91\u540C\u6B65\u521D\u59CB\u5316\u5931\u8D25");
-  }));
-}
-
 // node_modules/ts-fsrs/dist/index.mjs
 var FSRSError = class _FSRSError extends Error {
   constructor(message = "FSRS Error") {
@@ -3282,7 +2793,7 @@ function normalizeDaily(raw = {}) {
     reviewedSectionIds: [...new Set(Array.isArray(raw.reviewedSectionIds) ? raw.reviewedSectionIds.filter(Boolean) : [])]
   };
 }
-function normalizeSession2(raw) {
+function normalizeSession(raw) {
   if (!raw || typeof raw !== "object") return null;
   const mode = ["learn", "review", "weak", "mix"].includes(raw.mode) ? raw.mode : "review";
   return {
@@ -3333,7 +2844,7 @@ function normalizeDataChartState(raw) {
     sections,
     attempts,
     daily,
-    session: normalizeSession2(src.session)
+    session: normalizeSession(src.session)
   };
 }
 function dataChartSections(seed) {
@@ -3607,54 +3118,62 @@ function dataChartAttemptsOnDay(dataChart, date) {
 }
 
 // src/storage.js
-var DB_NAME2 = "listenwrite-v3";
-var DB_VERSION2 = 1;
-var STORE2 = "kv";
-var STATE_KEY2 = "state";
+var DB_NAME = "listenwrite-v3";
+var DB_VERSION = 1;
+var STORE = "kv";
+var STATE_KEY = "state";
+var CLOUD_BASE_KEY = "cloud-base-v1";
+var CLOUD_CONFLICT_KEY = "cloud-conflict-v1";
 var LEGACY_KEY = "listenwrite-v2";
 var FALLBACK_KEY = "listenwrite-v3-fallback";
 var STATE_VERSION = 10;
-var dbPromise2 = null;
-function openDB2() {
-  if (dbPromise2) return dbPromise2;
-  dbPromise2 = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME2, DB_VERSION2);
+var dbPromise = null;
+var writeChain = Promise.resolve();
+var remoteApplying = false;
+function openDB() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(STORE2)) db.createObjectStore(STORE2);
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
     };
     req.onsuccess = () => {
       const db = req.result;
       db.onversionchange = () => {
         db.close();
-        dbPromise2 = null;
+        dbPromise = null;
       };
       resolve(db);
     };
     req.onerror = () => {
-      dbPromise2 = null;
+      dbPromise = null;
       reject(req.error);
     };
   });
-  return dbPromise2;
+  return dbPromise;
 }
 async function dbGet(key) {
-  const db = await openDB2();
+  const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE2, "readonly");
-    const req = tx.objectStore(STORE2).get(key);
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).get(key);
     req.onsuccess = () => resolve(req.result ?? null);
     req.onerror = () => reject(req.error);
   });
 }
 async function dbSet(key, value) {
-  const db = await openDB2();
+  const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE2, "readwrite");
-    tx.objectStore(STORE2).put(value, key);
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(value, key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+}
+function queueWrite(task) {
+  writeChain = writeChain.then(task, task);
+  return writeChain;
 }
 function storageContext(env = {}) {
   const standalone = env.standalone ?? (typeof window !== "undefined" && (window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator?.standalone === true));
@@ -3803,9 +3322,7 @@ function reindexEvents(events) {
     if (e.mode === "listen") {
       e.cold = !firstListenByWordDay.has(dayKey2);
       firstListenByWordDay.add(dayKey2);
-    } else {
-      e.cold = false;
-    }
+    } else e.cold = false;
     const attemptKey = `${dayKey2}|${e.mode}`;
     const n = (attempts.get(attemptKey) || 0) + 1;
     attempts.set(attemptKey, n);
@@ -3816,8 +3333,24 @@ function reindexEvents(events) {
 function normalizeSentenceSession(value) {
   if (!value || typeof value !== "object") return null;
   const updatedAt = Number(value.updatedAt) || 0;
-  if (value.mode === "whole" && value.run?.bookId && value.run?.entryId) return { mode: "whole", updatedAt, run: { ...value.run, input: String(value.run.input || ""), revealed: Boolean(value.run.revealed), peek: Boolean(value.run.peek) }, queue: (Array.isArray(value.queue) ? value.queue : []).filter((item) => item?.bookId && item?.entryId).map((item) => ({ bookId: item.bookId, entryId: item.entryId })) };
-  if (value.mode === "split" && Array.isArray(value.run?.items)) return { mode: "split", updatedAt, run: { ...value.run, items: value.run.items.filter((item) => item?.bookId && item?.entryId && Number.isInteger(Number(item.tokenIndex))).map((item) => ({ bookId: item.bookId, entryId: item.entryId, tokenIndex: Number(item.tokenIndex) })), cursor: Math.max(0, Number(value.run.cursor) || 0), input: String(value.run.input || ""), revealed: Boolean(value.run.revealed), completed: Boolean(value.run.completed) } };
+  if (value.mode === "whole" && value.run?.bookId && value.run?.entryId) return {
+    mode: "whole",
+    updatedAt,
+    run: { ...value.run, input: String(value.run.input || ""), revealed: Boolean(value.run.revealed), peek: Boolean(value.run.peek) },
+    queue: (Array.isArray(value.queue) ? value.queue : []).filter((item) => item?.bookId && item?.entryId).map((item) => ({ bookId: item.bookId, entryId: item.entryId }))
+  };
+  if (value.mode === "split" && Array.isArray(value.run?.items)) return {
+    mode: "split",
+    updatedAt,
+    run: {
+      ...value.run,
+      items: value.run.items.filter((item) => item?.bookId && item?.entryId && Number.isInteger(Number(item.tokenIndex))).map((item) => ({ bookId: item.bookId, entryId: item.entryId, tokenIndex: Number(item.tokenIndex) })),
+      cursor: Math.max(0, Number(value.run.cursor) || 0),
+      input: String(value.run.input || ""),
+      revealed: Boolean(value.run.revealed),
+      completed: Boolean(value.run.completed)
+    }
+  };
   return null;
 }
 function normalizeState(input) {
@@ -3866,11 +3399,8 @@ function normalizeState(input) {
   for (const word of state2.words) {
     if (state2.simpleWords.includes(word.en)) word.retired = true;
     const evs = state2.events.filter((e) => e.wordId === word.id && e.cold && e.mode === "listen").sort((a, b) => a.ts - b.ts);
-    if (migrateScheduling) {
-      word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : emptyCard();
-    } else if (!word.card) {
-      word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : emptyCard();
-    }
+    if (migrateScheduling) word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : emptyCard();
+    else if (!word.card) word.card = evs.length ? rebuildCard(evs, state2.settings.retention) : emptyCard();
   }
   state2.version = STATE_VERSION;
   return state2;
@@ -3883,19 +3413,26 @@ async function parseLocal(key) {
     return null;
   }
 }
+async function readPersistedState() {
+  try {
+    return await dbGet(STATE_KEY);
+  } catch {
+    return parseLocal(FALLBACK_KEY);
+  }
+}
 async function loadState() {
   try {
-    const saved = await dbGet(STATE_KEY2);
+    const saved = await dbGet(STATE_KEY);
     if (saved) return normalizeState(saved);
     const fallback = await parseLocal(FALLBACK_KEY);
     if (fallback) {
-      await dbSet(STATE_KEY2, fallback);
+      await queueWrite(() => dbSet(STATE_KEY, fallback));
       return fallback;
     }
     const legacy = await parseLocal(LEGACY_KEY);
     const state2 = legacy || defaultState();
     if (!state2.words.length) state2.words = sampleWords();
-    await dbSet(STATE_KEY2, state2);
+    await queueWrite(() => dbSet(STATE_KEY, state2));
     return normalizeState(state2);
   } catch {
     const fallback = await parseLocal(FALLBACK_KEY);
@@ -3907,23 +3444,626 @@ async function loadState() {
   }
 }
 async function saveState(state2) {
+  if (remoteApplying) return;
   state2.version = STATE_VERSION;
   ensureSimpleWords(state2);
-  try {
-    await dbSet(STATE_KEY2, state2);
-    localStorage.removeItem(FALLBACK_KEY);
-  } catch {
-    localStorage.setItem(FALLBACK_KEY, JSON.stringify(state2));
-  }
+  return queueWrite(async () => {
+    if (remoteApplying) return;
+    try {
+      await dbSet(STATE_KEY, state2);
+      localStorage.removeItem(FALLBACK_KEY);
+    } catch {
+      localStorage.setItem(FALLBACK_KEY, JSON.stringify(state2));
+    }
+  });
 }
 async function replaceState(raw) {
   const state2 = normalizeState(raw);
   await saveState(state2);
   return state2;
 }
+async function applyRemoteState(raw) {
+  remoteApplying = true;
+  const state2 = normalizeState(raw);
+  await queueWrite(async () => {
+    await dbSet(STATE_KEY, state2);
+    try {
+      localStorage.removeItem(FALLBACK_KEY);
+    } catch {
+    }
+  });
+  return state2;
+}
+async function readCloudSyncBase() {
+  try {
+    return await dbGet(CLOUD_BASE_KEY);
+  } catch {
+    return null;
+  }
+}
+async function saveCloudSyncBase(value) {
+  return queueWrite(() => dbSet(CLOUD_BASE_KEY, value));
+}
+async function saveCloudConflictBackup(value) {
+  return queueWrite(() => dbSet(CLOUD_CONFLICT_KEY, value));
+}
 function exportState(state2) {
   return JSON.stringify(state2, null, 2);
 }
+
+// src/cloudmerge.js
+function same(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+function clone(value) {
+  return value == null ? value : structuredClone(value);
+}
+var SET_ARRAY_PATHS = /* @__PURE__ */ new Set(["simpleWords", "errorBooks"]);
+var ID_ARRAY_PATHS = /* @__PURE__ */ new Set(["words", "texts", "activities", "events"]);
+function itemKey(path, item, index) {
+  if (ID_ARRAY_PATHS.has(path) && item && typeof item === "object" && item.id != null) return `id:${item.id}`;
+  if (path === "sentenceBooks" && item && typeof item === "object" && item.id != null) return `id:${item.id}`;
+  if (path.endsWith(".entries") && item && typeof item === "object" && item.id != null) return `id:${item.id}`;
+  if (path === "dataChart.attempts" && item && typeof item === "object" && item.id != null) return `id:${item.id}`;
+  return `index:${index}`;
+}
+function mergeSetArray(base = [], local = [], cloud = []) {
+  const b = new Set(base), l = new Set(local), c = new Set(cloud);
+  const all = /* @__PURE__ */ new Set([...b, ...l, ...c]);
+  const out = [];
+  for (const value of all) {
+    const was = b.has(value), lv = l.has(value), cv = c.has(value);
+    if (lv === cv) {
+      if (lv) out.push(value);
+      continue;
+    }
+    if (lv === was) {
+      if (cv) out.push(value);
+      continue;
+    }
+    if (cv === was) {
+      if (lv) out.push(value);
+      continue;
+    }
+  }
+  return out;
+}
+function mergeArray(base = [], local = [], cloud = [], path, conflicts) {
+  if (SET_ARRAY_PATHS.has(path)) return mergeSetArray(base, local, cloud);
+  const allObjectIds = [...base, ...local, ...cloud].every((item) => item == null || typeof item !== "object" || item.id != null);
+  const keyed = ID_ARRAY_PATHS.has(path) || path === "sentenceBooks" || path.endsWith(".entries") || path === "dataChart.attempts" || allObjectIds;
+  if (!keyed) {
+    if (same(local, cloud)) return clone(local);
+    if (same(local, base)) return clone(cloud);
+    if (same(cloud, base)) return clone(local);
+    if (local.length === cloud.length && local.length === base.length) {
+      return local.map((_, i) => mergeValue(base[i], local[i], cloud[i], `${path}[${i}]`, conflicts));
+    }
+    conflicts.push(path);
+    return clone(local);
+  }
+  const map = (arr) => new Map(arr.map((item, index) => [itemKey(path, item, index), item]));
+  const bm = map(base), lm = map(local), cm = map(cloud);
+  const keys = [.../* @__PURE__ */ new Set([...bm.keys(), ...lm.keys(), ...cm.keys()])];
+  const out = [];
+  for (const key of keys) {
+    const b = bm.get(key), l = lm.get(key), c = cm.get(key);
+    const childPath = `${path}{${key}}`;
+    if (l === void 0 && c === void 0) continue;
+    if (b === void 0) {
+      if (l === void 0) {
+        out.push(clone(c));
+        continue;
+      }
+      if (c === void 0) {
+        out.push(clone(l));
+        continue;
+      }
+      out.push(mergeValue(void 0, l, c, childPath, conflicts));
+      continue;
+    }
+    if (l === void 0) {
+      if (same(c, b)) continue;
+      conflicts.push(childPath);
+      out.push(clone(c));
+      continue;
+    }
+    if (c === void 0) {
+      if (same(l, b)) continue;
+      conflicts.push(childPath);
+      out.push(clone(l));
+      continue;
+    }
+    out.push(mergeValue(b, l, c, childPath, conflicts));
+  }
+  return out;
+}
+function mergeObject(base = {}, local = {}, cloud = {}, path, conflicts) {
+  const out = {};
+  const keys = [.../* @__PURE__ */ new Set([...Object.keys(base || {}), ...Object.keys(local || {}), ...Object.keys(cloud || {})])];
+  for (const key of keys) {
+    const childPath = path ? `${path}.${key}` : key;
+    const value = mergeValue(base?.[key], local?.[key], cloud?.[key], childPath, conflicts);
+    if (value !== void 0) out[key] = value;
+  }
+  return out;
+}
+function mergeValue(base, local, cloud, path, conflicts) {
+  if (same(local, cloud)) return clone(local);
+  if (same(local, base)) return clone(cloud);
+  if (same(cloud, base)) return clone(local);
+  if (local === void 0 || cloud === void 0) {
+    conflicts.push(path);
+    return clone(local === void 0 ? cloud : local);
+  }
+  if (Array.isArray(local) && Array.isArray(cloud) && Array.isArray(base || [])) return mergeArray(base || [], local, cloud, path, conflicts);
+  if (local && cloud && typeof local === "object" && typeof cloud === "object" && !Array.isArray(local) && !Array.isArray(cloud)) {
+    return mergeObject(base && typeof base === "object" && !Array.isArray(base) ? base : {}, local, cloud, path, conflicts);
+  }
+  conflicts.push(path);
+  return clone(local);
+}
+function mergeCloudStates(base, local, cloud) {
+  const conflicts = [];
+  const state2 = mergeValue(base || {}, local || {}, cloud || {}, "", conflicts);
+  return { state: state2, conflicts: [...new Set(conflicts.filter(Boolean))] };
+}
+
+// src/cloudsync.js
+var SUPABASE_URL = "https://bsuilpygojnqxntrxgnm.supabase.co";
+var SUPABASE_KEY = "sb_publishable_Y_nFcIW0Sg0pB2zEhMU50g_LVQMX2Am";
+var APP_URL = "https://jiaxinliu694-hash.github.io/listenwrite/";
+var SESSION_KEY = "listenwrite-supabase-session-v1";
+var META_KEY = "listenwrite-cloud-meta-v1";
+var POLL_MS = 5e3;
+var CLOUD_POLL_MS = 15e3;
+var session = null;
+var syncStatus = "offline";
+var syncMessage = "\u672A\u767B\u5F55\u4E91\u540C\u6B65";
+var conflict = null;
+var pendingRemote = null;
+var syncBusy = false;
+var refreshInFlight = null;
+var lastCloudCheck = 0;
+function nowSec() {
+  return Math.floor(Date.now() / 1e3);
+}
+function parseJson(text, fallback = null) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return fallback;
+  }
+}
+function readStored(key) {
+  try {
+    return parseJson(localStorage.getItem(key) || "", null);
+  } catch {
+    return null;
+  }
+}
+function writeStored(key, value) {
+  try {
+    value == null ? localStorage.removeItem(key) : localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+  }
+}
+function stateFingerprint(state2) {
+  const text = JSON.stringify(state2 || null);
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `${text.length}:${(h >>> 0).toString(16)}`;
+}
+function normalizeSession2(raw) {
+  if (!raw?.access_token || !raw?.refresh_token) return null;
+  const expiresAt = Number(raw.expires_at) || nowSec() + Number(raw.expires_in || 3600);
+  return { ...raw, expires_at: expiresAt };
+}
+function saveSession(raw) {
+  session = normalizeSession2(raw);
+  writeStored(SESSION_KEY, session);
+  updateCloudButton();
+  return session;
+}
+function clearSession() {
+  session = null;
+  conflict = null;
+  pendingRemote = null;
+  syncStatus = "offline";
+  syncMessage = "\u672A\u767B\u5F55\u4E91\u540C\u6B65";
+  writeStored(SESSION_KEY, null);
+  updateCloudButton();
+}
+async function authRequest(path, body) {
+  const response = await fetch(`${SUPABASE_URL}${path}`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `\u8BF7\u6C42\u5931\u8D25 ${response.status}`);
+  return data;
+}
+async function refreshSession() {
+  if (refreshInFlight) return refreshInFlight;
+  if (!session?.refresh_token) return null;
+  const token = session.refresh_token;
+  refreshInFlight = (async () => {
+    try {
+      const data = await authRequest("/auth/v1/token?grant_type=refresh_token", { refresh_token: token });
+      return saveSession(data);
+    } catch (error) {
+      clearSession();
+      throw error;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+async function ensureSession() {
+  if (!session) session = normalizeSession2(readStored(SESSION_KEY));
+  if (!session) return null;
+  if (Number(session.expires_at || 0) <= nowSec() + 60) await refreshSession();
+  return session;
+}
+async function rpcRequest(path, body = {}, retried = false) {
+  const current = await ensureSession();
+  if (!current) throw new Error("\u8BF7\u5148\u767B\u5F55\u4E91\u540C\u6B65");
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${path}`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${current.access_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (response.status === 401 && !retried) {
+    await refreshSession();
+    return rpcRequest(path, body, true);
+  }
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(data?.message || data?.hint || `\u4E91\u7AEF\u8BF7\u6C42\u5931\u8D25 ${response.status}`);
+  return data;
+}
+async function pullCloud() {
+  const rows = await rpcRequest("listenwrite_pull_state");
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+async function pushCloud(state2, expectedRevision = null) {
+  const rows = await rpcRequest("listenwrite_push_state", {
+    p_state: state2,
+    p_state_updated_at: Date.now(),
+    p_expected_revision: expectedRevision
+  });
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+function metaForUser() {
+  const meta = readStored(META_KEY) || {};
+  const uid2 = session?.user?.id || null;
+  return meta.userId === uid2 ? meta : { userId: uid2, revision: 0, lastSyncedHash: null, cloudUpdatedAt: 0 };
+}
+function saveMeta(meta) {
+  writeStored(META_KEY, { ...meta, userId: session?.user?.id || meta.userId || null });
+}
+function cloudLabel() {
+  if (!session) return "\u4E91\u540C\u6B65";
+  if (syncStatus === "conflict") return "\u4E91\u51B2\u7A81";
+  if (syncStatus === "pending") return "\u4E91\u7AEF\u6709\u66F4\u65B0";
+  if (syncStatus === "syncing") return "\u540C\u6B65\u4E2D";
+  if (syncStatus === "error") return "\u4E91\u5F02\u5E38";
+  if (syncStatus === "synced") return "\u4E91\u5DF2\u540C\u6B65";
+  return "\u4E91\u5DF2\u767B\u5F55";
+}
+function updateCloudButton() {
+  const button = typeof document !== "undefined" ? document.getElementById("cloudSyncTop") : null;
+  if (!button) return;
+  button.textContent = cloudLabel();
+  button.classList.toggle("cloud-alert", ["conflict", "error", "pending"].includes(syncStatus));
+}
+function setStatus(status, message) {
+  syncStatus = status;
+  syncMessage = message || "";
+  updateCloudButton();
+  const statusEl = typeof document !== "undefined" ? document.getElementById("lwCloudStatus") : null;
+  if (statusEl) statusEl.textContent = syncMessage;
+}
+function busyWithStudy() {
+  if (typeof document === "undefined") return false;
+  if (document.querySelector(".immersive")) return true;
+  const active = document.activeElement;
+  return Boolean(active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName) && !active.closest("#lwCloudMask"));
+}
+async function rememberSyncedState(state2, revision, updatedAt) {
+  await saveCloudSyncBase(state2);
+  saveMeta({ userId: session.user.id, revision: Number(revision) || 0, lastSyncedHash: stateFingerprint(state2), cloudUpdatedAt: Number(updatedAt) || 0 });
+}
+async function applyCloudState(row, { force = false } = {}) {
+  if (!row?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
+  if (!force && busyWithStudy()) {
+    pendingRemote = row;
+    setStatus("pending", "\u4E91\u7AEF\u6709\u65B0\u8BB0\u5F55\uFF1B\u5F53\u524D\u5B66\u4E60\u7ED3\u675F\u540E\u4F1A\u5E94\u7528\uFF0C\u4E0D\u4F1A\u6253\u65AD\u672C\u8F6E");
+    return false;
+  }
+  await rememberSyncedState(row.state, row.revision, row.state_updated_at);
+  await applyRemoteState(row.state);
+  setStatus("synced", "\u5DF2\u5E94\u7528\u4E91\u7AEF\u8BB0\u5F55");
+  location.reload();
+  return true;
+}
+async function acceptPush(local, result) {
+  await rememberSyncedState(local, Number(result?.revision) || 1, Number(result?.cloud_updated_at) || Date.now());
+  conflict = null;
+  setStatus("synced", "\u5DF2\u540C\u6B65\u5230\u4E91\u7AEF");
+}
+async function pushLocal(local, expectedRevision = null) {
+  const result = await pushCloud(local, expectedRevision);
+  if (result?.status === "conflict") {
+    await prepareConflict(local, { state: result.cloud_state, state_updated_at: result.cloud_updated_at, revision: result.revision });
+    return false;
+  }
+  await acceptPush(local, result);
+  return true;
+}
+async function prepareConflict(local, cloud) {
+  const base = await readCloudSyncBase();
+  const merged = base ? mergeCloudStates(base, local, cloud?.state || {}) : null;
+  conflict = { local, cloud, base, merged };
+  await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud, base, mergedConflicts: merged?.conflicts || [] });
+  setStatus("conflict", merged ? `\u68C0\u6D4B\u5230\u53CC\u7AEF\u4FEE\u6539\uFF1B\u53EF\u5B89\u5168\u5408\u5E76\u5B66\u4E60\u8BB0\u5F55${merged.conflicts.length ? `\uFF08\u53E6\u6709 ${merged.conflicts.length} \u5904\u5185\u5BB9\u51B2\u7A81\uFF09` : ""}` : "\u672C\u673A\u548C\u4E91\u7AEF\u90FD\u6709\u8BB0\u5F55\uFF0C\u8BF7\u9009\u62E9\u4FDD\u7559\u54EA\u4E00\u4EFD");
+}
+async function mergeConflict() {
+  if (!conflict?.cloud?.state) return;
+  const base = conflict.base || await readCloudSyncBase();
+  if (!base) throw new Error("\u7F3A\u5C11\u5171\u540C\u540C\u6B65\u57FA\u7EBF\uFF0C\u4E0D\u80FD\u81EA\u52A8\u5408\u5E76\uFF1B\u8BF7\u5148\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD\u518D\u9009\u62E9\u4E00\u8FB9");
+  const merged = mergeCloudStates(base, conflict.local, conflict.cloud.state);
+  const result = await pushCloud(merged.state, Number(conflict.cloud.revision) || null);
+  if (result?.status === "conflict") {
+    await prepareConflict(await readPersistedState(), { state: result.cloud_state, state_updated_at: result.cloud_updated_at, revision: result.revision });
+    return;
+  }
+  await rememberSyncedState(merged.state, result?.revision, result?.cloud_updated_at);
+  await applyRemoteState(merged.state);
+  setStatus("synced", merged.conflicts.length ? `\u5DF2\u5408\u5E76\uFF1B${merged.conflicts.length} \u5904\u540C\u65F6\u7F16\u8F91\u4EE5\u672C\u673A\u5185\u5BB9\u4E3A\u51C6\uFF0C\u4E91\u7AEF\u539F\u7A3F\u5DF2\u7559\u51B2\u7A81\u5907\u4EFD` : "\u53CC\u65B9\u5B66\u4E60\u8BB0\u5F55\u5DF2\u5408\u5E76");
+  location.reload();
+}
+async function reconcileCloud({ force = false } = {}) {
+  if (syncBusy) return;
+  const current = await ensureSession().catch(() => null);
+  if (!current) return setStatus("offline", "\u672A\u767B\u5F55\u4E91\u540C\u6B65");
+  if (pendingRemote && !busyWithStudy()) return applyCloudState(pendingRemote, { force: true });
+  syncBusy = true;
+  setStatus("syncing", "\u6B63\u5728\u68C0\u67E5\u4E91\u7AEF\u2026");
+  try {
+    const local = await readPersistedState();
+    const localHash = stateFingerprint(local);
+    const localHasData = hasUserData(local);
+    const meta = metaForUser();
+    const shouldCheckCloud = force || Date.now() - lastCloudCheck >= CLOUD_POLL_MS || !meta.revision;
+    if (!shouldCheckCloud) {
+      if (meta.lastSyncedHash && localHash !== meta.lastSyncedHash) await pushLocal(local, Number(meta.revision) || null);
+      else setStatus("synced", "\u5DF2\u540C\u6B65");
+      return;
+    }
+    const cloud = await pullCloud();
+    lastCloudCheck = Date.now();
+    if (!cloud) {
+      if (localHasData) await pushLocal(local, null);
+      else setStatus("ready", "\u5DF2\u767B\u5F55\uFF1B\u672C\u673A\u548C\u4E91\u7AEF\u90FD\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
+      return;
+    }
+    if (!localHasData) {
+      await applyCloudState(cloud);
+      return;
+    }
+    const cloudRevision = Number(cloud.revision) || 0;
+    const sameUserMeta = (readStored(META_KEY) || {}).userId === current.user.id;
+    if (!sameUserMeta || !meta.revision || !meta.lastSyncedHash) {
+      if (localHash === stateFingerprint(cloud.state)) {
+        await rememberSyncedState(local, cloudRevision, cloud.state_updated_at);
+        setStatus("synced", "\u5DF2\u540C\u6B65");
+      } else await prepareConflict(local, cloud);
+      return;
+    }
+    const localChanged = localHash !== meta.lastSyncedHash;
+    const cloudChanged = cloudRevision > Number(meta.revision || 0);
+    if (!localChanged && cloudChanged) {
+      await applyCloudState(cloud);
+      return;
+    }
+    if (localChanged && !cloudChanged) {
+      await pushLocal(local, cloudRevision);
+      return;
+    }
+    if (!localChanged && !cloudChanged) {
+      setStatus("synced", "\u5DF2\u540C\u6B65");
+      return;
+    }
+    const base = await readCloudSyncBase();
+    if (base) {
+      const merged = mergeCloudStates(base, local, cloud.state);
+      if (!merged.conflicts.length && !busyWithStudy()) {
+        const result = await pushCloud(merged.state, cloudRevision);
+        if (result?.status !== "conflict") {
+          await rememberSyncedState(merged.state, result?.revision, result?.cloud_updated_at);
+          await applyRemoteState(merged.state);
+          setStatus("synced", "\u5DF2\u81EA\u52A8\u5408\u5E76\u53CC\u65B9\u5B66\u4E60\u8BB0\u5F55");
+          location.reload();
+          return;
+        }
+      }
+    }
+    await prepareConflict(local, cloud);
+  } catch (error) {
+    console.error("Listenwrite cloud sync failed", error);
+    setStatus("error", error?.message || "\u4E91\u540C\u6B65\u5931\u8D25");
+  } finally {
+    syncBusy = false;
+    renderCloudModalIfOpen();
+  }
+}
+async function cloudSignIn(email, password) {
+  const data = await authRequest("/auth/v1/token?grant_type=password", { email, password });
+  saveSession(data);
+  conflict = null;
+  await reconcileCloud({ force: true });
+}
+async function cloudSignUp(email, password) {
+  const path = `/auth/v1/signup?redirect_to=${encodeURIComponent(APP_URL)}`;
+  const data = await authRequest(path, { email, password });
+  if (data?.access_token) {
+    saveSession(data);
+    await reconcileCloud({ force: true });
+    return "\u6CE8\u518C\u5E76\u767B\u5F55\u6210\u529F";
+  }
+  return "\u6CE8\u518C\u6210\u529F\u3002\u8BF7\u53BB\u90AE\u7BB1\u786E\u8BA4\uFF1B\u786E\u8BA4\u540E\u4F1A\u56DE\u5230\u7231\u542C\u5199\uFF0C\u518D\u76F4\u63A5\u767B\u5F55\u3002";
+}
+async function cloudSignOut() {
+  try {
+    if (session?.access_token) await fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, { method: "POST", headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${session.access_token}` } });
+  } catch {
+  }
+  clearSession();
+  renderCloudModalIfOpen();
+}
+function consumeAuthCallback() {
+  if (typeof location === "undefined" || !location.hash) return false;
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const access_token = params.get("access_token");
+  const refresh_token = params.get("refresh_token");
+  if (!access_token || !refresh_token) return false;
+  const expires_in = Number(params.get("expires_in")) || 3600;
+  saveSession({ access_token, refresh_token, expires_in, token_type: params.get("token_type") || "bearer", user: null });
+  history.replaceState(null, "", location.pathname + location.search);
+  return true;
+}
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+function downloadJson(name, value) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1e3);
+}
+function injectStyles() {
+  if (document.getElementById("lwCloudStyles")) return;
+  const style = document.createElement("style");
+  style.id = "lwCloudStyles";
+  style.textContent = `.cloud-alert{border-color:#c66559!important;color:#9f463d!important}.lw-cloud-mask{position:fixed;inset:0;z-index:9998;background:rgba(35,33,28,.36);display:flex;align-items:flex-end;justify-content:center;padding:18px}.lw-cloud-panel{width:min(600px,100%);max-height:84vh;overflow:auto;background:#fffdf8;border:1px solid rgba(90,80,65,.16);border-radius:24px;padding:20px;box-shadow:0 22px 70px rgba(20,18,14,.2)}.lw-cloud-panel h2{margin:0 0 6px;font-size:24px}.lw-cloud-panel p{color:#76776f;line-height:1.6;margin:0 0 14px}.lw-cloud-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.lw-cloud-field{display:grid;gap:6px;margin:10px 0}.lw-cloud-field input{width:100%;box-sizing:border-box;padding:12px 13px;border:1px solid #d8d3ca;border-radius:13px;background:#fff;font:inherit}.lw-cloud-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:14px}.lw-cloud-actions button{padding:10px 14px;border-radius:13px;border:1px solid #d8d3ca;background:#fff;font:inherit}.lw-cloud-actions .primary{background:#292a26;color:#fff;border-color:#292a26}.lw-cloud-status{padding:10px 12px;border-radius:13px;background:#f3efe7;margin:10px 0;color:#55574f}.lw-cloud-warning{background:#f9e9e6;color:#9f463d}@media(max-width:520px){.lw-cloud-grid{grid-template-columns:1fr}.lw-cloud-panel{padding:17px;border-radius:20px}.lw-cloud-mask{padding:10px}}`;
+  document.head.appendChild(style);
+}
+function closeCloudModal() {
+  document.getElementById("lwCloudMask")?.remove();
+}
+function renderCloudModalIfOpen() {
+  if (document.getElementById("lwCloudMask")) openCloudModal();
+}
+function openCloudModal() {
+  closeCloudModal();
+  const mask = document.createElement("div");
+  mask.id = "lwCloudMask";
+  mask.className = "lw-cloud-mask";
+  const email = session?.user?.email || "\u5F53\u524D\u8D26\u53F7";
+  const conflictHtml = conflict ? `<div class="lw-cloud-status lw-cloud-warning"><b>\u68C0\u6D4B\u5230\u4E24\u7AEF\u90FD\u6709\u4FEE\u6539</b><br>${esc(syncMessage)}</div>` : "";
+  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>\u4E91\u540C\u6B65</h2><p>\u672C\u5730\u4ECD\u7136\u4FDD\u5B58\uFF1B\u4E91\u7AEF\u8D1F\u8D23\u7535\u8111\u3001Safari \u548C\u4E3B\u5C4F\u5E55 App \u540C\u6B65\u3002\u53CC\u7AEF\u540C\u65F6\u4FEE\u6539\u65F6\u5148\u4FDD\u7559\u53CC\u65B9\u5FEB\u7167\uFF0C\u4E0D\u518D\u76F4\u63A5\u8986\u76D6\u3002</p></div><button id="lwCloudClose" style="border:0;background:transparent;font-size:24px">\xD7</button></div>${session ? `<div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div>${conflictHtml}<div class="small">\u5DF2\u767B\u5F55\uFF1A${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">\u7ACB\u5373\u540C\u6B65</button>${conflict ? '<button id="lwCloudMerge" class="primary">\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55</button><button id="lwCloudBackup">\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD</button>' : ""}<button id="lwCloudPull">\u4F7F\u7528\u4E91\u7AEF</button><button id="lwCloudPush">\u4E0A\u4F20\u672C\u673A</button><button id="lwCloudLogout">\u53EA\u9000\u51FA\u672C\u8BBE\u5907</button></div><p style="margin-top:12px">\u6709\u51B2\u7A81\u65F6\u4F18\u5148\u7528\u201C\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55\u201D\u3002\u201C\u4F7F\u7528\u4E91\u7AEF / \u4E0A\u4F20\u672C\u673A\u201D\u5C5E\u4E8E\u6574\u4EFD\u66FF\u6362\uFF0C\u64CD\u4F5C\u524D\u7CFB\u7EDF\u5DF2\u4FDD\u5B58\u51B2\u7A81\u5FEB\u7167\u3002</p>` : `<div class="lw-cloud-grid"><label class="lw-cloud-field">\u90AE\u7BB1<input id="lwCloudEmail" type="email" autocomplete="email"></label><label class="lw-cloud-field">\u5BC6\u7801<input id="lwCloudPassword" type="password" autocomplete="current-password"></label></div><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudLogin" class="primary">\u767B\u5F55</button><button id="lwCloudSignup">\u6CE8\u518C\u8D26\u53F7</button></div>`}</div>`;
+  mask.addEventListener("click", (e) => {
+    if (e.target === mask) closeCloudModal();
+  });
+  document.body.appendChild(mask);
+  document.getElementById("lwCloudClose").onclick = closeCloudModal;
+  if (session) {
+    document.getElementById("lwCloudNow").onclick = () => reconcileCloud({ force: true });
+    if (document.getElementById("lwCloudMerge")) document.getElementById("lwCloudMerge").onclick = () => mergeConflict().catch((e) => setStatus("error", e.message));
+    if (document.getElementById("lwCloudBackup")) document.getElementById("lwCloudBackup").onclick = () => downloadJson(`listenwrite-cloud-conflict-${Date.now()}.json`, conflict.cloud.state);
+    document.getElementById("lwCloudPull").onclick = async () => {
+      try {
+        const cloud = conflict?.cloud || pendingRemote || await pullCloud();
+        if (!cloud?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
+        await saveCloudConflictBackup({ createdAt: Date.now(), local: await readPersistedState(), cloud });
+        await applyCloudState(cloud, { force: true });
+      } catch (e) {
+        setStatus("error", e.message);
+      }
+    };
+    document.getElementById("lwCloudPush").onclick = async () => {
+      try {
+        const local = conflict?.local || await readPersistedState();
+        const cloud = conflict?.cloud || await pullCloud();
+        if (cloud?.state) await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud });
+        await pushLocal(local, cloud ? Number(cloud.revision) || null : null);
+      } catch (e) {
+        setStatus("error", e.message);
+      }
+    };
+    document.getElementById("lwCloudLogout").onclick = cloudSignOut;
+  } else {
+    const credentials = () => ({ email: document.getElementById("lwCloudEmail").value.trim(), password: document.getElementById("lwCloudPassword").value });
+    document.getElementById("lwCloudLogin").onclick = async () => {
+      const { email: email2, password } = credentials();
+      if (!email2 || !password) return setStatus("error", "\u8BF7\u8F93\u5165\u90AE\u7BB1\u548C\u5BC6\u7801");
+      try {
+        setStatus("syncing", "\u6B63\u5728\u767B\u5F55\u2026");
+        await cloudSignIn(email2, password);
+        openCloudModal();
+      } catch (e) {
+        setStatus("error", e.message);
+      }
+    };
+    document.getElementById("lwCloudSignup").onclick = async () => {
+      const { email: email2, password } = credentials();
+      if (!email2 || password.length < 6) return setStatus("error", "\u8BF7\u8F93\u5165\u90AE\u7BB1\uFF0C\u5BC6\u7801\u81F3\u5C11 6 \u4F4D");
+      try {
+        setStatus("syncing", "\u6B63\u5728\u6CE8\u518C\u2026");
+        const msg = await cloudSignUp(email2, password);
+        setStatus(session ? "synced" : "ready", msg);
+        openCloudModal();
+      } catch (e) {
+        setStatus("error", e.message);
+      }
+    };
+  }
+}
+function ensureCloudButton() {
+  const toolbar = document.querySelector(".topbar .toolbar");
+  if (!toolbar || document.getElementById("cloudSyncTop")) return;
+  const button = document.createElement("button");
+  button.id = "cloudSyncTop";
+  button.className = "soft";
+  button.textContent = cloudLabel();
+  button.onclick = openCloudModal;
+  toolbar.prepend(button);
+  updateCloudButton();
+}
+async function periodicSync(force = false) {
+  if (document.hidden && !force) return;
+  await reconcileCloud({ force }).catch(() => {
+  });
+}
+function startObservers() {
+  injectStyles();
+  ensureCloudButton();
+  const observer = new MutationObserver(ensureCloudButton);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  const timer = setInterval(() => periodicSync(false), POLL_MS);
+  timer?.unref?.();
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) periodicSync(true);
+  });
+  window.addEventListener("online", () => periodicSync(true));
+}
+async function initCloudSync() {
+  if (typeof window === "undefined" || typeof document === "undefined" || typeof indexedDB === "undefined") return;
+  session = normalizeSession2(readStored(SESSION_KEY));
+  consumeAuthCallback();
+  startObservers();
+  if (session) await periodicSync(true);
+}
+if (typeof window !== "undefined" && typeof document !== "undefined") queueMicrotask(() => initCloudSync().catch((error) => {
+  console.error("Listenwrite cloud init failed", error);
+  setStatus("error", error?.message || "\u4E91\u540C\u6B65\u521D\u59CB\u5316\u5931\u8D25");
+}));
 
 // src/reinforcement.js
 var REQUIRED_GOOD_STREAK = 3;
