@@ -5420,6 +5420,28 @@ function textCollectionSummaries(state2) {
   return [...groups.values()].sort((a, b) => b.lastActivity - a.lastActivity || a.name.localeCompare(b.name));
 }
 
+// src/recenthistory.js
+function recentStudyDates(today, count = 3) {
+  const n = Math.max(1, Number(count) || 1);
+  return Array.from({ length: n }, (_, index) => addStudyDays(today, -index));
+}
+function recentListeningRows(state2, date) {
+  const events = (state2?.events || []).filter((event) => event?.mode === "listen" && event.date === date).sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+  const groups = /* @__PURE__ */ new Map();
+  for (const event of events) {
+    if (!groups.has(event.wordId)) groups.set(event.wordId, []);
+    groups.get(event.wordId).push(event);
+  }
+  return [...groups.entries()].map(([wordId, wordEvents2]) => ({ word: (state2.words || []).find((word) => word.id === wordId), events: wordEvents2 })).filter((row) => row.word).sort((a, b) => Number(b.events.at(-1)?.ts || 0) - Number(a.events.at(-1)?.ts || 0));
+}
+function recentListeningStatus(word, events = []) {
+  if (word?.retired) return { label: "\u7B80\u5355", cls: "mark-simple", passed: true };
+  const status = reinforcementState(events);
+  if (!status.started) return { label: "\u672A\u5F00\u59CB", cls: "mark-pending", passed: false };
+  if (status.passed) return { label: "\u5DF2\u719F\u6089", cls: "mark-good", passed: true };
+  return { label: reinforcementLabel(events), cls: "mark-bad", passed: false };
+}
+
 // src/app.js
 var root = document.getElementById("app");
 var restoreInput = document.getElementById("file-restore");
@@ -5463,6 +5485,7 @@ var labels = {
   text: ["\u6587\u672C", "\u6587\u672C\u5E93"],
   datachart: ["\u6570\u636E\u56FE", "\u6570\u636E\u56FE"],
   library: ["\u8BCD\u5E93", "\u8BCD\u5E93"],
+  recent: ["\u8BB0\u5F55", "\u8FD1 3 \u5929\u5B66\u4E60\u8BB0\u5F55"],
   stats: ["\u7EDF\u8BA1", "\u5B66\u4E60\u7EDF\u8BA1"]
 };
 function esc2(v) {
@@ -5721,12 +5744,13 @@ function errorBookSectionHtml() {
 }
 function renderHome() {
   const today = todayListeningStats(state, [], currentDayKey());
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929</h2><p>\u9996\u9875\u53EA\u7559\u4ECA\u65E5\u5B8C\u6210\u5C0F\u8BA1\u548C\u5165\u53E3\u3002</p></div><button id="goToday" class="primary">\u8FDB\u5165\u4ECA\u65E5\u5B66\u4E60</button></div><div class="grid2" style="margin-top:16px"><div class="statbox"><b>${today.newCount}</b><span>\u4ECA\u65E5\u65B0\u8BCD\u5B8C\u6210</span></div><div class="statbox"><b>${today.reviewCount}</b><span>\u4ECA\u65E5\u590D\u4E60\u5B8C\u6210</span></div></div></section><div class="grid2"><button id="homeToday" class="entry"><b>\u4ECA\u65E5\u5B66\u4E60</b><span>\u7EE7\u7EED\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u5F53\u5929\u5F85\u5DE9\u56FA\u3002</span></button><button id="goType" class="entry"><b>\u624B\u6253\u5F3A\u5316</b><span>\u6309\u65E5\u671F\u3001\u8BCD\u4E66\u548C\u4E0D\u719F\u6B21\u6570\u7B5B\u9009\u5F3A\u5316\u3002</span></button><button id="goText" class="entry"><b>\u6587\u672C\u4E0E\u53E5\u5B50</b><span>\u6587\u672C\u5E93\u3001\u53E5\u5B50\u62C6\u8BCD\u542C\u5199\u548C\u53E5\u5B50\u9519\u8BCD\u3002</span></button><button id="goDataChart" class="entry"><b>\u6570\u636E\u56FE</b><span>\u6309\u5C0F\u8282\u80CC Task 1 \u8868\u8FBE\uFF0C\u652F\u6301 3/3 \u5F3A\u5316\u548C\u6DF7\u6392\u590D\u4E60\u3002</span></button><button id="goStats" class="entry"><b>\u5B66\u4E60\u7EDF\u8BA1</b><span>\u65E5\u5386\u3001\u9996\u8F6E\u7ED3\u679C\u3001\u56F0\u96BE\u8BCD\u548C\u590D\u4E60\u9884\u6D4B\u3002</span></button></div></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929</h2><p>\u9996\u9875\u53EA\u7559\u4ECA\u65E5\u5B8C\u6210\u5C0F\u8BA1\u548C\u5165\u53E3\u3002</p></div><button id="goToday" class="primary">\u8FDB\u5165\u4ECA\u65E5\u5B66\u4E60</button></div><div class="grid2" style="margin-top:16px"><div class="statbox"><b>${today.newCount}</b><span>\u4ECA\u65E5\u65B0\u8BCD\u5B8C\u6210</span></div><div class="statbox"><b>${today.reviewCount}</b><span>\u4ECA\u65E5\u590D\u4E60\u5B8C\u6210</span></div></div></section><div class="grid2"><button id="homeToday" class="entry"><b>\u4ECA\u65E5\u5B66\u4E60</b><span>\u7EE7\u7EED\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u5F53\u5929\u5F85\u5DE9\u56FA\u3002</span></button><button id="goType" class="entry"><b>\u624B\u6253\u5F3A\u5316</b><span>\u6309\u65E5\u671F\u3001\u8BCD\u4E66\u548C\u4E0D\u719F\u6B21\u6570\u7B5B\u9009\u5F3A\u5316\u3002</span></button><button id="goText" class="entry"><b>\u6587\u672C\u4E0E\u53E5\u5B50</b><span>\u6587\u672C\u5E93\u3001\u53E5\u5B50\u62C6\u8BCD\u542C\u5199\u548C\u53E5\u5B50\u9519\u8BCD\u3002</span></button><button id="goDataChart" class="entry"><b>\u6570\u636E\u56FE</b><span>\u6309\u5C0F\u8282\u80CC Task 1 \u8868\u8FBE\uFF0C\u652F\u6301 3/3 \u5F3A\u5316\u548C\u6DF7\u6392\u590D\u4E60\u3002</span></button><button id="goRecent" class="entry"><b>\u8FD1 3 \u5929\u5B66\u4E60\u8BB0\u5F55</b><span>\u67E5\u770B\u6BCF\u5929\u542C\u8FC7\u7684\u8BCD\u548C\u5F53\u524D\u72B6\u6001\uFF0C\u8BEF\u5224\u53EF\u4EE5\u76F4\u63A5\u6539\u3002</span></button><button id="goStats" class="entry"><b>\u5B66\u4E60\u7EDF\u8BA1</b><span>\u65E5\u5386\u3001\u9996\u8F6E\u7ED3\u679C\u3001\u56F0\u96BE\u8BCD\u548C\u590D\u4E60\u9884\u6D4B\u3002</span></button></div></div>`);
   document.getElementById("goToday").onclick = () => go("today");
   document.getElementById("homeToday").onclick = () => go("today");
   document.getElementById("goType").onclick = () => go("type");
   document.getElementById("goText").onclick = () => go("text");
   document.getElementById("goDataChart").onclick = () => go("datachart");
+  document.getElementById("goRecent").onclick = () => go("recent");
   document.getElementById("goStats").onclick = () => go("stats");
 }
 function renderToday() {
@@ -5889,7 +5913,7 @@ function renderListen() {
   const currentId = w.id;
   const gapShortfall = !reviewing ? Number(listen.session.current?.gapShortfall || 0) : 0;
   const gapNotice = gapShortfall ? '<div class="statusline">\u961F\u5217\u5DF2\u5230\u5C3E\u90E8\uFF0C\u53EF\u7528\u95F4\u9694\u8BCD\u4E0D\u8DB3\uFF0C\u8FD8\u5DEE\u7EA6 ' + gapShortfall + " \u4E2A\uFF1B\u8FD9\u6B21\u4ECD\u8981\u4F60\u91CD\u65B0\u5224\u65AD\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u7B97\u901A\u8FC7\u3002</div>" : "";
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">${listen.segmentBook ? `${esc2(listen.segmentBook)} \xB7 ` : ""}\u65B0\u8BCD ${p.newDone} / ${p.newTotal}\u3000\u590D\u4E60 ${p.reviewDone} / ${p.reviewTotal}${p.retry ? `\u3000\u5F85\u5DE9\u56FA ${p.retry}` : ""}</div><div class="study-actions"><button id="studyListButton">${listen.showList ? "\u6536\u8D77\u6E05\u5355" : "\u672C\u8F6E\u6E05\u5355"}</button>${!reviewing ? '<button id="retireWord">\u6807\u8BB0\u7B80\u5355</button>' : ""}</div></div>${listen.showList ? `<section class="study-sheet"><div class="study-sheet-head"><div><b>\u672C\u8F6E\u5355\u8BCD</b><div class="small">\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u6BCF\u4E2A\u8BCD\u5F53\u524D\u6807\u8BB0</div></div><button id="closeStudyList" class="soft">\u5173\u95ED</button></div>${planChecklistHtml(listen.plan, currentId)}</section>` : ""}<div class="studybody"><button id="speakWord" class="speaker">\u25D6))</button>${answer ? `<div class="word ${result === "good" ? "good" : result === "bad" ? "bad" : ""}">${esc2(w.en)}</div><div class="meaning">${esc2(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc2(w.pos)}${w.def ? ` \xB7 ${esc2(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc2(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc2(s)}</span>`).join("")}</div>` : '<div class="small">\u542C\u5230\u4EE5\u540E\uFF0C\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div>'}<div class="judges"><button id="judgeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="judgeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div>${answer ? `<div class="move"><button id="prevWord" class="soft" ${listen.session.history.length ? "" : "disabled"}>\u4E0A\u4E00\u8BCD</button><button id="nextWord" class="primary">${reviewing ? "\u56DE\u5230\u5F53\u524D\u8BCD" : "\u4E0B\u4E00\u8BCD"}</button></div>` : ""}${gapNotice}<div class="statusline">${reviewing ? "\u4FEE\u6539\u5386\u53F2\u5224\u65AD\u540E\u4F1A\u91CD\u65B0\u8BA1\u7B97\u5F53\u5929\u961F\u5217\u548C FSRS \u72B6\u6001\u3002" : "\u53EA\u64AD\u653E\u4F46\u6CA1\u5224\u65AD\u7684\u8BCD\u4E0D\u4EA7\u751F\u5B66\u4E60\u8BB0\u5F55\uFF1B\u9000\u51FA\u540E\u4F1A\u5C3D\u91CF\u4ECE\u5B83\u7EE7\u7EED\u3002"}</div></div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">${listen.segmentBook ? `${esc2(listen.segmentBook)} \xB7 ` : ""}\u65B0\u8BCD ${p.newDone} / ${p.newTotal}\u3000\u590D\u4E60 ${p.reviewDone} / ${p.reviewTotal}${p.retry ? `\u3000\u5F85\u5DE9\u56FA ${p.retry}` : ""}</div><div class="study-actions"><button id="studyListButton">${listen.showList ? "\u6536\u8D77\u6E05\u5355" : "\u672C\u8F6E\u6E05\u5355"}</button>${!reviewing ? '<button id="retireWord">\u6807\u8BB0\u7B80\u5355</button>' : ""}</div></div>${listen.showList ? `<section class="study-sheet"><div class="study-sheet-head"><div><b>\u672C\u8F6E\u5355\u8BCD</b><div class="small">\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u6BCF\u4E2A\u8BCD\u5F53\u524D\u6807\u8BB0</div></div><button id="closeStudyList" class="soft">\u5173\u95ED</button></div>${planChecklistHtml(listen.plan, currentId)}</section>` : ""}<div class="studybody"><button id="speakWord" class="speaker">\u25D6))</button>${answer ? `<div class="word ${result === "good" ? "good" : result === "bad" ? "bad" : ""}">${esc2(w.en)}</div><div class="meaning">${esc2(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc2(w.pos)}${w.def ? ` \xB7 ${esc2(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc2(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc2(s)}</span>`).join("")}</div>` : '<div class="small">\u542C\u5230\u4EE5\u540E\uFF0C\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div>'}<div class="judges"><button id="judgeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="judgeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div>${answer || listen.session.history.length ? `<div class="move"><button id="prevWord" class="soft" ${listen.session.history.length ? "" : "disabled"}>\u4E0A\u4E00\u8BCD</button>${answer ? `<button id="nextWord" class="primary">${reviewing ? "\u56DE\u5230\u5F53\u524D\u8BCD" : "\u4E0B\u4E00\u8BCD"}</button>` : ""}</div>` : ""}${gapNotice}<div class="statusline">${reviewing ? "\u4FEE\u6539\u5386\u53F2\u5224\u65AD\u540E\u4F1A\u91CD\u65B0\u8BA1\u7B97\u5F53\u5929\u961F\u5217\u548C FSRS \u72B6\u6001\u3002" : "\u53EA\u64AD\u653E\u4F46\u6CA1\u5224\u65AD\u7684\u8BCD\u4E0D\u4EA7\u751F\u5B66\u4E60\u8BB0\u5F55\uFF1B\u9000\u51FA\u540E\u4F1A\u5C3D\u91CF\u4ECE\u5B83\u7EE7\u7EED\u3002"}</div></div></main>`;
   document.getElementById("listenBack").onclick = () => {
     touchActivity(listen.activityId);
     persist();
@@ -5921,10 +5945,8 @@ function renderListen() {
   mountStudyTimer(listen.activityId);
   document.getElementById("judgeGood").onclick = () => judgeListen("good");
   document.getElementById("judgeBad").onclick = () => judgeListen("bad");
-  if (answer) {
-    document.getElementById("prevWord").onclick = () => showPreviousListen();
-    document.getElementById("nextWord").onclick = () => reviewing ? returnFromHistory() : nextListen();
-  }
+  if (document.getElementById("prevWord")) document.getElementById("prevWord").onclick = () => showPreviousListen();
+  if (document.getElementById("nextWord")) document.getElementById("nextWord").onclick = () => reviewing ? returnFromHistory() : nextListen();
 }
 function judgeListen(result) {
   const w = listenCurrentWord();
@@ -7401,6 +7423,32 @@ function filteredEvents() {
   const key = addStudyDays(currentDayKey(), -statRange + 1);
   return state.events.filter((e) => e.date >= key);
 }
+function recentAttemptTime(ts) {
+  const d = new Date(Number(ts) || 0), local = new Date(d.getTime() + 8 * 36e5);
+  return `${String(local.getUTCHours()).padStart(2, "0")}:${String(local.getUTCMinutes()).padStart(2, "0")}`;
+}
+function renderRecentStudy() {
+  const dates = recentStudyDates(currentDayKey(), 3);
+  const sections = dates.map((date, index) => {
+    const rows = recentListeningRows(state, date), title = index === 0 ? "\u4ECA\u5929" : index === 1 ? "\u6628\u5929" : date;
+    const body = rows.map(({ word, events }) => {
+      const st = recentListeningStatus(word, events), first = events[0], last = events.at(-1);
+      const attempts = events.map((event, i) => `<div class="bookrow"><span>${i === 0 ? "\u9996\u8F6E" : `\u7B2C ${i + 1} \u6B21`} \xB7 ${recentAttemptTime(event.ts)}</span><span class="${event.result === "good" ? "good" : "bad"}">${event.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F\u6089"}</span><span class="row"><button class="ghost" data-recent-event="${event.id}" data-result="good" ${event.result === "good" ? "disabled" : ""}>\u6539\u719F\u6089</button><button class="ghost" data-recent-event="${event.id}" data-result="bad" ${event.result === "bad" ? "disabled" : ""}>\u6539\u4E0D\u719F</button></span></div>`).join("");
+      return `<div class="listitem"><div class="space"><div><div class="word-main"><b>${esc2(word.en)}</b><span class="word-meaning">${esc2(word.zh || "")}</span></div><div class="small">\u9996\u8F6E ${first?.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F"} \xB7 \u6700\u8FD1 ${last?.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F"} \xB7 \u5171 ${events.length} \u6B21\u5224\u65AD</div></div><span class="${st.cls}">${esc2(st.label)}</span></div><details class="details" style="margin-top:8px"><summary>\u4FEE\u6539\u8FD9\u4E00\u5929\u7684\u5224\u65AD\u8BB0\u5F55</summary><div style="margin-top:8px">${attempts}</div></details></div>`;
+    }).join("");
+    return `<section class="card"><div class="space"><div><h2 class="section-title">${esc2(title)} \xB7 ${date}</h2><div class="small">${rows.length} \u4E2A\u6B63\u5F0F\u542C\u8BCD\u5355\u8BCD \xB7 \u624B\u6253\u4E0D\u6DF7\u5165\u8FD9\u91CC</div></div></div><div class="list" style="margin-top:10px">${body || '<div class="empty">\u8FD9\u4E00\u5929\u8FD8\u6CA1\u6709\u6B63\u5F0F\u542C\u8BCD\u8BB0\u5F55\u3002</div>'}</div></section>`;
+  }).join("");
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8FD1 3 \u5929\u5B66\u4E60\u8BB0\u5F55</h2><p>\u6309\u5B66\u4E60\u65E5\u770B\u6B63\u5F0F\u542C\u8BCD\u72B6\u6001\u3002\u8BEF\u70B9\u540E\u53EF\u4EE5\u76F4\u63A5\u6539\u67D0\u4E00\u6B21\u201C\u719F\u6089 / \u4E0D\u719F\u6089\u201D\uFF1B\u9996\u8F6E\u88AB\u4FEE\u6539\u65F6\u4F1A\u91CD\u5EFA\u8BE5\u8BCD FSRS\uFF0C\u7EDF\u8BA1\u548C\u5F53\u5929\u5F3A\u5316\u72B6\u6001\u4E5F\u4F1A\u968F\u4E4B\u91CD\u7B97\u3002</p></div><button id="recentBack" class="soft">\u8FD4\u56DE\u9996\u9875</button></div></section>${sections}</div>`);
+  document.getElementById("recentBack").onclick = () => go("home");
+  document.querySelectorAll("[data-recent-event]").forEach((button) => button.onclick = () => {
+    const event = state.events.find((item) => item.id === button.dataset.recentEvent);
+    if (!event || event.mode !== "listen" || !dates.includes(event.date)) return toast("\u8FD9\u6761\u8BB0\u5F55\u5DF2\u4E0D\u5728\u53EF\u4FEE\u6539\u8303\u56F4");
+    editAttempt(state, event.id, button.dataset.result);
+    persist();
+    toast("\u72B6\u6001\u5DF2\u6539\uFF0C\u76F8\u5173\u7EDF\u8BA1\u548C\u590D\u4E60\u72B6\u6001\u5DF2\u91CD\u7B97");
+    renderRecentStudy();
+  });
+}
 function renderStats() {
   const E = filteredEvents(), cold = E.filter((e) => e.cold), good = cold.filter((e) => e.result === "good").length, listenCold = cold.filter((e) => e.mode === "listen"), typeCold = cold.filter((e) => e.mode === "type"), uniq = new Set(E.map((e) => e.wordId)).size, forecast = dueForecast(state, 7), totalStudy = formatStudyTime(activityTotalMs(state, { date: statDay }));
   shell(`<section class="card"><div class="space"><div><h2 class="section-title">${statDay} \u5B66\u4E60\u65F6\u957F</h2><div class="small">\u542C\u8BCD\u3001\u624B\u6253\u3001\u6574\u53E5\u3001\u62C6\u8BCD\u3001\u81EA\u7531\u542C\u548C\u6570\u636E\u56FE\u7EDF\u4E00\u7D2F\u8BA1</div></div><b style="font-size:28px">${totalStudy}</b></div></section><div class="stack"><section><div class="toolbar"><button class="chip ${statRange === 7 ? "on" : ""}" data-range="7">7\u5929</button><button class="chip ${statRange === 30 ? "on" : ""}" data-range="30">30\u5929</button><button class="chip ${statRange === 0 ? "on" : ""}" data-range="0">\u5168\u90E8</button></div></section><section class="grid4"><div class="statbox"><b>${pct(good, cold.length)}</b><span>\u9996\u8F6E\u719F\u6089\u7387</span></div><div class="statbox"><b>${uniq}</b><span>\u533A\u95F4\u5B66\u4E60\u8BCD\u6570</span></div><div class="statbox"><b>${pct(listenCold.filter((e) => e.result === "good").length, listenCold.length)}</b><span>\u542C\u97F3\u9996\u8F6E</span></div><div class="statbox"><b>${pct(typeCold.filter((e) => e.result === "good").length, typeCold.length)}</b><span>\u624B\u6253\u9996\u8F6E</span></div></section>${calendarHtml()}${dayDetailHtml()}${dataChartDayDetailHtml()}<section class="card"><h2 class="section-title">\u672A\u6765 7 \u5929\u590D\u4E60\u91CF</h2><div class="forecast">${forecast.map((x, i) => {
@@ -7511,6 +7559,7 @@ function render() {
     else if (view === "text") renderText();
     else if (view === "datachart") getDataChartUI().render();
     else if (view === "library") renderLibrary();
+    else if (view === "recent") renderRecentStudy();
     else renderStats();
   } catch (err) {
     console.error(err);
