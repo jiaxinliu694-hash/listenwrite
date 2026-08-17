@@ -2,7 +2,7 @@ name: Listenwrite v3 core
 
 on:
   push:
-    branches: [scheduler-v2-fsrs]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -14,7 +14,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+          cache: npm
+      - run: npm ci
       - run: node --check src/app.js
       - run: node --check src/storage.js
       - run: node --check src/queue.js

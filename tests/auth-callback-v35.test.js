@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureSupabaseAuthCallback } from '../src/auth-callback-patch.js';
+import { captureSupabaseAuthCallback } from '../src/cloudsync.js';
 
 function jwt(payload){
   const enc=v=>Buffer.from(JSON.stringify(v)).toString('base64url');

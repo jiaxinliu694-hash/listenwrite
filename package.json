@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "build": "esbuild src/app-entry.js --bundle --format=esm --target=safari16 --outfile=app.bundle.js"
+    "build": "esbuild src/app-entry.js --bundle --format=esm --target=safari16 --outfile=app.bundle.js && node tools/update-bundle-version.mjs"
   },
   "dependencies": {
     "ts-fsrs": "5.4.1"

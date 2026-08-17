@@ -304,11 +304,15 @@ export async function replaceState(raw) {
 export async function applyRemoteState(raw) {
   remoteApplying = true;
   const state = normalizeState(raw);
-  await queueWrite(async () => {
-    await dbSet(STATE_KEY, state);
-    try { localStorage.removeItem(FALLBACK_KEY); } catch {}
-  });
-  return state;
+  try {
+    await queueWrite(async () => {
+      await dbSet(STATE_KEY, state);
+      try { localStorage.removeItem(FALLBACK_KEY); } catch {}
+    });
+    return state;
+  } finally {
+    remoteApplying = false;
+  }
 }
 
 export function isRemoteStateApplying() { return remoteApplying; }
