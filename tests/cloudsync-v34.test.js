@@ -30,7 +30,7 @@ test('learning records are detected as cloud-worthy user data', () => {
     { events: [{ id: 'e1' }] },
     { sentenceBooks: [{ entries: [{ id: 's1' }] }] },
     { words: [{ id: 'w_real' }] },
-    { dataChart: { items: { x: { status: 'mastered' } }, sections: {}, attempts: [], daily: {}, session: null } },
+    { dataChart: { items: { x: { status: 'mastered' } }, sections: {}, attempts: [{ id: 'a1' }], daily: {}, session: null } },
   ];
   for (const patch of cases) assert.equal(hasCloudUserData({ ...structuredClone(base), ...patch }), true);
 });
