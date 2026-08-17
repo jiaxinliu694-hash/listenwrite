@@ -35,44 +35,6 @@ setItem(
 );
 DATA_CHART_SEED.contentVersion = "2026-08-15-v2";
 
-// src/auth-callback-patch.js
-var SESSION_KEY = "listenwrite-supabase-session-v1";
-function decodeJwtPayload(token) {
-  try {
-    const part = String(token || "").split(".")[1];
-    if (!part) return null;
-    const base64 = part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "=");
-    return JSON.parse(decodeURIComponent(Array.from(atob(base64), (c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join("")));
-  } catch {
-    return null;
-  }
-}
-function captureSupabaseAuthCallback(env = {}) {
-  const loc = env.location || globalThis.location;
-  const hist = env.history || globalThis.history;
-  const storage = env.localStorage || globalThis.localStorage;
-  if (!loc?.hash || !storage) return false;
-  const params = new URLSearchParams(loc.hash.replace(/^#/, ""));
-  const access_token = params.get("access_token");
-  const refresh_token = params.get("refresh_token");
-  if (!access_token || !refresh_token) return false;
-  const payload = decodeJwtPayload(access_token) || {};
-  const expires_in = Number(params.get("expires_in")) || 3600;
-  const expires_at = Number(payload.exp) || Math.floor(Date.now() / 1e3) + expires_in;
-  const existing = (() => {
-    try {
-      return JSON.parse(storage.getItem(SESSION_KEY) || "null");
-    } catch {
-      return null;
-    }
-  })();
-  const user = { ...existing?.user || {}, id: payload.sub || existing?.user?.id || null, email: payload.email || existing?.user?.email || null };
-  storage.setItem(SESSION_KEY, JSON.stringify({ access_token, refresh_token, expires_in, expires_at, token_type: params.get("token_type") || "bearer", user }));
-  hist?.replaceState?.(null, "", loc.pathname + loc.search);
-  return true;
-}
-if (typeof window !== "undefined") captureSupabaseAuthCallback();
-
 // node_modules/ts-fsrs/dist/index.mjs
 var FSRSError = class _FSRSError extends Error {
   constructor(message = "FSRS Error") {
@@ -3503,14 +3465,18 @@ async function replaceState(raw) {
 async function applyRemoteState(raw) {
   remoteApplying = true;
   const state2 = normalizeState(raw);
-  await queueWrite(async () => {
-    await dbSet(STATE_KEY, state2);
-    try {
-      localStorage.removeItem(FALLBACK_KEY);
-    } catch {
-    }
-  });
-  return state2;
+  try {
+    await queueWrite(async () => {
+      await dbSet(STATE_KEY, state2);
+      try {
+        localStorage.removeItem(FALLBACK_KEY);
+      } catch {
+      }
+    });
+    return state2;
+  } finally {
+    remoteApplying = false;
+  }
 }
 async function readCloudSyncBase() {
   try {
@@ -3651,7 +3617,8 @@ function mergeCloudStates(base, local, cloud) {
 var SUPABASE_URL = "https://bsuilpygojnqxntrxgnm.supabase.co";
 var SUPABASE_KEY = "sb_publishable_Y_nFcIW0Sg0pB2zEhMU50g_LVQMX2Am";
 var APP_URL = "https://jiaxinliu694-hash.github.io/listenwrite/";
-var SESSION_KEY2 = "listenwrite-supabase-session-v1";
+var OWNER_EMAIL = "jiaxinliu694@gmail.com";
+var SESSION_KEY = "listenwrite-supabase-session-v1";
 var META_KEY = "listenwrite-cloud-meta-v1";
 var POLL_MS = 5e3;
 var CLOUD_POLL_MS = 15e3;
@@ -3702,7 +3669,7 @@ function normalizeSession2(raw) {
 }
 function saveSession(raw) {
   session = normalizeSession2(raw);
-  writeStored(SESSION_KEY2, session);
+  writeStored(SESSION_KEY, session);
   updateCloudButton();
   return session;
 }
@@ -3712,7 +3679,7 @@ function clearSession() {
   pendingRemote = null;
   syncStatus = "offline";
   syncMessage = "\u672A\u767B\u5F55\u4E91\u540C\u6B65";
-  writeStored(SESSION_KEY2, null);
+  writeStored(SESSION_KEY, null);
   updateCloudButton();
 }
 async function authRequest(path, body) {
@@ -3723,6 +3690,23 @@ async function authRequest(path, body) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `\u8BF7\u6C42\u5931\u8D25 ${response.status}`);
+  return data;
+}
+function ownerOtpRequest() {
+  return {
+    url: `${SUPABASE_URL}/auth/v1/otp?redirect_to=${encodeURIComponent(APP_URL)}`,
+    body: { email: OWNER_EMAIL, create_user: false }
+  };
+}
+async function sendOwnerMagicLink(fetchImpl = globalThis.fetch) {
+  const { url, body } = ownerOtpRequest();
+  const response = await fetchImpl(url, {
+    method: "POST",
+    headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `\u767B\u5F55\u90AE\u4EF6\u53D1\u9001\u5931\u8D25 ${response.status}`);
   return data;
 }
 async function refreshSession() {
@@ -3743,7 +3727,7 @@ async function refreshSession() {
   return refreshInFlight;
 }
 async function ensureSession() {
-  if (!session) session = normalizeSession2(readStored(SESSION_KEY2));
+  if (!session) session = normalizeSession2(readStored(SESSION_KEY));
   if (!session) return null;
   if (Number(session.expires_at || 0) <= nowSec() + 60) await refreshSession();
   return session;
@@ -3940,22 +3924,6 @@ async function reconcileCloud({ force = false } = {}) {
     renderCloudModalIfOpen();
   }
 }
-async function cloudSignIn(email, password) {
-  const data = await authRequest("/auth/v1/token?grant_type=password", { email, password });
-  saveSession(data);
-  conflict = null;
-  await reconcileCloud({ force: true });
-}
-async function cloudSignUp(email, password) {
-  const path = `/auth/v1/signup?redirect_to=${encodeURIComponent(APP_URL)}`;
-  const data = await authRequest(path, { email, password });
-  if (data?.access_token) {
-    saveSession(data);
-    await reconcileCloud({ force: true });
-    return "\u6CE8\u518C\u5E76\u767B\u5F55\u6210\u529F";
-  }
-  return "\u6CE8\u518C\u6210\u529F\u3002\u8BF7\u53BB\u90AE\u7BB1\u786E\u8BA4\uFF1B\u786E\u8BA4\u540E\u4F1A\u56DE\u5230\u7231\u542C\u5199\uFF0C\u518D\u76F4\u63A5\u767B\u5F55\u3002";
-}
 async function cloudSignOut() {
   try {
     if (session?.access_token) await fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, { method: "POST", headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${session.access_token}` } });
@@ -3964,15 +3932,39 @@ async function cloudSignOut() {
   clearSession();
   renderCloudModalIfOpen();
 }
-function consumeAuthCallback() {
-  if (typeof location === "undefined" || !location.hash) return false;
-  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+function decodeJwtPayload(token) {
+  try {
+    const part = String(token || "").split(".")[1];
+    if (!part) return null;
+    const base64 = part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "=");
+    const json = Array.from(atob(base64), (c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`).join("");
+    return JSON.parse(decodeURIComponent(json));
+  } catch {
+    return null;
+  }
+}
+function captureSupabaseAuthCallback(env = {}) {
+  const loc = env.location || globalThis.location;
+  const hist = env.history || globalThis.history;
+  const storage = env.localStorage || globalThis.localStorage;
+  if (!loc?.hash || !storage) return false;
+  const params = new URLSearchParams(loc.hash.replace(/^#/, ""));
   const access_token = params.get("access_token");
   const refresh_token = params.get("refresh_token");
   if (!access_token || !refresh_token) return false;
+  const payload = decodeJwtPayload(access_token) || {};
   const expires_in = Number(params.get("expires_in")) || 3600;
-  saveSession({ access_token, refresh_token, expires_in, token_type: params.get("token_type") || "bearer", user: null });
-  history.replaceState(null, "", location.pathname + location.search);
+  const expires_at = Number(payload.exp) || Math.floor(Date.now() / 1e3) + expires_in;
+  const existing = (() => {
+    try {
+      return JSON.parse(storage.getItem(SESSION_KEY) || "null");
+    } catch {
+      return null;
+    }
+  })();
+  const user = { ...existing?.user || {}, id: payload.sub || existing?.user?.id || null, email: payload.email || existing?.user?.email || OWNER_EMAIL };
+  storage.setItem(SESSION_KEY, JSON.stringify({ access_token, refresh_token, expires_in, expires_at, token_type: params.get("token_type") || "bearer", user }));
+  hist?.replaceState?.(null, "", loc.pathname + loc.search);
   return true;
 }
 function esc(value) {
@@ -4005,7 +3997,7 @@ function openCloudModal() {
   mask.className = "lw-cloud-mask";
   const email = session?.user?.email || "\u5F53\u524D\u8D26\u53F7";
   const conflictHtml = conflict ? `<div class="lw-cloud-status lw-cloud-warning"><b>\u68C0\u6D4B\u5230\u4E24\u7AEF\u90FD\u6709\u4FEE\u6539</b><br>${esc(syncMessage)}</div>` : "";
-  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>\u4E91\u540C\u6B65</h2><p>\u672C\u5730\u4ECD\u7136\u4FDD\u5B58\uFF1B\u4E91\u7AEF\u8D1F\u8D23\u7535\u8111\u3001Safari \u548C\u4E3B\u5C4F\u5E55 App \u540C\u6B65\u3002\u53CC\u7AEF\u540C\u65F6\u4FEE\u6539\u65F6\u5148\u4FDD\u7559\u53CC\u65B9\u5FEB\u7167\uFF0C\u4E0D\u518D\u76F4\u63A5\u8986\u76D6\u3002</p></div><button id="lwCloudClose" style="border:0;background:transparent;font-size:24px">\xD7</button></div>${session ? `<div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div>${conflictHtml}<div class="small">\u5DF2\u767B\u5F55\uFF1A${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">\u7ACB\u5373\u540C\u6B65</button>${conflict ? '<button id="lwCloudMerge" class="primary">\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55</button><button id="lwCloudBackup">\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD</button>' : ""}<button id="lwCloudPull">\u4F7F\u7528\u4E91\u7AEF</button><button id="lwCloudPush">\u4E0A\u4F20\u672C\u673A</button><button id="lwCloudLogout">\u53EA\u9000\u51FA\u672C\u8BBE\u5907</button></div><p style="margin-top:12px">\u6709\u51B2\u7A81\u65F6\u4F18\u5148\u7528\u201C\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55\u201D\u3002\u201C\u4F7F\u7528\u4E91\u7AEF / \u4E0A\u4F20\u672C\u673A\u201D\u5C5E\u4E8E\u6574\u4EFD\u66FF\u6362\uFF0C\u64CD\u4F5C\u524D\u7CFB\u7EDF\u5DF2\u4FDD\u5B58\u51B2\u7A81\u5FEB\u7167\u3002</p>` : `<div class="lw-cloud-grid"><label class="lw-cloud-field">\u90AE\u7BB1<input id="lwCloudEmail" type="email" autocomplete="email"></label><label class="lw-cloud-field">\u5BC6\u7801<input id="lwCloudPassword" type="password" autocomplete="current-password"></label></div><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudLogin" class="primary">\u767B\u5F55</button><button id="lwCloudSignup">\u6CE8\u518C\u8D26\u53F7</button></div>`}</div>`;
+  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>\u4E91\u540C\u6B65</h2><p>\u672C\u5730\u4ECD\u7136\u4FDD\u5B58\uFF1B\u4E91\u7AEF\u8D1F\u8D23\u7535\u8111\u3001Safari \u548C\u4E3B\u5C4F\u5E55 App \u540C\u6B65\u3002\u53CC\u7AEF\u540C\u65F6\u4FEE\u6539\u65F6\u5148\u4FDD\u7559\u53CC\u65B9\u5FEB\u7167\uFF0C\u4E0D\u518D\u76F4\u63A5\u8986\u76D6\u3002</p></div><button id="lwCloudClose" style="border:0;background:transparent;font-size:24px">\xD7</button></div>${session ? `<div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div>${conflictHtml}<div class="small">\u5DF2\u767B\u5F55\uFF1A${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">\u7ACB\u5373\u540C\u6B65</button>${conflict ? '<button id="lwCloudMerge" class="primary">\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55</button><button id="lwCloudBackup">\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD</button>' : ""}<button id="lwCloudPull">\u4F7F\u7528\u4E91\u7AEF</button><button id="lwCloudPush">\u4E0A\u4F20\u672C\u673A</button><button id="lwCloudLogout">\u53EA\u9000\u51FA\u672C\u8BBE\u5907</button></div><p style="margin-top:12px">\u6709\u51B2\u7A81\u65F6\u4F18\u5148\u7528\u201C\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55\u201D\u3002\u201C\u4F7F\u7528\u4E91\u7AEF / \u4E0A\u4F20\u672C\u673A\u201D\u5C5E\u4E8E\u6574\u4EFD\u66FF\u6362\uFF0C\u64CD\u4F5C\u524D\u7CFB\u7EDF\u5DF2\u4FDD\u5B58\u51B2\u7A81\u5FEB\u7167\u3002</p>` : `<p>\u79C1\u4EBA\u4E91\u7AEF\u8D26\u53F7\uFF1A<b>${esc(OWNER_EMAIL)}</b></p><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudMagicLogin" class="primary">\u53D1\u9001\u767B\u5F55\u90AE\u4EF6</button></div><p style="margin-top:12px">\u65E0\u9700\u5BC6\u7801\uFF0C\u4E5F\u4E0D\u63D0\u4F9B\u6CE8\u518C\u5165\u53E3\u3002\u767B\u5F55\u90AE\u4EF6\u53EA\u4F1A\u53D1\u7ED9\u8FD9\u4E2A\u5DF2\u6709\u8D26\u53F7\u3002</p>`}</div>`;
   mask.addEventListener("click", (e) => {
     if (e.target === mask) closeCloudModal();
   });
@@ -4037,28 +4029,16 @@ function openCloudModal() {
     };
     document.getElementById("lwCloudLogout").onclick = cloudSignOut;
   } else {
-    const credentials = () => ({ email: document.getElementById("lwCloudEmail").value.trim(), password: document.getElementById("lwCloudPassword").value });
-    document.getElementById("lwCloudLogin").onclick = async () => {
-      const { email: email2, password } = credentials();
-      if (!email2 || !password) return setStatus("error", "\u8BF7\u8F93\u5165\u90AE\u7BB1\u548C\u5BC6\u7801");
+    document.getElementById("lwCloudMagicLogin").onclick = async () => {
+      const button = document.getElementById("lwCloudMagicLogin");
+      if (button) button.disabled = true;
       try {
-        setStatus("syncing", "\u6B63\u5728\u767B\u5F55\u2026");
-        await cloudSignIn(email2, password);
-        openCloudModal();
+        setStatus("syncing", "\u6B63\u5728\u53D1\u9001\u767B\u5F55\u90AE\u4EF6\u2026");
+        await sendOwnerMagicLink();
+        setStatus("ready", "\u767B\u5F55\u90AE\u4EF6\u5DF2\u53D1\u9001\u3002\u6253\u5F00 Gmail \u70B9\u767B\u5F55\u94FE\u63A5\u5373\u53EF\uFF1B\u4E0D\u4F1A\u521B\u5EFA\u65B0\u8D26\u53F7\u3002");
       } catch (e) {
-        setStatus("error", e.message);
-      }
-    };
-    document.getElementById("lwCloudSignup").onclick = async () => {
-      const { email: email2, password } = credentials();
-      if (!email2 || password.length < 6) return setStatus("error", "\u8BF7\u8F93\u5165\u90AE\u7BB1\uFF0C\u5BC6\u7801\u81F3\u5C11 6 \u4F4D");
-      try {
-        setStatus("syncing", "\u6B63\u5728\u6CE8\u518C\u2026");
-        const msg = await cloudSignUp(email2, password);
-        setStatus(session ? "synced" : "ready", msg);
-        openCloudModal();
-      } catch (e) {
-        setStatus("error", e.message);
+        setStatus("error", e?.message || "\u767B\u5F55\u90AE\u4EF6\u53D1\u9001\u5931\u8D25");
+        if (button) button.disabled = false;
       }
     };
   }
@@ -4093,8 +4073,8 @@ function startObservers() {
 }
 async function initCloudSync() {
   if (typeof window === "undefined" || typeof document === "undefined" || typeof indexedDB === "undefined") return;
-  session = normalizeSession2(readStored(SESSION_KEY2));
-  consumeAuthCallback();
+  captureSupabaseAuthCallback();
+  session = normalizeSession2(readStored(SESSION_KEY));
   startObservers();
   if (session) await periodicSync(true);
 }
@@ -4102,73 +4082,6 @@ if (typeof window !== "undefined" && typeof document !== "undefined") queueMicro
   console.error("Listenwrite cloud init failed", error);
   setStatus("error", error?.message || "\u4E91\u540C\u6B65\u521D\u59CB\u5316\u5931\u8D25");
 }));
-
-// src/private-passwordless-auth.js
-var SUPABASE_URL2 = "https://bsuilpygojnqxntrxgnm.supabase.co";
-var SUPABASE_KEY2 = "sb_publishable_Y_nFcIW0Sg0pB2zEhMU50g_LVQMX2Am";
-var APP_URL2 = "https://jiaxinliu694-hash.github.io/listenwrite/";
-var OWNER_EMAIL = "jiaxinliu694@gmail.com";
-function ownerOtpRequest() {
-  return {
-    url: `${SUPABASE_URL2}/auth/v1/otp?redirect_to=${encodeURIComponent(APP_URL2)}`,
-    body: { email: OWNER_EMAIL, create_user: false }
-  };
-}
-async function sendOwnerMagicLink(fetchImpl = globalThis.fetch) {
-  const { url, body } = ownerOtpRequest();
-  const response = await fetchImpl(url, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY2,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `\u767B\u5F55\u90AE\u4EF6\u53D1\u9001\u5931\u8D25 ${response.status}`);
-  }
-  return data;
-}
-function patchPrivateLoginModal() {
-  const mask = document.getElementById("lwCloudMask");
-  if (!mask || mask.dataset.privatePasswordless === "1") return;
-  if (!mask.querySelector("#lwCloudPassword") && !mask.querySelector("#lwCloudSignup")) return;
-  const panel = mask.querySelector(".lw-cloud-panel");
-  const status = mask.querySelector("#lwCloudStatus");
-  if (!panel || !status) return;
-  mask.dataset.privatePasswordless = "1";
-  mask.querySelector(".lw-cloud-grid")?.remove();
-  mask.querySelector(".lw-cloud-actions")?.remove();
-  const note = document.createElement("p");
-  note.innerHTML = `\u6B64\u4E91\u7AEF\u5DF2\u8BBE\u4E3A\u79C1\u4EBA\u8D26\u53F7\uFF1A<b>${OWNER_EMAIL}</b>\u3002\u65E0\u9700\u5BC6\u7801\uFF0C\u4E5F\u4E0D\u80FD\u6CE8\u518C\u65B0\u8D26\u53F7\u3002`;
-  status.before(note);
-  const actions = document.createElement("div");
-  actions.className = "lw-cloud-actions";
-  actions.innerHTML = '<button id="lwCloudMagicLogin" class="primary">\u53D1\u9001\u767B\u5F55\u90AE\u4EF6</button>';
-  status.after(actions);
-  document.getElementById("lwCloudMagicLogin").onclick = async () => {
-    const button = document.getElementById("lwCloudMagicLogin");
-    if (button) button.disabled = true;
-    status.textContent = "\u6B63\u5728\u53D1\u9001\u767B\u5F55\u90AE\u4EF6\u2026";
-    try {
-      await sendOwnerMagicLink();
-      status.textContent = "\u767B\u5F55\u90AE\u4EF6\u5DF2\u53D1\u9001\u3002\u6253\u5F00 Gmail \u70B9\u90AE\u4EF6\u91CC\u7684\u767B\u5F55\u94FE\u63A5\u5373\u53EF\uFF1B\u4E0D\u4F1A\u521B\u5EFA\u65B0\u8D26\u53F7\u3002";
-    } catch (error) {
-      status.textContent = error?.message || "\u767B\u5F55\u90AE\u4EF6\u53D1\u9001\u5931\u8D25";
-      if (button) button.disabled = false;
-    }
-  };
-}
-function initPrivatePasswordlessAuth() {
-  if (typeof document === "undefined") return;
-  patchPrivateLoginModal();
-  const observer = new MutationObserver(patchPrivateLoginModal);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-}
-if (typeof window !== "undefined" && typeof document !== "undefined") {
-  queueMicrotask(initPrivatePasswordlessAuth);
-}
 
 // src/reinforcement.js
 var REQUIRED_GOOD_STREAK = 3;
