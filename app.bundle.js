@@ -35,6 +35,44 @@ setItem(
 );
 DATA_CHART_SEED.contentVersion = "2026-08-15-v2";
 
+// src/auth-callback-patch.js
+var SESSION_KEY = "listenwrite-supabase-session-v1";
+function decodeJwtPayload(token) {
+  try {
+    const part = String(token || "").split(".")[1];
+    if (!part) return null;
+    const base64 = part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "=");
+    return JSON.parse(decodeURIComponent(Array.from(atob(base64), (c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join("")));
+  } catch {
+    return null;
+  }
+}
+function captureSupabaseAuthCallback(env = {}) {
+  const loc = env.location || globalThis.location;
+  const hist = env.history || globalThis.history;
+  const storage = env.localStorage || globalThis.localStorage;
+  if (!loc?.hash || !storage) return false;
+  const params = new URLSearchParams(loc.hash.replace(/^#/, ""));
+  const access_token = params.get("access_token");
+  const refresh_token = params.get("refresh_token");
+  if (!access_token || !refresh_token) return false;
+  const payload = decodeJwtPayload(access_token) || {};
+  const expires_in = Number(params.get("expires_in")) || 3600;
+  const expires_at = Number(payload.exp) || Math.floor(Date.now() / 1e3) + expires_in;
+  const existing = (() => {
+    try {
+      return JSON.parse(storage.getItem(SESSION_KEY) || "null");
+    } catch {
+      return null;
+    }
+  })();
+  const user = { ...existing?.user || {}, id: payload.sub || existing?.user?.id || null, email: payload.email || existing?.user?.email || null };
+  storage.setItem(SESSION_KEY, JSON.stringify({ access_token, refresh_token, expires_in, expires_at, token_type: params.get("token_type") || "bearer", user }));
+  hist?.replaceState?.(null, "", loc.pathname + loc.search);
+  return true;
+}
+if (typeof window !== "undefined") captureSupabaseAuthCallback();
+
 // node_modules/ts-fsrs/dist/index.mjs
 var FSRSError = class _FSRSError extends Error {
   constructor(message = "FSRS Error") {
@@ -3613,7 +3651,7 @@ function mergeCloudStates(base, local, cloud) {
 var SUPABASE_URL = "https://bsuilpygojnqxntrxgnm.supabase.co";
 var SUPABASE_KEY = "sb_publishable_Y_nFcIW0Sg0pB2zEhMU50g_LVQMX2Am";
 var APP_URL = "https://jiaxinliu694-hash.github.io/listenwrite/";
-var SESSION_KEY = "listenwrite-supabase-session-v1";
+var SESSION_KEY2 = "listenwrite-supabase-session-v1";
 var META_KEY = "listenwrite-cloud-meta-v1";
 var POLL_MS = 5e3;
 var CLOUD_POLL_MS = 15e3;
@@ -3664,7 +3702,7 @@ function normalizeSession2(raw) {
 }
 function saveSession(raw) {
   session = normalizeSession2(raw);
-  writeStored(SESSION_KEY, session);
+  writeStored(SESSION_KEY2, session);
   updateCloudButton();
   return session;
 }
@@ -3674,7 +3712,7 @@ function clearSession() {
   pendingRemote = null;
   syncStatus = "offline";
   syncMessage = "\u672A\u767B\u5F55\u4E91\u540C\u6B65";
-  writeStored(SESSION_KEY, null);
+  writeStored(SESSION_KEY2, null);
   updateCloudButton();
 }
 async function authRequest(path, body) {
@@ -3705,7 +3743,7 @@ async function refreshSession() {
   return refreshInFlight;
 }
 async function ensureSession() {
-  if (!session) session = normalizeSession2(readStored(SESSION_KEY));
+  if (!session) session = normalizeSession2(readStored(SESSION_KEY2));
   if (!session) return null;
   if (Number(session.expires_at || 0) <= nowSec() + 60) await refreshSession();
   return session;
@@ -4055,7 +4093,7 @@ function startObservers() {
 }
 async function initCloudSync() {
   if (typeof window === "undefined" || typeof document === "undefined" || typeof indexedDB === "undefined") return;
-  session = normalizeSession2(readStored(SESSION_KEY));
+  session = normalizeSession2(readStored(SESSION_KEY2));
   consumeAuthCallback();
   startObservers();
   if (session) await periodicSync(true);
