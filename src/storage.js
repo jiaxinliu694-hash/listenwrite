@@ -52,6 +52,49 @@ async function dbSet(key, value) {
   });
 }
 
+export function storageContext(env = {}) {
+  const standalone = env.standalone ?? (
+    typeof window !== 'undefined' && (
+      window.matchMedia?.('(display-mode: standalone)')?.matches ||
+      window.navigator?.standalone === true
+    )
+  );
+  return {
+    mode: standalone ? 'standalone' : 'browser',
+    label: standalone ? '主屏幕 App 本地数据' : '浏览器本地数据',
+  };
+}
+
+export function hasUserData(state) {
+  if (!state || typeof state !== 'object') return false;
+  if ((state.texts || []).length) return true;
+  if ((state.events || []).length) return true;
+  if ((state.activities || []).length) return true;
+  if ((state.simpleWords || []).length || (state.errorBooks || []).length) return true;
+  if (Object.keys(state.dailyPlans || {}).length) return true;
+  if ((state.sentenceBooks || []).some((book) => (book?.entries || []).length)) return true;
+  if ((state.words || []).some((word) => !String(word?.id || '').startsWith('sample_'))) return true;
+  const chart = state.dataChart;
+  if (chart && typeof chart === 'object') {
+    const stack = [chart];
+    const seen = new Set();
+    while (stack.length) {
+      const value = stack.pop();
+      if (!value || typeof value !== 'object' || seen.has(value)) continue;
+      seen.add(value);
+      if (Array.isArray(value)) {
+        if (value.length) return true;
+        continue;
+      }
+      for (const child of Object.values(value)) {
+        if (Array.isArray(child) && child.length) return true;
+        if (child && typeof child === 'object') stack.push(child);
+      }
+    }
+  }
+  return false;
+}
+
 export function defaultState() {
   return {
     version: STATE_VERSION,
