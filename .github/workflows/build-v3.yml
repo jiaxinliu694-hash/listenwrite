@@ -18,6 +18,14 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run build
+      - name: Pack source for review
+        run: |
+          zip -qr listenwrite-source.zip . -x '.git/*' 'node_modules/*' 'listenwrite-source.zip'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: listenwrite-source
+          path: listenwrite-source.zip
+          retention-days: 30
       - name: Commit browser bundle
         run: |
           if [ -z "$(git status --porcelain -- app.bundle.js)" ]; then exit 0; fi
