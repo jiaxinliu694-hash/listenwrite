@@ -4103,6 +4103,73 @@ if (typeof window !== "undefined" && typeof document !== "undefined") queueMicro
   setStatus("error", error?.message || "\u4E91\u540C\u6B65\u521D\u59CB\u5316\u5931\u8D25");
 }));
 
+// src/private-passwordless-auth.js
+var SUPABASE_URL2 = "https://bsuilpygojnqxntrxgnm.supabase.co";
+var SUPABASE_KEY2 = "sb_publishable_Y_nFcIW0Sg0pB2zEhMU50g_LVQMX2Am";
+var APP_URL2 = "https://jiaxinliu694-hash.github.io/listenwrite/";
+var OWNER_EMAIL = "jiaxinliu694@gmail.com";
+function ownerOtpRequest() {
+  return {
+    url: `${SUPABASE_URL2}/auth/v1/otp?redirect_to=${encodeURIComponent(APP_URL2)}`,
+    body: { email: OWNER_EMAIL, create_user: false }
+  };
+}
+async function sendOwnerMagicLink(fetchImpl = globalThis.fetch) {
+  const { url, body } = ownerOtpRequest();
+  const response = await fetchImpl(url, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY2,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `\u767B\u5F55\u90AE\u4EF6\u53D1\u9001\u5931\u8D25 ${response.status}`);
+  }
+  return data;
+}
+function patchPrivateLoginModal() {
+  const mask = document.getElementById("lwCloudMask");
+  if (!mask || mask.dataset.privatePasswordless === "1") return;
+  if (!mask.querySelector("#lwCloudPassword") && !mask.querySelector("#lwCloudSignup")) return;
+  const panel = mask.querySelector(".lw-cloud-panel");
+  const status = mask.querySelector("#lwCloudStatus");
+  if (!panel || !status) return;
+  mask.dataset.privatePasswordless = "1";
+  mask.querySelector(".lw-cloud-grid")?.remove();
+  mask.querySelector(".lw-cloud-actions")?.remove();
+  const note = document.createElement("p");
+  note.innerHTML = `\u6B64\u4E91\u7AEF\u5DF2\u8BBE\u4E3A\u79C1\u4EBA\u8D26\u53F7\uFF1A<b>${OWNER_EMAIL}</b>\u3002\u65E0\u9700\u5BC6\u7801\uFF0C\u4E5F\u4E0D\u80FD\u6CE8\u518C\u65B0\u8D26\u53F7\u3002`;
+  status.before(note);
+  const actions = document.createElement("div");
+  actions.className = "lw-cloud-actions";
+  actions.innerHTML = '<button id="lwCloudMagicLogin" class="primary">\u53D1\u9001\u767B\u5F55\u90AE\u4EF6</button>';
+  status.after(actions);
+  document.getElementById("lwCloudMagicLogin").onclick = async () => {
+    const button = document.getElementById("lwCloudMagicLogin");
+    if (button) button.disabled = true;
+    status.textContent = "\u6B63\u5728\u53D1\u9001\u767B\u5F55\u90AE\u4EF6\u2026";
+    try {
+      await sendOwnerMagicLink();
+      status.textContent = "\u767B\u5F55\u90AE\u4EF6\u5DF2\u53D1\u9001\u3002\u6253\u5F00 Gmail \u70B9\u90AE\u4EF6\u91CC\u7684\u767B\u5F55\u94FE\u63A5\u5373\u53EF\uFF1B\u4E0D\u4F1A\u521B\u5EFA\u65B0\u8D26\u53F7\u3002";
+    } catch (error) {
+      status.textContent = error?.message || "\u767B\u5F55\u90AE\u4EF6\u53D1\u9001\u5931\u8D25";
+      if (button) button.disabled = false;
+    }
+  };
+}
+function initPrivatePasswordlessAuth() {
+  if (typeof document === "undefined") return;
+  patchPrivateLoginModal();
+  const observer = new MutationObserver(patchPrivateLoginModal);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+}
+if (typeof window !== "undefined" && typeof document !== "undefined") {
+  queueMicrotask(initPrivatePasswordlessAuth);
+}
+
 // src/reinforcement.js
 var REQUIRED_GOOD_STREAK = 3;
 function reinforcementState(events = []) {
