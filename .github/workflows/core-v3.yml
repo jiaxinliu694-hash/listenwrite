@@ -18,4 +18,5 @@ jobs:
       - run: node --check src/app.js
       - run: node --check src/storage.js
       - run: node --check src/queue.js
+      - run: node --check src/cloudsync.js
       - run: npm test
