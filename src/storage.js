@@ -9,11 +9,16 @@ const DB_NAME = 'listenwrite-v3';
 const DB_VERSION = 1;
 const STORE = 'kv';
 const STATE_KEY = 'state';
+const CLOUD_BASE_KEY = 'cloud-base-v1';
+const CLOUD_CONFLICT_KEY = 'cloud-conflict-v1';
 const LEGACY_KEY = 'listenwrite-v2';
 const FALLBACK_KEY = 'listenwrite-v3-fallback';
 const STATE_VERSION = 10;
 
 let dbPromise = null;
+let writeChain = Promise.resolve();
+let remoteApplying = false;
+
 function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
@@ -50,6 +55,11 @@ async function dbSet(key, value) {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+}
+
+function queueWrite(task) {
+  writeChain = writeChain.then(task, task);
+  return writeChain;
 }
 
 export function storageContext(env = {}) {
@@ -98,24 +108,12 @@ export function hasUserData(state) {
 export function defaultState() {
   return {
     version: STATE_VERSION,
-    words: [],
-    events: [],
-    texts: [],
-    sentenceBooks: [],
-    sentenceSession: null,
-    simpleWords: [],
-    errorBooks: [],
-    dailyPlans: {},
-    activities: [],
+    words: [], events: [], texts: [], sentenceBooks: [], sentenceSession: null,
+    simpleWords: [], errorBooks: [], dailyPlans: {}, activities: [],
     dataChart: normalizeDataChartState(null),
     settings: {
-      defaultNewTarget: 30,
-      defaultReviewTarget: 80,
-      retention: 0.9,
-      speechRate: 0.92,
-      todayBooks: [],
-      typeBooks: [],
-      todayPlanMode: 'mixed',
+      defaultNewTarget: 30, defaultReviewTarget: 80, retention: 0.9,
+      speechRate: 0.92, todayBooks: [], typeBooks: [], todayPlanMode: 'mixed',
     },
   };
 }
@@ -136,63 +134,42 @@ function sampleWords() {
 function normalizeWord(word, index) {
   return {
     id: word.id || `w_${Date.now().toString(36)}_${index}`,
-    en: normalizeLexeme(word.en),
-    zh: String(word.zh || ''),
-    pos: String(word.pos || ''),
-    def: String(word.def || ''),
+    en: normalizeLexeme(word.en), zh: String(word.zh || ''), pos: String(word.pos || ''), def: String(word.def || ''),
     sources: Array.isArray(word.sources) ? [...new Set(word.sources)] : Array.isArray(word.src) ? [...new Set(word.src)] : [],
     examples: Array.isArray(word.examples) ? [...new Set(word.examples)] : Array.isArray(word.ex) ? [...new Set(word.ex)] : [],
-    retired: Boolean(word.retired ?? word.ret),
-    reviewHint: Boolean(word.reviewHint ?? word.priorExposure),
-    needsMeaning: Boolean(word.needsMeaning) && !String(word.zh || '').trim(),
-    card: word.card || null,
+    retired: Boolean(word.retired ?? word.ret), reviewHint: Boolean(word.reviewHint ?? word.priorExposure),
+    needsMeaning: Boolean(word.needsMeaning) && !String(word.zh || '').trim(), card: word.card || null,
   };
 }
 
 function normalizeEvent(event, index, preserveDate) {
   const ts = Number(event.ts) || Date.now();
   return {
-    id: event.id || `legacy_ev_${index}`,
-    wordId: event.wordId,
-    date: preserveDate && event.date ? event.date : calendarDayKey(ts),
-    ts,
+    id: event.id || `legacy_ev_${index}`, wordId: event.wordId,
+    date: preserveDate && event.date ? event.date : calendarDayKey(ts), ts,
     mode: event.mode === 'type' ? 'type' : 'listen',
-    result: event.result || event.res || 'bad',
-    originalResult: event.originalResult || event.result || event.res || 'bad',
-    cold: false,
-    attempt: 1,
-    source: event.source || null,
-    sentence: event.sentence || null,
-    editedAt: event.editedAt || null,
+    result: event.result || event.res || 'bad', originalResult: event.originalResult || event.result || event.res || 'bad',
+    cold: false, attempt: 1, source: event.source || null, sentence: event.sentence || null, editedAt: event.editedAt || null,
   };
 }
 
 function normalizeSegment(segment, index) {
   return {
-    id: segment.id || `seg_${index}`,
-    book: String(segment.book || ''),
-    newTarget: Math.max(0, Number(segment.newTarget) || 0),
-    reviewTarget: Math.max(0, Number(segment.reviewTarget) || 0),
-    newIds: Array.isArray(segment.newIds) ? segment.newIds : [],
-    reviewIds: Array.isArray(segment.reviewIds) ? segment.reviewIds : [],
+    id: segment.id || `seg_${index}`, book: String(segment.book || ''),
+    newTarget: Math.max(0, Number(segment.newTarget) || 0), reviewTarget: Math.max(0, Number(segment.reviewTarget) || 0),
+    newIds: Array.isArray(segment.newIds) ? segment.newIds : [], reviewIds: Array.isArray(segment.reviewIds) ? segment.reviewIds : [],
   };
 }
 
 function normalizePlan(plan, key) {
   const segments = Array.isArray(plan.bookSegments) ? plan.bookSegments.map(normalizeSegment) : [];
   return {
-    date: plan.date || key,
-    mode: plan.mode === 'sequential' ? 'sequential' : 'mixed',
+    date: plan.date || key, mode: plan.mode === 'sequential' ? 'sequential' : 'mixed',
     books: Array.isArray(plan.books) ? plan.books : [],
-    newTarget: Math.max(0, Number(plan.newTarget) || 0),
-    reviewTarget: Math.max(0, Number(plan.reviewTarget) || 0),
-    newIds: Array.isArray(plan.newIds) ? plan.newIds : [],
-    reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [],
-    bookSegments: segments,
-    resumeWordId: plan.resumeWordId || null,
-    drawNonce: Math.max(0, Number(plan.drawNonce) || 0),
-    createdAt: Number(plan.createdAt) || Date.now(),
-    updatedAt: Number(plan.updatedAt) || Date.now(),
+    newTarget: Math.max(0, Number(plan.newTarget) || 0), reviewTarget: Math.max(0, Number(plan.reviewTarget) || 0),
+    newIds: Array.isArray(plan.newIds) ? plan.newIds : [], reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [],
+    bookSegments: segments, resumeWordId: plan.resumeWordId || null,
+    drawNonce: Math.max(0, Number(plan.drawNonce) || 0), createdAt: Number(plan.createdAt) || Date.now(), updatedAt: Number(plan.updatedAt) || Date.now(),
   };
 }
 
@@ -202,42 +179,43 @@ function reindexEvents(events) {
   events.sort((a, b) => a.ts - b.ts);
   for (const e of events) {
     const dayKey = `${e.wordId}|${e.date}`;
-    if (e.mode === 'listen') {
-      e.cold = !firstListenByWordDay.has(dayKey);
-      firstListenByWordDay.add(dayKey);
-    } else {
-      e.cold = false;
-    }
+    if (e.mode === 'listen') { e.cold = !firstListenByWordDay.has(dayKey); firstListenByWordDay.add(dayKey); }
+    else e.cold = false;
     const attemptKey = `${dayKey}|${e.mode}`;
     const n = (attempts.get(attemptKey) || 0) + 1;
-    attempts.set(attemptKey, n);
-    e.attempt = n;
+    attempts.set(attemptKey, n); e.attempt = n;
   }
   return events;
 }
 
-function normalizeSentenceSession(value){
-  if(!value||typeof value!=='object')return null;
-  const updatedAt=Number(value.updatedAt)||0;
-  if(value.mode==='whole'&&value.run?.bookId&&value.run?.entryId)return {mode:'whole',updatedAt,run:{...value.run,input:String(value.run.input||''),revealed:Boolean(value.run.revealed),peek:Boolean(value.run.peek)},queue:(Array.isArray(value.queue)?value.queue:[]).filter(item=>item?.bookId&&item?.entryId).map(item=>({bookId:item.bookId,entryId:item.entryId}))};
-  if(value.mode==='split'&&Array.isArray(value.run?.items))return {mode:'split',updatedAt,run:{...value.run,items:value.run.items.filter(item=>item?.bookId&&item?.entryId&&Number.isInteger(Number(item.tokenIndex))).map(item=>({bookId:item.bookId,entryId:item.entryId,tokenIndex:Number(item.tokenIndex)})),cursor:Math.max(0,Number(value.run.cursor)||0),input:String(value.run.input||''),revealed:Boolean(value.run.revealed),completed:Boolean(value.run.completed)}};
+function normalizeSentenceSession(value) {
+  if (!value || typeof value !== 'object') return null;
+  const updatedAt = Number(value.updatedAt) || 0;
+  if (value.mode === 'whole' && value.run?.bookId && value.run?.entryId) return {
+    mode: 'whole', updatedAt,
+    run: { ...value.run, input: String(value.run.input || ''), revealed: Boolean(value.run.revealed), peek: Boolean(value.run.peek) },
+    queue: (Array.isArray(value.queue) ? value.queue : []).filter(item => item?.bookId && item?.entryId).map(item => ({ bookId: item.bookId, entryId: item.entryId })),
+  };
+  if (value.mode === 'split' && Array.isArray(value.run?.items)) return {
+    mode: 'split', updatedAt,
+    run: { ...value.run,
+      items: value.run.items.filter(item => item?.bookId && item?.entryId && Number.isInteger(Number(item.tokenIndex))).map(item => ({ bookId: item.bookId, entryId: item.entryId, tokenIndex: Number(item.tokenIndex) })),
+      cursor: Math.max(0, Number(value.run.cursor) || 0), input: String(value.run.input || ''), revealed: Boolean(value.run.revealed), completed: Boolean(value.run.completed),
+    },
+  };
   return null;
 }
 
 export function normalizeState(input) {
   const base = defaultState();
   const inputVersion = Number(input?.version) || 0;
-  // Adding unrelated state fields must never rebuild existing word FSRS cards.
   const migrateScheduling = inputVersion < STATE_VERSION;
   const oldSettings = input?.settings || input?.set || {};
   const state = { ...base, ...(input || {}) };
   const oldNew = Number(oldSettings.defaultNewTarget ?? oldSettings.newTarget ?? oldSettings.newN ?? base.settings.defaultNewTarget);
   const oldReview = Number(oldSettings.defaultReviewTarget ?? oldSettings.reviewTarget ?? oldSettings.reviewN ?? base.settings.defaultReviewTarget);
-  state.settings = {
-    ...base.settings,
-    ...oldSettings,
-    defaultNewTarget: Math.max(0, oldNew || 0),
-    defaultReviewTarget: Math.max(0, oldReview || 0),
+  state.settings = { ...base.settings, ...oldSettings,
+    defaultNewTarget: Math.max(0, oldNew || 0), defaultReviewTarget: Math.max(0, oldReview || 0),
     todayPlanMode: oldSettings.todayPlanMode === 'sequential' ? 'sequential' : 'mixed',
   };
   if (input?.set) {
@@ -245,11 +223,7 @@ export function normalizeState(input) {
     state.settings.todayBooks = Array.isArray(input.set.todayBooks) ? input.set.todayBooks : [];
     state.settings.typeBooks = Array.isArray(input.set.typeBooks) ? input.set.typeBooks : [];
   }
-  delete state.settings.newTarget;
-  delete state.settings.reviewTarget;
-  delete state.settings.newN;
-  delete state.settings.reviewN;
-  delete state.settings.rate;
+  delete state.settings.newTarget; delete state.settings.reviewTarget; delete state.settings.newN; delete state.settings.reviewN; delete state.settings.rate;
   state.settings.retention = Math.min(.97, Math.max(.75, Number(state.settings.retention) || .9));
 
   const preserveDates = inputVersion >= 4;
@@ -272,23 +246,21 @@ export function normalizeState(input) {
   for (const word of state.words) {
     if (state.simpleWords.includes(word.en)) word.retired = true;
     const evs = state.events.filter((e) => e.wordId === word.id && e.cold && e.mode === 'listen').sort((a, b) => a.ts - b.ts);
-    if (migrateScheduling) {
-      word.card = evs.length ? rebuildCard(evs, state.settings.retention) : emptyCard();
-    } else if (!word.card) {
-      word.card = evs.length ? rebuildCard(evs, state.settings.retention) : emptyCard();
-    }
+    if (migrateScheduling) word.card = evs.length ? rebuildCard(evs, state.settings.retention) : emptyCard();
+    else if (!word.card) word.card = evs.length ? rebuildCard(evs, state.settings.retention) : emptyCard();
   }
   state.version = STATE_VERSION;
   return state;
 }
 
 async function parseLocal(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? normalizeState(JSON.parse(raw)) : null;
-  } catch {
-    return null;
-  }
+  try { const raw = localStorage.getItem(key); return raw ? normalizeState(JSON.parse(raw)) : null; }
+  catch { return null; }
+}
+
+export async function readPersistedState() {
+  try { return await dbGet(STATE_KEY); }
+  catch { return parseLocal(FALLBACK_KEY); }
 }
 
 export async function loadState() {
@@ -296,11 +268,11 @@ export async function loadState() {
     const saved = await dbGet(STATE_KEY);
     if (saved) return normalizeState(saved);
     const fallback = await parseLocal(FALLBACK_KEY);
-    if (fallback) { await dbSet(STATE_KEY, fallback); return fallback; }
+    if (fallback) { await queueWrite(() => dbSet(STATE_KEY, fallback)); return fallback; }
     const legacy = await parseLocal(LEGACY_KEY);
     const state = legacy || defaultState();
     if (!state.words.length) state.words = sampleWords();
-    await dbSet(STATE_KEY, state);
+    await queueWrite(() => dbSet(STATE_KEY, state));
     return normalizeState(state);
   } catch {
     const fallback = await parseLocal(FALLBACK_KEY);
@@ -313,14 +285,14 @@ export async function loadState() {
 }
 
 export async function saveState(state) {
+  if (remoteApplying) return;
   state.version = STATE_VERSION;
   ensureSimpleWords(state);
-  try {
-    await dbSet(STATE_KEY, state);
-    localStorage.removeItem(FALLBACK_KEY);
-  } catch {
-    localStorage.setItem(FALLBACK_KEY, JSON.stringify(state));
-  }
+  return queueWrite(async () => {
+    if (remoteApplying) return;
+    try { await dbSet(STATE_KEY, state); localStorage.removeItem(FALLBACK_KEY); }
+    catch { localStorage.setItem(FALLBACK_KEY, JSON.stringify(state)); }
+  });
 }
 
 export async function replaceState(raw) {
@@ -329,6 +301,32 @@ export async function replaceState(raw) {
   return state;
 }
 
-export function exportState(state) {
-  return JSON.stringify(state, null, 2);
+export async function applyRemoteState(raw) {
+  remoteApplying = true;
+  const state = normalizeState(raw);
+  await queueWrite(async () => {
+    await dbSet(STATE_KEY, state);
+    try { localStorage.removeItem(FALLBACK_KEY); } catch {}
+  });
+  return state;
 }
+
+export function isRemoteStateApplying() { return remoteApplying; }
+
+export async function readCloudSyncBase() {
+  try { return await dbGet(CLOUD_BASE_KEY); } catch { return null; }
+}
+
+export async function saveCloudSyncBase(value) {
+  return queueWrite(() => dbSet(CLOUD_BASE_KEY, value));
+}
+
+export async function saveCloudConflictBackup(value) {
+  return queueWrite(() => dbSet(CLOUD_CONFLICT_KEY, value));
+}
+
+export async function readCloudConflictBackup() {
+  try { return await dbGet(CLOUD_CONFLICT_KEY); } catch { return null; }
+}
+
+export function exportState(state) { return JSON.stringify(state, null, 2); }

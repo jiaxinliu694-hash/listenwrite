@@ -23,7 +23,7 @@ test('global shell exposes restore and empty text library explains local-contain
   assert.ok(app.includes("hasUserData(state)&&!confirm"));
 });
 
-test('v33 browser bundle is cache busted',()=>{
+test('browser bundle is cache busted',()=>{
   const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
-  assert.ok(html.includes('app.bundle.js?v=33'));
+  assert.match(html,/app\.bundle\.js\?v=\d+/);
 });

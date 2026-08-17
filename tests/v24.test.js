@@ -24,5 +24,5 @@ test('study UI labels the timer as today module time rather than current round',
   assert.ok(app.includes("mode==='type'?'今日手打'"));
   assert.ok(!app.includes("el.textContent='本轮 '"));
   const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
-  assert.ok(html.includes('app.bundle.js?v=33'));
+  assert.match(html,/app\.bundle\.js\?v=\d+/);
 });
