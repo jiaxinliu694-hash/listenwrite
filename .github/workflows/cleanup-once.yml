@@ -1,0 +1,246 @@
+name: One-time Claude audit cleanup
+
+on:
+  push:
+    branches: [claude-audit-cleanup-v38]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude-audit-cleanup-v38
+      - name: Apply cleanup
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json, shutil
+          root=Path('.')
+          p=root/'src/cloudsync.js'; s=p.read_text()
+          s=s.replace("const APP_URL = 'https://jiaxinliu694-hash.github.io/listenwrite/';\n", "const APP_URL = 'https://jiaxinliu694-hash.github.io/listenwrite/';\nexport const OWNER_EMAIL = 'jiaxinliu694@gmail.com';\n")
+          needle="async function refreshSession() {"
+          insert="""export function ownerOtpRequest() {
+            return {
+              url: `${SUPABASE_URL}/auth/v1/otp?redirect_to=${encodeURIComponent(APP_URL)}`,
+              body: { email: OWNER_EMAIL, create_user: false },
+            };
+          }
+
+          export async function sendOwnerMagicLink(fetchImpl = globalThis.fetch) {
+            const { url, body } = ownerOtpRequest();
+            const response = await fetchImpl(url, {
+              method: 'POST', headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `登录邮件发送失败 ${response.status}`);
+            return data;
+          }
+
+          """
+          s=s.replace(needle,insert+needle)
+          s=re.sub(r"async function cloudSignIn\(email, password\) \{.*?\n\}\nasync function cloudSignUp\(email, password\) \{.*?\n\}\n", "", s, flags=re.S)
+          old=re.search(r"function consumeAuthCallback\(\) \{.*?\n\}\n\nfunction esc",s,re.S)
+          assert old
+          callback="""function decodeJwtPayload(token) {
+            try {
+              const part = String(token || '').split('.')[1];
+              if (!part) return null;
+              const base64 = part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '=');
+              const json = Array.from(atob(base64), c => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+              return JSON.parse(decodeURIComponent(json));
+            } catch { return null; }
+          }
+
+          export function captureSupabaseAuthCallback(env = {}) {
+            const loc = env.location || globalThis.location;
+            const hist = env.history || globalThis.history;
+            const storage = env.localStorage || globalThis.localStorage;
+            if (!loc?.hash || !storage) return false;
+            const params = new URLSearchParams(loc.hash.replace(/^#/, ''));
+            const access_token = params.get('access_token');
+            const refresh_token = params.get('refresh_token');
+            if (!access_token || !refresh_token) return false;
+            const payload = decodeJwtPayload(access_token) || {};
+            const expires_in = Number(params.get('expires_in')) || 3600;
+            const expires_at = Number(payload.exp) || Math.floor(Date.now() / 1000) + expires_in;
+            const existing = (() => { try { return JSON.parse(storage.getItem(SESSION_KEY) || 'null'); } catch { return null; } })();
+            const user = { ...(existing?.user || {}), id: payload.sub || existing?.user?.id || null, email: payload.email || existing?.user?.email || OWNER_EMAIL };
+            storage.setItem(SESSION_KEY, JSON.stringify({ access_token, refresh_token, expires_in, expires_at, token_type: params.get('token_type') || 'bearer', user }));
+            hist?.replaceState?.(null, '', loc.pathname + loc.search);
+            return true;
+          }
+
+          function esc"""
+          s=s[:old.start()]+callback+s[old.end():]
+          s=s.replace('<div class="lw-cloud-grid"><label class="lw-cloud-field">邮箱<input id="lwCloudEmail" type="email" autocomplete="email"></label><label class="lw-cloud-field">密码<input id="lwCloudPassword" type="password" autocomplete="current-password"></label></div><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudLogin" class="primary">登录</button><button id="lwCloudSignup">注册账号</button></div>', '<p>私人云端账号：<b>${esc(OWNER_EMAIL)}</b></p><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudMagicLogin" class="primary">发送登录邮件</button></div><p style="margin-top:12px">无需密码，也不提供注册入口。登录邮件只会发给这个已有账号。</p>')
+          s=re.sub(r"  \} else \{\n    const credentials = .*?\n    document\.getElementById\('lwCloudSignup'\).*?\n  \}\n\}", """  } else {
+            document.getElementById('lwCloudMagicLogin').onclick = async () => {
+              const button = document.getElementById('lwCloudMagicLogin');
+              if (button) button.disabled = true;
+              try {
+                setStatus('syncing', '正在发送登录邮件…');
+                await sendOwnerMagicLink();
+                setStatus('ready', '登录邮件已发送。打开 Gmail 点登录链接即可；不会创建新账号。');
+              } catch (e) {
+                setStatus('error', e?.message || '登录邮件发送失败');
+                if (button) button.disabled = false;
+              }
+            };
+          }
+          }""", s, flags=re.S)
+          s=s.replace("  session=normalizeSession(readStored(SESSION_KEY)); consumeAuthCallback(); startObservers(); if(session) await periodicSync(true);", "  captureSupabaseAuthCallback();\n  session=normalizeSession(readStored(SESSION_KEY));\n  startObservers();\n  if(session) await periodicSync(true);")
+          p.write_text(s)
+
+          (root/'src/app-entry.js').write_text("import './datachart-seed-patch.js';\nimport './cloudsync.js';\nimport './app.js';\n")
+
+          p=root/'src/storage.js'; s=p.read_text(); s=s.replace("export async function applyRemoteState(raw) {\n  remoteApplying = true;\n  const state = normalizeState(raw);\n  await queueWrite(async () => {\n    await dbSet(STATE_KEY, state);\n    try { localStorage.removeItem(FALLBACK_KEY); } catch {}\n  });\n  return state;\n}", "export async function applyRemoteState(raw) {\n  remoteApplying = true;\n  const state = normalizeState(raw);\n  try {\n    await queueWrite(async () => {\n      await dbSet(STATE_KEY, state);\n      try { localStorage.removeItem(FALLBACK_KEY); } catch {}\n    });\n    return state;\n  } finally {\n    remoteApplying = false;\n  }\n}")
+          p.write_text(s)
+
+          for f in ['src/private-passwordless-auth.js','src/auth-callback-patch.js','v2.html']:
+            q=root/f
+            if q.exists(): q.unlink()
+          if (root/'scripts').exists(): shutil.rmtree(root/'scripts')
+
+          p=root/'tests/auth-callback-v35.test.js'; p.write_text(p.read_text().replace("../src/auth-callback-patch.js","../src/cloudsync.js"))
+          (root/'tests/private-passwordless-auth.test.js').write_text("""import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { OWNER_EMAIL, ownerOtpRequest, sendOwnerMagicLink } from '../src/cloudsync.js';
+
+          test('private cloud login is locked to the existing owner and cannot create users', () => {
+            const req = ownerOtpRequest();
+            assert.equal(OWNER_EMAIL, 'jiaxinliu694@gmail.com');
+            assert.equal(req.body.email, OWNER_EMAIL);
+            assert.equal(req.body.create_user, false);
+            assert.match(req.url, /\\/auth\\/v1\\/otp\\?redirect_to=/);
+          });
+
+          test('magic-link sender posts the private owner request', async () => {
+            let seen = null;
+            const fakeFetch = async (url, options) => { seen = { url, options }; return { ok: true, json: async () => ({}) }; };
+            await sendOwnerMagicLink(fakeFetch);
+            assert.equal(seen.options.method, 'POST');
+            assert.deepEqual(JSON.parse(seen.options.body), { email: OWNER_EMAIL, create_user: false });
+          });
+          """)
+          p=root/'tests/cloud-storage-v35.test.js'; s=p.read_text().replace("assert.equal(storage.isRemoteStateApplying(), true);", "assert.equal(storage.isRemoteStateApplying(), false);"); p.write_text(s)
+
+          (root/'tools').mkdir(exist_ok=True)
+          (root/'tools/update-bundle-version.mjs').write_text("""import { createHash } from 'node:crypto';
+          import { readFile, writeFile } from 'node:fs/promises';
+          const bundle = await readFile('app.bundle.js');
+          const hash = createHash('sha256').update(bundle).digest('hex').slice(0, 12);
+          const html = await readFile('index.html', 'utf8');
+          await writeFile('index.html', html.replace(/app\\.bundle\\.js\\?v=[^\"']+/, `app.bundle.js?v=${hash}`));
+          """)
+          pkg=json.loads((root/'package.json').read_text()); pkg['scripts']['build']="esbuild src/app-entry.js --bundle --format=esm --target=safari16 --outfile=app.bundle.js && node tools/update-bundle-version.mjs"; (root/'package.json').write_text(json.dumps(pkg,ensure_ascii=False,indent=2)+"\n")
+
+          (root/'.github/workflows/core-v3.yml').write_text("""name: Listenwrite v3 core
+
+          on:
+            push:
+              branches: [main]
+            pull_request:
+              branches: [main]
+
+          jobs:
+            test:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-node@v4
+                  with:
+                    node-version: 22
+                    cache: npm
+                - run: npm ci
+                - run: node --check src/app.js
+                - run: node --check src/storage.js
+                - run: node --check src/queue.js
+                - run: node --check src/cloudsync.js
+                - run: npm test
+          """)
+          (root/'.github/workflows/build-v3.yml').write_text("""name: Build Listenwrite v3
+
+          on:
+            push:
+              branches: [main]
+
+          permissions:
+            contents: write
+
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-node@v4
+                  with:
+                    node-version: 22
+                    cache: npm
+                - run: npm ci
+                - run: npm test
+                - run: npm run build
+                - name: Pack source for review
+                  run: zip -qr listenwrite-source.zip . -x '.git/*' 'node_modules/*' 'listenwrite-source.zip'
+                - uses: actions/upload-artifact@v4
+                  with:
+                    name: listenwrite-source
+                    path: listenwrite-source.zip
+                    retention-days: 30
+                - name: Commit browser build
+                  run: |
+                    if [ -z \"$(git status --porcelain -- app.bundle.js index.html)\" ]; then exit 0; fi
+                    git config user.name \"listenwrite-bot\"
+                    git config user.email \"actions@users.noreply.github.com\"
+                    git add app.bundle.js index.html
+                    git commit -m \"Build browser bundle [skip ci]\"
+                    git push
+          """)
+
+          (root/'supabase/migrations').mkdir(parents=True, exist_ok=True)
+          (root/'supabase/migrations/20260817_private_single_owner_cloud.sql').write_text("""-- Hosted Supabase security boundary for the single-owner Listenwrite cloud.
+          create table if not exists public.listenwrite_user_state (
+            user_id uuid primary key references auth.users(id) on delete cascade,
+            state jsonb not null,
+            state_updated_at bigint not null default 0,
+            revision bigint not null default 1,
+            synced_at timestamptz not null default now()
+          );
+          alter table public.listenwrite_user_state enable row level security;
+          grant select, insert, update, delete on public.listenwrite_user_state to authenticated;
+          drop policy if exists listenwrite_select_owner_state on public.listenwrite_user_state;
+          drop policy if exists listenwrite_insert_owner_state on public.listenwrite_user_state;
+          drop policy if exists listenwrite_update_owner_state on public.listenwrite_user_state;
+          drop policy if exists listenwrite_delete_owner_state on public.listenwrite_user_state;
+          create policy listenwrite_select_owner_state on public.listenwrite_user_state for select to authenticated using (auth.uid() = user_id and auth.uid() = '77f92fe7-3e18-4fa3-a328-9761b06f3171'::uuid);
+          create policy listenwrite_insert_owner_state on public.listenwrite_user_state for insert to authenticated with check (auth.uid() = user_id and auth.uid() = '77f92fe7-3e18-4fa3-a328-9761b06f3171'::uuid);
+          create policy listenwrite_update_owner_state on public.listenwrite_user_state for update to authenticated using (auth.uid() = user_id and auth.uid() = '77f92fe7-3e18-4fa3-a328-9761b06f3171'::uuid) with check (auth.uid() = user_id and auth.uid() = '77f92fe7-3e18-4fa3-a328-9761b06f3171'::uuid);
+          create policy listenwrite_delete_owner_state on public.listenwrite_user_state for delete to authenticated using (auth.uid() = user_id and auth.uid() = '77f92fe7-3e18-4fa3-a328-9761b06f3171'::uuid);
+
+          create or replace function public.listenwrite_pull_state()
+          returns table(state jsonb, state_updated_at bigint, revision bigint, synced_at timestamptz)
+          language sql stable set search_path = public as $$
+            select s.state, s.state_updated_at, s.revision, s.synced_at from public.listenwrite_user_state s
+            where s.user_id = auth.uid() and auth.uid() = '77f92fe7-3e18-4fa3-a328-9761b06f3171'::uuid;
+          $$;
+
+          create or replace function public.listenwrite_reject_new_auth_users()
+          returns trigger language plpgsql security definer set search_path = public, auth as $$
+          begin raise exception 'Listenwrite signups are disabled'; end; $$;
+          drop trigger if exists listenwrite_block_new_auth_users on auth.users;
+          create trigger listenwrite_block_new_auth_users before insert on auth.users for each row execute function public.listenwrite_reject_new_auth_users();
+          """)
+
+          Path('.github/workflows/cleanup-once.yml').unlink()
+          PY
+      - name: Commit cleanup
+        run: |
+          git config user.name "listenwrite-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Clean up cloud auth and legacy code"
+          git push origin HEAD:claude-audit-cleanup-v38
