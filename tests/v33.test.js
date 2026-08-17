@@ -25,5 +25,5 @@ test('global shell exposes restore and empty text library explains local-contain
 
 test('browser bundle is cache busted',()=>{
   const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
-  assert.match(html,/app\.bundle\.js\?v=\d+/);
+  assert.match(html,/app\.bundle\.js\?v=[a-z0-9_-]+/i);
 });
