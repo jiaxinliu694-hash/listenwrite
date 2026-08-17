@@ -3167,6 +3167,42 @@ async function dbSet(key, value) {
     tx.onerror = () => reject(tx.error);
   });
 }
+function storageContext(env = {}) {
+  const standalone = env.standalone ?? (typeof window !== "undefined" && (window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator?.standalone === true));
+  return {
+    mode: standalone ? "standalone" : "browser",
+    label: standalone ? "\u4E3B\u5C4F\u5E55 App \u672C\u5730\u6570\u636E" : "\u6D4F\u89C8\u5668\u672C\u5730\u6570\u636E"
+  };
+}
+function hasUserData(state2) {
+  if (!state2 || typeof state2 !== "object") return false;
+  if ((state2.texts || []).length) return true;
+  if ((state2.events || []).length) return true;
+  if ((state2.activities || []).length) return true;
+  if ((state2.simpleWords || []).length || (state2.errorBooks || []).length) return true;
+  if (Object.keys(state2.dailyPlans || {}).length) return true;
+  if ((state2.sentenceBooks || []).some((book) => (book?.entries || []).length)) return true;
+  if ((state2.words || []).some((word) => !String(word?.id || "").startsWith("sample_"))) return true;
+  const chart = state2.dataChart;
+  if (chart && typeof chart === "object") {
+    const stack = [chart];
+    const seen = /* @__PURE__ */ new Set();
+    while (stack.length) {
+      const value = stack.pop();
+      if (!value || typeof value !== "object" || seen.has(value)) continue;
+      seen.add(value);
+      if (Array.isArray(value)) {
+        if (value.length) return true;
+        continue;
+      }
+      for (const child of Object.values(value)) {
+        if (Array.isArray(child) && child.length) return true;
+        if (child && typeof child === "object") stack.push(child);
+      }
+    }
+  }
+  return false;
+}
 function defaultState() {
   return {
     version: STATE_VERSION,
@@ -4942,8 +4978,10 @@ function navHtml() {
 }
 function shell(content) {
   const [ey, title] = labels[view] || ["", ""];
-  root.innerHTML = `<main class="shell"><header class="topbar"><div><div class="eyebrow">${ey}</div><h1>${title}</h1></div><button id="backupTop" class="soft">\u5907\u4EFD</button></header>${content}</main>${navHtml()}`;
+  const storage = storageContext();
+  root.innerHTML = `<main class="shell"><header class="topbar"><div><div class="eyebrow">${ey}</div><h1>${title}</h1><div class="small">${esc(storage.label)}</div></div><div class="toolbar"><button id="restoreTop" class="soft">\u6062\u590D</button><button id="backupTop" class="soft">\u5907\u4EFD</button></div></header>${content}</main>${navHtml()}`;
   document.querySelectorAll("[data-nav]").forEach((b) => b.onclick = () => go(b.dataset.nav));
+  document.getElementById("restoreTop").onclick = requestRestore;
   document.getElementById("backupTop").onclick = backup;
 }
 function go(next) {
@@ -6089,14 +6127,16 @@ function textHistoryStatusLabel(status) {
 function renderTextLibraryHome() {
   ensureSentenceBooks(state);
   ensureSimpleWords(state);
-  const groups = textCollectionSummaries(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u5148\u6309\u6587\u672C\u5E93\u627E\u6587\u7AE0\uFF1B\u53E5\u5B50\u548C\u5355\u8BCD\u5B66\u4E60\u8BB0\u5F55\u53EA\u5728\u5BF9\u5E94\u6587\u7AE0\u91CC\u9762\u663E\u793A\u3002</p></div><button id="newText" class="primary">\u65B0\u5EFA\u6587\u672C</button></div></section><section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C\u5E93</h2><div class="small">${state.texts.length} \u7BC7\u6587\u672C \xB7 ${groups.length} \u4E2A\u5E93</div></div></div><div class="list" style="margin-top:12px">${groups.length ? groups.map((g) => `<button class="entry" data-text-collection="${esc(g.name)}"><div><b>${esc(g.name)}</b><div class="small" style="margin-top:6px">${g.textCount} \u7BC7 \xB7 \u5DF2\u542C ${g.practicedSentenceCount} \u53E5 \xB7 \u542C\u8FC7 ${g.wordCount} \u8BCD${g.weakCount ? ` \xB7 ${g.weakCount} \u4E2A\u4E0D\u719F\u6089` : ""}</div></div><span>\u8FDB\u5165\u6587\u672C\u5E93 \u203A</span></button>`).join("") : '<div class="empty">\u8FD8\u6CA1\u6709\u6587\u672C\u3002\u5148\u65B0\u5EFA\u4E00\u7BC7\u3002</div>'}</div></section><section class="card"><div class="space"><div><h2 class="section-title">\u72EC\u7ACB\u53E5\u5B50\u5DE5\u5177</h2><div class="small">\u4E34\u65F6\u53E5\u5B50\u3001\u5168\u5C40\u53E5\u5B50\u5E93\u548C\u9519\u8BCD\u68C0\u7D22\u653E\u5728\u8FD9\u91CC\uFF0C\u4E0D\u518D\u94FA\u5728\u6587\u672C\u4E3B\u9875\u3002</div></div><button id="openSentenceTools" class="soft">\u8FDB\u5165</button></div></section></div>`);
+  const groups = textCollectionSummaries(state), storage = storageContext();
+  const emptyTextNotice = !groups.length ? `<div class="empty"><div>\u5F53\u524D\u8FD9\u5957\u672C\u5730\u6570\u636E\u91CC\u8FD8\u6CA1\u6709\u6587\u672C\u3002</div><div class="small" style="margin-top:8px">\u4F60\u73B0\u5728\u770B\u5230\u7684\u662F\u300C${esc(storage.label)}\u300D\u3002iPhone \u4E0A\u6D4F\u89C8\u5668\u9875\u9762\u548C\u6DFB\u52A0\u5230\u4E3B\u5C4F\u5E55\u7684 App \u53EF\u80FD\u5404\u81EA\u4FDD\u5B58\u4E00\u4EFD\u672C\u5730\u6570\u636E\uFF1B\u5982\u679C\u8BB0\u5F55\u5728\u53E6\u4E00\u4E2A\u5165\u53E3\uFF0C\u8BF7\u5148\u5728\u90A3\u91CC\u70B9\u300C\u5907\u4EFD\u300D\uFF0C\u518D\u56DE\u8FD9\u91CC\u70B9\u300C\u6062\u590D\u300D\u3002</div><button id="restoreEmptyText" class="soft" style="margin-top:12px">\u6062\u590D\u5DF2\u6709\u5907\u4EFD</button></div>` : "";
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u5148\u6309\u6587\u672C\u5E93\u627E\u6587\u7AE0\uFF1B\u53E5\u5B50\u548C\u5355\u8BCD\u5B66\u4E60\u8BB0\u5F55\u53EA\u5728\u5BF9\u5E94\u6587\u7AE0\u91CC\u9762\u663E\u793A\u3002</p></div><button id="newText" class="primary">\u65B0\u5EFA\u6587\u672C</button></div></section><section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C\u5E93</h2><div class="small">${state.texts.length} \u7BC7\u6587\u672C \xB7 ${groups.length} \u4E2A\u5E93</div></div></div><div class="list" style="margin-top:12px">${groups.length ? groups.map((g) => `<button class="entry" data-text-collection="${esc(g.name)}"><div><b>${esc(g.name)}</b><div class="small" style="margin-top:6px">${g.textCount} \u7BC7 \xB7 \u5DF2\u542C ${g.practicedSentenceCount} \u53E5 \xB7 \u542C\u8FC7 ${g.wordCount} \u8BCD${g.weakCount ? ` \xB7 ${g.weakCount} \u4E2A\u4E0D\u719F\u6089` : ""}</div></div><span>\u8FDB\u5165\u6587\u672C\u5E93 \u203A</span></button>`).join("") : emptyTextNotice}</div></section><section class="card"><div class="space"><div><h2 class="section-title">\u72EC\u7ACB\u53E5\u5B50\u5DE5\u5177</h2><div class="small">\u4E34\u65F6\u53E5\u5B50\u3001\u5168\u5C40\u53E5\u5B50\u5E93\u548C\u9519\u8BCD\u68C0\u7D22\u653E\u5728\u8FD9\u91CC\uFF0C\u4E0D\u518D\u94FA\u5728\u6587\u672C\u4E3B\u9875\u3002</div></div><button id="openSentenceTools" class="soft">\u8FDB\u5165</button></div></section></div>`);
   document.getElementById("newText").onclick = () => {
     textToolsOpen = true;
     textFormOpen = true;
     textEditId = null;
     renderText();
   };
+  if (document.getElementById("restoreEmptyText")) document.getElementById("restoreEmptyText").onclick = requestRestore;
   document.getElementById("openSentenceTools").onclick = () => {
     textToolsOpen = true;
     renderText();
@@ -6694,6 +6734,9 @@ function drawWordList() {
     renderLibrary();
   });
 }
+function requestRestore() {
+  restoreInput.click();
+}
 function backup() {
   download(`listenwrite-backup-${currentDayKey()}.json`, exportState(state));
 }
@@ -6831,6 +6874,10 @@ restoreInput.onchange = async () => {
   const f = restoreInput.files?.[0];
   if (!f) return;
   try {
+    if (hasUserData(state) && !confirm("\u6062\u590D\u5907\u4EFD\u4F1A\u8986\u76D6\u5F53\u524D\u8FD9\u5957\u672C\u5730\u6570\u636E\uFF0C\u7EE7\u7EED\u5417\uFF1F")) {
+      restoreInput.value = "";
+      return;
+    }
     state = await replaceState(JSON.parse(await f.text()));
     reconcileDataChartContent(state.dataChart, DATA_CHART_SEED);
     persist();
