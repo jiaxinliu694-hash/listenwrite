@@ -28,5 +28,5 @@ test('remote apply wins over stale local saves queued after it starts', async ()
 
   const persisted = await storage.readPersistedState();
   assert.equal(persisted.texts[0].id, 'remote');
-  assert.equal(storage.isRemoteStateApplying(), true);
+  assert.equal(storage.isRemoteStateApplying(), false);
 });

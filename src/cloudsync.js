@@ -11,6 +11,7 @@ import { mergeCloudStates } from './cloudmerge.js';
 const SUPABASE_URL = 'https://bsuilpygojnqxntrxgnm.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_Y_nFcIW0Sg0pB2zEhMU50g_LVQMX2Am';
 const APP_URL = 'https://jiaxinliu694-hash.github.io/listenwrite/';
+export const OWNER_EMAIL = 'jiaxinliu694@gmail.com';
 const SESSION_KEY = 'listenwrite-supabase-session-v1';
 const META_KEY = 'listenwrite-cloud-meta-v1';
 const POLL_MS = 5000;
@@ -65,6 +66,23 @@ async function authRequest(path, body) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `请求失败 ${response.status}`);
+  return data;
+}
+
+export function ownerOtpRequest() {
+  return {
+    url: `${SUPABASE_URL}/auth/v1/otp?redirect_to=${encodeURIComponent(APP_URL)}`,
+    body: { email: OWNER_EMAIL, create_user: false },
+  };
+}
+
+export async function sendOwnerMagicLink(fetchImpl = globalThis.fetch) {
+  const { url, body } = ownerOtpRequest();
+  const response = await fetchImpl(url, {
+    method: 'POST', headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `登录邮件发送失败 ${response.status}`);
   return data;
 }
 
@@ -271,16 +289,6 @@ export async function reconcileCloud({ force = false } = {}) {
   } finally { syncBusy = false; renderCloudModalIfOpen(); }
 }
 
-async function cloudSignIn(email, password) {
-  const data = await authRequest('/auth/v1/token?grant_type=password', { email, password });
-  saveSession(data); conflict = null; await reconcileCloud({ force: true });
-}
-async function cloudSignUp(email, password) {
-  const path = `/auth/v1/signup?redirect_to=${encodeURIComponent(APP_URL)}`;
-  const data = await authRequest(path, { email, password });
-  if (data?.access_token) { saveSession(data); await reconcileCloud({ force: true }); return '注册并登录成功'; }
-  return '注册成功。请去邮箱确认；确认后会回到爱听写，再直接登录。';
-}
 async function cloudSignOut() {
   try {
     if (session?.access_token) await fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, { method: 'POST', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${session.access_token}` } });
@@ -288,15 +296,32 @@ async function cloudSignOut() {
   clearSession(); renderCloudModalIfOpen();
 }
 
-function consumeAuthCallback() {
-  if (typeof location === 'undefined' || !location.hash) return false;
-  const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+function decodeJwtPayload(token) {
+  try {
+    const part = String(token || '').split('.')[1];
+    if (!part) return null;
+    const base64 = part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '=');
+    const json = Array.from(atob(base64), c => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+    return JSON.parse(decodeURIComponent(json));
+  } catch { return null; }
+}
+
+export function captureSupabaseAuthCallback(env = {}) {
+  const loc = env.location || globalThis.location;
+  const hist = env.history || globalThis.history;
+  const storage = env.localStorage || globalThis.localStorage;
+  if (!loc?.hash || !storage) return false;
+  const params = new URLSearchParams(loc.hash.replace(/^#/, ''));
   const access_token = params.get('access_token');
   const refresh_token = params.get('refresh_token');
   if (!access_token || !refresh_token) return false;
+  const payload = decodeJwtPayload(access_token) || {};
   const expires_in = Number(params.get('expires_in')) || 3600;
-  saveSession({ access_token, refresh_token, expires_in, token_type: params.get('token_type') || 'bearer', user: null });
-  history.replaceState(null, '', location.pathname + location.search);
+  const expires_at = Number(payload.exp) || Math.floor(Date.now() / 1000) + expires_in;
+  const existing = (() => { try { return JSON.parse(storage.getItem(SESSION_KEY) || 'null'); } catch { return null; } })();
+  const user = { ...(existing?.user || {}), id: payload.sub || existing?.user?.id || null, email: payload.email || existing?.user?.email || OWNER_EMAIL };
+  storage.setItem(SESSION_KEY, JSON.stringify({ access_token, refresh_token, expires_in, expires_at, token_type: params.get('token_type') || 'bearer', user }));
+  hist?.replaceState?.(null, '', loc.pathname + loc.search);
   return true;
 }
 
@@ -318,7 +343,7 @@ function openCloudModal() {
   const mask = document.createElement('div'); mask.id = 'lwCloudMask'; mask.className = 'lw-cloud-mask';
   const email = session?.user?.email || '当前账号';
   const conflictHtml = conflict ? `<div class="lw-cloud-status lw-cloud-warning"><b>检测到两端都有修改</b><br>${esc(syncMessage)}</div>` : '';
-  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>云同步</h2><p>本地仍然保存；云端负责电脑、Safari 和主屏幕 App 同步。双端同时修改时先保留双方快照，不再直接覆盖。</p></div><button id="lwCloudClose" style="border:0;background:transparent;font-size:24px">×</button></div>${session ? `<div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div>${conflictHtml}<div class="small">已登录：${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">立即同步</button>${conflict ? '<button id="lwCloudMerge" class="primary">合并双方记录</button><button id="lwCloudBackup">下载云端备份</button>' : ''}<button id="lwCloudPull">使用云端</button><button id="lwCloudPush">上传本机</button><button id="lwCloudLogout">只退出本设备</button></div><p style="margin-top:12px">有冲突时优先用“合并双方记录”。“使用云端 / 上传本机”属于整份替换，操作前系统已保存冲突快照。</p>` : `<div class="lw-cloud-grid"><label class="lw-cloud-field">邮箱<input id="lwCloudEmail" type="email" autocomplete="email"></label><label class="lw-cloud-field">密码<input id="lwCloudPassword" type="password" autocomplete="current-password"></label></div><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudLogin" class="primary">登录</button><button id="lwCloudSignup">注册账号</button></div>`}</div>`;
+  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>云同步</h2><p>本地仍然保存；云端负责电脑、Safari 和主屏幕 App 同步。双端同时修改时先保留双方快照，不再直接覆盖。</p></div><button id="lwCloudClose" style="border:0;background:transparent;font-size:24px">×</button></div>${session ? `<div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div>${conflictHtml}<div class="small">已登录：${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">立即同步</button>${conflict ? '<button id="lwCloudMerge" class="primary">合并双方记录</button><button id="lwCloudBackup">下载云端备份</button>' : ''}<button id="lwCloudPull">使用云端</button><button id="lwCloudPush">上传本机</button><button id="lwCloudLogout">只退出本设备</button></div><p style="margin-top:12px">有冲突时优先用“合并双方记录”。“使用云端 / 上传本机”属于整份替换，操作前系统已保存冲突快照。</p>` : `<p>私人云端账号：<b>${esc(OWNER_EMAIL)}</b></p><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudMagicLogin" class="primary">发送登录邮件</button></div><p style="margin-top:12px">无需密码，也不提供注册入口。登录邮件只会发给这个已有账号。</p>`}</div>`;
   mask.addEventListener('click', e => { if (e.target === mask) closeCloudModal(); }); document.body.appendChild(mask);
   document.getElementById('lwCloudClose').onclick = closeCloudModal;
   if (session) {
@@ -329,10 +354,19 @@ function openCloudModal() {
     document.getElementById('lwCloudPush').onclick = async () => { try { const local = conflict?.local || await readPersistedState(); const cloud = conflict?.cloud || await pullCloud(); if (cloud?.state) await saveCloudConflictBackup({ createdAt:Date.now(), local, cloud }); await pushLocal(local, cloud ? Number(cloud.revision)||null : null); } catch(e) { setStatus('error', e.message); } };
     document.getElementById('lwCloudLogout').onclick = cloudSignOut;
   } else {
-    const credentials = () => ({ email: document.getElementById('lwCloudEmail').value.trim(), password: document.getElementById('lwCloudPassword').value });
-    document.getElementById('lwCloudLogin').onclick = async () => { const {email,password}=credentials(); if(!email||!password)return setStatus('error','请输入邮箱和密码'); try{setStatus('syncing','正在登录…');await cloudSignIn(email,password);openCloudModal();}catch(e){setStatus('error',e.message);} };
-    document.getElementById('lwCloudSignup').onclick = async () => { const {email,password}=credentials(); if(!email||password.length<6)return setStatus('error','请输入邮箱，密码至少 6 位'); try{setStatus('syncing','正在注册…');const msg=await cloudSignUp(email,password);setStatus(session?'synced':'ready',msg);openCloudModal();}catch(e){setStatus('error',e.message);} };
-  }
+  document.getElementById('lwCloudMagicLogin').onclick = async () => {
+    const button = document.getElementById('lwCloudMagicLogin');
+    if (button) button.disabled = true;
+    try {
+      setStatus('syncing', '正在发送登录邮件…');
+      await sendOwnerMagicLink();
+      setStatus('ready', '登录邮件已发送。打开 Gmail 点登录链接即可；不会创建新账号。');
+    } catch (e) {
+      setStatus('error', e?.message || '登录邮件发送失败');
+      if (button) button.disabled = false;
+    }
+  };
+}
 }
 function ensureCloudButton() {
   const toolbar = document.querySelector('.topbar .toolbar'); if (!toolbar || document.getElementById('cloudSyncTop')) return;
@@ -346,6 +380,9 @@ function startObservers() {
 }
 export async function initCloudSync() {
   if (typeof window==='undefined'||typeof document==='undefined'||typeof indexedDB==='undefined') return;
-  session=normalizeSession(readStored(SESSION_KEY)); consumeAuthCallback(); startObservers(); if(session) await periodicSync(true);
+  captureSupabaseAuthCallback();
+  session=normalizeSession(readStored(SESSION_KEY));
+  startObservers();
+  if(session) await periodicSync(true);
 }
 if (typeof window!=='undefined'&&typeof document!=='undefined') queueMicrotask(()=>initCloudSync().catch(error=>{console.error('Listenwrite cloud init failed',error);setStatus('error',error?.message||'云同步初始化失败');}));
