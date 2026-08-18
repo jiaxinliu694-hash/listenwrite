@@ -5,7 +5,7 @@ const SESSION_KEY = 'listenwrite-supabase-session-v1';
 
 async function verifyOwnerOtp(code) {
   const token = String(code || '').replace(/\s+/g, '');
-  if (!/^\d{6}$/.test(token)) throw new Error('请输入邮件里的 6 位验证码');
+  if (!/^\d{6,8}$/.test(token)) throw new Error('请输入邮件里的验证码');
   const response = await fetch(`${SUPABASE_URL}/auth/v1/verify`, {
     method: 'POST',
     headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
@@ -24,13 +24,13 @@ function enhanceOtpLogin() {
   const sendButton = document.getElementById('lwCloudMagicLogin');
   if (!mask || !sendButton || document.getElementById('lwCloudOtpCode')) return;
 
-  sendButton.textContent = '发送 6 位验证码';
+  sendButton.textContent = '发送验证码';
   const actions = sendButton.closest('.lw-cloud-actions');
   if (!actions) return;
 
   const block = document.createElement('div');
   block.style.marginTop = '12px';
-  block.innerHTML = `<div class="lw-cloud-field"><label for="lwCloudOtpCode">邮件验证码</label><input id="lwCloudOtpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字"></div><div class="lw-cloud-actions"><button id="lwCloudOtpVerify" class="primary">验证码登录</button></div><p style="margin-top:10px">不再点邮件链接。收到邮件后，把 6 位数字填在这里即可。</p>`;
+  block.innerHTML = `<div class="lw-cloud-field"><label for="lwCloudOtpCode">邮件验证码</label><input id="lwCloudOtpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="输入邮件里的数字验证码"></div><div class="lw-cloud-actions"><button id="lwCloudOtpVerify" class="primary">验证码登录</button></div><p style="margin-top:10px">不再点邮件链接。收到邮件后，把数字验证码填在这里即可。</p>`;
   actions.insertAdjacentElement('afterend', block);
 
   const input = document.getElementById('lwCloudOtpCode');
