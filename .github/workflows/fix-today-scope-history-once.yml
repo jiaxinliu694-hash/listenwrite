@@ -1,0 +1,279 @@
+name: One-time Today scope history recovery fix
+
+on:
+  push:
+    branches: [fix-preserve-today-scope-history]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix-preserve-today-scope-history
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Preserve Today history across wordbook switches
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          q = Path('src/queue.js')
+          s = q.read_text()
+
+          old_seed = """function seedTodayFromListenHistory(state, plan) {
+            if (plan.mode === 'sequential') return;
+            const seen = new Set([...plan.newIds, ...plan.reviewIds]);
+            const listenedIds = [...new Set(state.events.filter((e) => e.date === plan.date && e.mode === 'listen').map((e) => e.wordId))];
+            for (const id of listenedIds) {
+              if (seen.has(id) || wordPassedOnDay(state, id, plan.date)) continue;
+              const word = state.words.find((w) => w.id === id);
+              if (!word || !matchesBooks(word, plan.books)) continue;
+              if (wordStudyKind(state, word, plan.date) === 'review') plan.reviewIds.push(id);
+              else plan.newIds.push(id);
+              seen.add(id);
+            }
+          }"""
+          new_seed = """function listenedIdsOnDay(state, date) {
+            return [...new Set((state.events || [])
+              .filter((e) => e.date === date && e.mode === 'listen')
+              .map((e) => e.wordId))];
+          }
+
+          function seedTodayFromListenHistory(state, plan) {
+            if (plan.mode === 'sequential') return;
+            const seen = new Set([...plan.newIds, ...plan.reviewIds]);
+            // Formal listening events are durable day history. The selected books only
+            // choose untouched replacement candidates; they must never hide or discard
+            // words already studied earlier in this study day.
+            for (const id of listenedIdsOnDay(state, plan.date)) {
+              if (seen.has(id)) continue;
+              const word = state.words.find((w) => w.id === id);
+              if (!word) continue;
+              if (wordStudyKind(state, word, plan.date) === 'review') plan.reviewIds.push(id);
+              else plan.newIds.push(id);
+              seen.add(id);
+            }
+          }"""
+          assert old_seed in s, 'seedTodayFromListenHistory changed unexpectedly'
+          s = s.replace(old_seed, new_seed, 1)
+
+          old_scope = """function reconcileScope(state, plan, books) {
+            if (sameBooks(plan.books, books)) return;
+            // Scope controls visibility. Today's events are preserved, but only unfinished
+            // touched words that also belong to the new scope carry into the new queue.
+            const carry = [...new Set([...(plan.newIds || []), ...(plan.reviewIds || [])])].filter((id) => {
+              const word = state.words.find((w) => w.id === id);
+              return Boolean(word)
+                && !word.retired
+                && listenedToday(state, id, plan.date)
+                && !wordPassedOnDay(state, id, plan.date)
+                && matchesBooks(word, books);
+            });
+            plan.newIds = [];
+            plan.reviewIds = [];
+            for (const id of carry) {
+              const word = state.words.find((w) => w.id === id);
+              if (wordStudyKind(state, word, plan.date) === 'review') plan.reviewIds.push(id);
+              else plan.newIds.push(id);
+            }
+            plan.resumeWordId = carry.includes(plan.resumeWordId) ? plan.resumeWordId : null;
+            plan.books = [...books];
+            plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
+          }"""
+          new_scope = """function reconcileScope(state, plan, books) {
+            if (sameBooks(plan.books, books)) return;
+            // Switching wordbooks redraws only untouched candidates. Every formal word
+            // already heard today remains in the day's fixed denominator and progress,
+            // even when it belongs only to a previously selected book or already passed.
+            const carry = listenedIdsOnDay(state, plan.date)
+              .filter((id) => state.words.some((w) => w.id === id));
+            plan.newIds = [];
+            plan.reviewIds = [];
+            for (const id of carry) {
+              const word = state.words.find((w) => w.id === id);
+              if (wordStudyKind(state, word, plan.date) === 'review') plan.reviewIds.push(id);
+              else plan.newIds.push(id);
+            }
+            plan.resumeWordId = carry.includes(plan.resumeWordId) && !wordPassedOnDay(state, plan.resumeWordId, plan.date)
+              ? plan.resumeWordId
+              : null;
+            plan.books = [...books];
+            plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
+          }"""
+          assert old_scope in s, 'reconcileScope changed unexpectedly'
+          s = s.replace(old_scope, new_scope, 1)
+          q.write_text(s)
+
+          app = Path('src/app.js')
+          a = app.read_text()
+          old_stats = "  const td = todayListeningStats(state, books, date);"
+          new_stats = "  const td = todayListeningStats(state, [], date);"
+          assert old_stats in a, 'overall Today stats call changed unexpectedly'
+          a = a.replace(old_stats, new_stats, 1)
+
+          old_rows = """    : (books.length ? books : allBooks(state)).map((b) => {
+                const x = todayListeningStats(state, [b], date);
+                return `<div class=\"bookrow\"><b>${esc(b)}</b><span>${x.newCount} 新</span><span>${x.reviewCount} 复习</span><span class=\"mobilehide good\">${x.firstGood} 熟悉</span><span class=\"mobilehide bad\">${x.firstBad} 不熟</span></div>`;
+              }).join('');"""
+          new_rows = """    : (() => {
+                const touchedBooks = new Set(books);
+                for (const id of td.ids || []) {
+                  const word = wordById(id);
+                  for (const source of word?.sources || []) touchedBooks.add(source);
+                }
+                const rows = touchedBooks.size ? [...touchedBooks] : allBooks(state);
+                return rows.map((b) => {
+                  const x = todayListeningStats(state, [b], date);
+                  return `<div class=\"bookrow\"><b>${esc(b)}</b><span>${x.newCount} 新</span><span>${x.reviewCount} 复习</span><span class=\"mobilehide good\">${x.firstGood} 熟悉</span><span class=\"mobilehide bad\">${x.firstBad} 不熟</span></div>`;
+                }).join('');
+              })();"""
+          assert old_rows in a, 'mixed Today book rows changed unexpectedly'
+          a = a.replace(old_rows, new_rows, 1)
+
+          old_help = '<div class="small" style="margin:10px 0">降低目标时只裁掉完全没碰过的词；已经听过的词不会被删除。</div>'
+          new_help = '<div class="small" style="margin:10px 0">切换词书或降低目标只会替换/裁掉完全没碰过的候选词；今天已经正式听过的词，无论来自哪本词书、是否已熟悉，都会保留在今天的进度里。</div>'
+          assert old_help in a, 'Today help text changed unexpectedly'
+          a = a.replace(old_help, new_help, 1)
+          app.write_text(a)
+
+          v15 = Path('tests/v15.test.js')
+          t = v15.read_text()
+          old_v15 = """test('deselected book disappears from today plan while its completed learning event remains', () => {
+            const s = stateWithWords();
+            const date = '2026-08-14';
+            let p = ensureDailyPlan(s, { date, books:['A'] });
+            const heard = p.newIds[0];
+            s.events.push({ id:'ev1', wordId:heard, date, ts:1, mode:'listen', result:'good', cold:true, attempt:1 });
+            p = ensureDailyPlan(s, { date, books:['B'] });
+            assert.ok(!p.newIds.includes(heard) && !p.reviewIds.includes(heard));
+            assert.equal(s.events.some(e => e.wordId === heard), true);
+            p = ensureDailyPlan(s, { date, books:['A'] });
+            assert.ok(!p.newIds.includes(heard) && !p.reviewIds.includes(heard), 'already-passed words do not consume another Today slot when reselecting the book');
+          });"""
+          new_v15 = """test('switching books preserves completed Today progress and redraws only untouched slots', () => {
+            const s = stateWithWords();
+            const date = '2026-08-14';
+            let p = ensureDailyPlan(s, { date, books:['A'] });
+            const heard = p.newIds[0];
+            s.events.push({ id:'ev1', wordId:heard, date, ts:1, mode:'listen', result:'good', cold:true, attempt:1 });
+            p = ensureDailyPlan(s, { date, books:['B'] });
+            assert.ok(p.newIds.includes(heard), 'completed word remains in Today denominator/history');
+            assert.equal(p.newIds.length, 3);
+            assert.ok(p.newIds.filter(id => id !== heard).every(id => ['e','f','g','h'].includes(id)), 'only untouched slots redraw from B');
+            p = ensureDailyPlan(s, { date, books:['A'] });
+            assert.ok(p.newIds.includes(heard), 'reselecting the original book cannot erase completed progress');
+          });"""
+          assert old_v15 in t, 'v15 scope test changed unexpectedly'
+          t = t.replace(old_v15, new_v15, 1)
+          v15.write_text(t)
+
+          v18 = Path('tests/v18.test.js')
+          t = v18.read_text()
+          old_exclusive = """test('deselected exclusive-book pending word cannot leak into the new scope', () => {
+            const s = base();
+            let p = ensureDailyPlan(s, { date:'2026-08-14', books:['示例词库'], newTarget:2, reviewTarget:0 });
+            p.newIds = ['sampleOnly','shared'];
+            hear(s, 'sampleOnly', 'bad');
+            hear(s, 'shared', 'bad');
+            p = ensureDailyPlan(s, { date:'2026-08-14', books:['爱听写'], newTarget:2, reviewTarget:2 });
+            assert.ok(!p.newIds.includes('sampleOnly'));
+            assert.ok(!p.reviewIds.includes('sampleOnly'));
+            assert.equal(s.events.some(e => e.wordId === 'sampleOnly'), true, 'history is preserved');
+          });"""
+          new_exclusive = """test('deselected exclusive-book touched word remains in Today after switching scope', () => {
+            const s = base();
+            let p = ensureDailyPlan(s, { date:'2026-08-14', books:['示例词库'], newTarget:2, reviewTarget:0 });
+            p.newIds = ['sampleOnly','shared'];
+            hear(s, 'sampleOnly', 'bad');
+            p = ensureDailyPlan(s, { date:'2026-08-14', books:['爱听写'], newTarget:2, reviewTarget:2 });
+            assert.ok(p.newIds.includes('sampleOnly'));
+            assert.ok(!p.reviewIds.includes('sampleOnly'));
+            assert.equal(s.events.some(e => e.wordId === 'sampleOnly'), true, 'history is preserved');
+          });"""
+          assert old_exclusive in t, 'v18 exclusive scope test changed unexpectedly'
+          t = t.replace(old_exclusive, new_exclusive, 1)
+
+          old_passed = """test('same-day shared word already passed 3/3 does not re-enter after switching books or consume a slot', () => {
+            const s = base();
+            let p = ensureDailyPlan(s, { date:'2026-08-14', books:['示例词库'], newTarget:2, reviewTarget:0 });
+            p.newIds = ['shared','sampleOnly'];
+            passAfterMiss(s,'shared');
+            p = ensureDailyPlan(s, { date:'2026-08-14', books:['爱听写'], newTarget:2, reviewTarget:0 });
+            assert.ok(!p.newIds.includes('shared'));
+            assert.ok(!p.reviewIds.includes('shared'));
+            assert.equal(p.newIds.length,2);
+            assert.ok(p.newIds.every(id=>['loveOnly','loveOnly2'].includes(id)));
+          });"""
+          new_passed = """test('same-day shared word already passed 3/3 remains in the fixed Today denominator after switching books', () => {
+            const s = base();
+            let p = ensureDailyPlan(s, { date:'2026-08-14', books:['示例词库'], newTarget:2, reviewTarget:0 });
+            p.newIds = ['shared','sampleOnly'];
+            passAfterMiss(s,'shared');
+            p = ensureDailyPlan(s, { date:'2026-08-14', books:['爱听写'], newTarget:2, reviewTarget:0 });
+            assert.ok(p.newIds.includes('shared'));
+            assert.ok(!p.reviewIds.includes('shared'));
+            assert.equal(p.newIds.length,2);
+            assert.equal(p.newIds.filter(id=>['loveOnly','loveOnly2'].includes(id)).length,1, 'only one untouched slot is redrawn from the current book');
+          });"""
+          assert old_passed in t, 'v18 passed-shared scope test changed unexpectedly'
+          t = t.replace(old_passed, new_passed, 1)
+          v18.write_text(t)
+
+          Path('tests/today-scope-recovery-v42.test.js').write_text("""import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { defaultState } from '../src/storage.js';
+          import { ensureDailyPlan, planStatus } from '../src/queue.js';
+
+          function w(id, source) { return { id, en:id, zh:'', sources:[source], retired:false, card:null }; }
+
+          test('a plan stripped by an old scope switch repairs itself from same-day formal listening events', () => {
+            const s=defaultState();
+            s.settings.defaultNewTarget=3; s.settings.defaultReviewTarget=0;
+            s.words=[w('a1','A'),w('a2','A'),w('b1','B'),w('b2','B'),w('b3','B')];
+            const date='2026-08-24';
+            s.dailyPlans[date]={date,mode:'mixed',books:['B'],newTarget:3,reviewTarget:0,newIds:['b1','b2','b3'],reviewIds:[],bookSegments:[],resumeWordId:null,drawNonce:1,createdAt:1,updatedAt:1};
+            s.events=[
+              {id:'ea1',wordId:'a1',date,ts:1,mode:'listen',result:'good',cold:true,attempt:1},
+              {id:'ea2',wordId:'a2',date,ts:2,mode:'listen',result:'bad',cold:true,attempt:1},
+            ];
+            const p=ensureDailyPlan(s,{date,books:['B']});
+            assert.ok(p.newIds.includes('a1'));
+            assert.ok(p.newIds.includes('a2'));
+            assert.equal(p.newIds.length,3);
+            const status=planStatus(s,p).new;
+            assert.equal(status.done,1);
+            assert.equal(status.retry,1);
+            assert.equal(status.pending,1);
+          });
+
+          test('Today overall listening data is not filtered by the currently selected books', () => {
+            const app=fs.readFileSync(new URL('../src/app.js',import.meta.url),'utf8');
+            assert.ok(app.includes('const td = todayListeningStats(state, [], date);'));
+            assert.ok(app.includes('切换词书或降低目标只会替换/裁掉完全没碰过的候选词'));
+          });
+          """)
+          PY
+      - name: Validate
+        run: |
+          node --check src/queue.js
+          node --check src/app.js
+          node --test tests/v15.test.js tests/v18.test.js tests/today-scope-recovery-v42.test.js
+          npm test
+          npm run build
+          git restore app.bundle.js index.html
+      - name: Commit source changes
+        run: |
+          git config user.name "listenwrite-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/queue.js src/app.js tests/v15.test.js tests/v18.test.js tests/today-scope-recovery-v42.test.js
+          git commit -m "Preserve Today progress across wordbook switches"
+          git push origin HEAD:fix-preserve-today-scope-history
