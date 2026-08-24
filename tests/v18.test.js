@@ -37,14 +37,13 @@ test('study identity depends on pre-day formal listening, not same-day cross-boo
   assert.equal(wordStudyKind(s,'loveOnly','2026-08-14'),'review');
 });
 
-test('deselected exclusive-book pending word cannot leak into the new scope', () => {
+test('deselected exclusive-book touched word remains in Today after switching scope', () => {
   const s = base();
   let p = ensureDailyPlan(s, { date:'2026-08-14', books:['示例词库'], newTarget:2, reviewTarget:0 });
   p.newIds = ['sampleOnly','shared'];
   hear(s, 'sampleOnly', 'bad');
-  hear(s, 'shared', 'bad');
   p = ensureDailyPlan(s, { date:'2026-08-14', books:['爱听写'], newTarget:2, reviewTarget:2 });
-  assert.ok(!p.newIds.includes('sampleOnly'));
+  assert.ok(p.newIds.includes('sampleOnly'));
   assert.ok(!p.reviewIds.includes('sampleOnly'));
   assert.equal(s.events.some(e => e.wordId === 'sampleOnly'), true, 'history is preserved');
 });
@@ -63,16 +62,16 @@ test('same-day shared pending word remains new and keeps its reinforcement state
   assert.equal(r.goodStreak,1);
 });
 
-test('same-day shared word already passed 3/3 does not re-enter after switching books or consume a slot', () => {
+test('same-day shared word already passed 3/3 remains in the fixed Today denominator after switching books', () => {
   const s = base();
   let p = ensureDailyPlan(s, { date:'2026-08-14', books:['示例词库'], newTarget:2, reviewTarget:0 });
   p.newIds = ['shared','sampleOnly'];
   passAfterMiss(s,'shared');
   p = ensureDailyPlan(s, { date:'2026-08-14', books:['爱听写'], newTarget:2, reviewTarget:0 });
-  assert.ok(!p.newIds.includes('shared'));
+  assert.ok(p.newIds.includes('shared'));
   assert.ok(!p.reviewIds.includes('shared'));
   assert.equal(p.newIds.length,2);
-  assert.ok(p.newIds.every(id=>['loveOnly','loveOnly2'].includes(id)));
+  assert.equal(p.newIds.filter(id=>['loveOnly','loveOnly2'].includes(id)).length,1, 'only one untouched slot is redrawn from the current book');
 });
 
 test('shared word heard before today enters the newly selected book as review', () => {
