@@ -12,5 +12,11 @@ test('next type word is queued for speech before rerender',()=>{
   const start=app.indexOf('function nextType(){');
   const end=app.indexOf('function finishType(){',start);
   const body=app.slice(start,end);
-  assert.ok(body.indexOf('speak(nextWord.en)') < body.indexOf('renderTypeRun()'));
+  assert.ok(body.indexOf('speakTypeWord(nextWord.en)') < body.indexOf('renderTypeRun()'));
+});
+
+test('type-study word audio uses a brisk dedicated rate',()=>{
+  const app=fs.readFileSync(new URL('../src/app.js',import.meta.url),'utf8');
+  assert.ok(app.includes('function speakTypeWord(text) { speak(text, 1.12); }'));
+  assert.ok(app.includes("document.getElementById('typeReplay').onclick=()=>speakTypeWord(w.en);"));
 });
