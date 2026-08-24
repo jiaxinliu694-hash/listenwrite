@@ -1,0 +1,82 @@
+name: Apply low-latency type audio
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'v41-low-latency-type-audio'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v41-low-latency-type-audio
+      - name: Apply patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/app.js'); s=p.read_text()
+          old="function speakTypeWord(text) { speak(text, 1.12); }"
+          new="""let typeSpeechVoice = null;
+          let typeSpeechPrimed = false;
+          function resolveTypeSpeechVoice() {
+            if (!window.speechSynthesis?.getVoices) return null;
+            const voices = speechSynthesis.getVoices() || [];
+            typeSpeechVoice = voices.find(v => v.localService && /^en-US$/i.test(v.lang))
+              || voices.find(v => v.localService && /^en(?:-|$)/i.test(v.lang))
+              || voices.find(v => /^en-US$/i.test(v.lang))
+              || voices.find(v => /^en(?:-|$)/i.test(v.lang))
+              || null;
+            return typeSpeechVoice;
+          }
+          function primeTypeSpeech() {
+            if (!window.speechSynthesis || typeSpeechPrimed) return;
+            resolveTypeSpeechVoice(); typeSpeechPrimed = true;
+            try {
+              const u = new SpeechSynthesisUtterance('.');
+              u.lang = 'en-US'; u.rate = 1.12; u.volume = 0;
+              if (typeSpeechVoice) u.voice = typeSpeechVoice;
+              speechSynthesis.speak(u);
+            } catch {}
+          }
+          function speakTypeWord(text) {
+            if (!window.speechSynthesis) return toast('当前浏览器不支持朗读');
+            const synth = speechSynthesis;
+            const voice = typeSpeechVoice || resolveTypeSpeechVoice();
+            if (synth.speaking || synth.pending) synth.cancel();
+            const u = new SpeechSynthesisUtterance(text);
+            u.lang = 'en-US'; u.rate = 1.12;
+            if (voice) u.voice = voice;
+            synth.resume?.();
+            synth.speak(u);
+          }"""
+          if old in s: s=s.replace(old,new,1)
+          oldgo="function go(next) { speechSynthesis?.cancel(); view = next; listen = null; typeRun = null; sentenceRun = null; wholeSentenceRun = null; wholeQueue = []; freeListen = null; textReaderId = null; if(next!=='text'){textLibraryCollection=null;textLibraryDetailId=null;textToolsOpen=false;} dataChartUI?.resetToHome?.(); render(); }"
+          newgo="function go(next) { speechSynthesis?.cancel(); if(next==='type')primeTypeSpeech(); view = next; listen = null; typeRun = null; sentenceRun = null; wholeSentenceRun = null; wholeQueue = []; freeListen = null; textReaderId = null; if(next!=='text'){textLibraryCollection=null;textLibraryDetailId=null;textToolsOpen=false;} dataChartUI?.resetToHome?.(); render(); }"
+          if oldgo in s: s=s.replace(oldgo,newgo,1)
+          oldinit="(async function init(){state=await loadState();const priorDataChartVersion=state.dataChart?.contentVersionSeen;"
+          newinit="(async function init(){state=await loadState();resolveTypeSpeechVoice();speechSynthesis?.addEventListener?.('voiceschanged',resolveTypeSpeechVoice);const priorDataChartVersion=state.dataChart?.contentVersionSeen;"
+          if oldinit in s: s=s.replace(oldinit,newinit,1)
+          assert 'function primeTypeSpeech()' in s and "if(next==='type')primeTypeSpeech();" in s
+          p.write_text(s)
+          t=Path('tests/type-enter-audio-v40.test.js'); tests=t.read_text()
+          if "type speech prefers a local English voice" not in tests:
+            tests=tests.replace("assert.ok(app.includes('function speakTypeWord(text) { speak(text, 1.12); }'));", "assert.ok(app.includes('function speakTypeWord(text) {'));\n  assert.ok(app.includes(\"if (synth.speaking || synth.pending) synth.cancel();\"));")
+            tests += """\n\ntest('type speech prefers a local English voice and primes on entering type mode',()=>{\n  const app=fs.readFileSync(new URL('../src/app.js',import.meta.url),'utf8');\n  assert.ok(app.includes(\"v.localService && /^en-US$/i.test(v.lang)\"));\n  assert.ok(app.includes(\"if(next==='type')primeTypeSpeech();\"));\n});\n"""
+            t.write_text(tests)
+          PY
+          node --check src/app.js
+          node --test tests/type-enter-audio-v40.test.js
+      - name: Commit patch
+        run: |
+          if [ -z "$(git status --porcelain -- src/app.js tests/type-enter-audio-v40.test.js)" ]; then exit 0; fi
+          git config user.name "listenwrite-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/app.js tests/type-enter-audio-v40.test.js
+          git commit -m "Reduce hand-typing speech startup latency"
+          git push origin HEAD:v41-low-latency-type-audio
