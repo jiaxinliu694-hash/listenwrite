@@ -1,0 +1,16 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+test('Enter advances type study without browser default action',()=>{
+  const app=fs.readFileSync(new URL('../src/app.js',import.meta.url),'utf8');
+  assert.ok(app.includes("e.key==='Enter'&&typeRun.result){e.preventDefault();nextType();}"));
+});
+
+test('next type word is queued for speech before rerender',()=>{
+  const app=fs.readFileSync(new URL('../src/app.js',import.meta.url),'utf8');
+  const start=app.indexOf('function nextType(){');
+  const end=app.indexOf('function finishType(){',start);
+  const body=app.slice(start,end);
+  assert.ok(body.indexOf('speak(nextWord.en)') < body.indexOf('renderTypeRun()'));
+});
