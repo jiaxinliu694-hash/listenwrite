@@ -5587,8 +5587,39 @@ function speak(text, rateOverride = null) {
   u.rate = rateOverride == null ? Number(state.settings.speechRate) || 0.92 : Math.min(1.5, Math.max(0.5, Number(rateOverride) || 0.75));
   speechSynthesis.speak(u);
 }
+var typeSpeechVoice = null;
+var typeSpeechPrimed = false;
+function resolveTypeSpeechVoice() {
+  if (!window.speechSynthesis?.getVoices) return null;
+  const voices = speechSynthesis.getVoices() || [];
+  typeSpeechVoice = voices.find((v) => v.localService && /^en-US$/i.test(v.lang)) || voices.find((v) => v.localService && /^en(?:-|$)/i.test(v.lang)) || voices.find((v) => /^en-US$/i.test(v.lang)) || voices.find((v) => /^en(?:-|$)/i.test(v.lang)) || null;
+  return typeSpeechVoice;
+}
+function primeTypeSpeech() {
+  if (!window.speechSynthesis || typeSpeechPrimed) return;
+  resolveTypeSpeechVoice();
+  typeSpeechPrimed = true;
+  try {
+    const u = new SpeechSynthesisUtterance(".");
+    u.lang = "en-US";
+    u.rate = 1.12;
+    u.volume = 0;
+    if (typeSpeechVoice) u.voice = typeSpeechVoice;
+    speechSynthesis.speak(u);
+  } catch {
+  }
+}
 function speakTypeWord(text) {
-  speak(text, 1.12);
+  if (!window.speechSynthesis) return toast("\u5F53\u524D\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u6717\u8BFB");
+  const synth = speechSynthesis;
+  const voice = typeSpeechVoice || resolveTypeSpeechVoice();
+  if (synth.speaking || synth.pending) synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "en-US";
+  u.rate = 1.12;
+  if (voice) u.voice = voice;
+  synth.resume?.();
+  synth.speak(u);
 }
 function startActivity(mode, label, books = []) {
   const id3 = startStudyActivity(state, mode, label, books);
@@ -5659,6 +5690,7 @@ function shell(content) {
 }
 function go(next) {
   speechSynthesis?.cancel();
+  if (next === "type") primeTypeSpeech();
   view = next;
   listen = null;
   typeRun = null;
@@ -7646,6 +7678,8 @@ document.addEventListener("visibilitychange", () => {
 });
 (async function init() {
   state = await loadState();
+  resolveTypeSpeechVoice();
+  speechSynthesis?.addEventListener?.("voiceschanged", resolveTypeSpeechVoice);
   const priorDataChartVersion = state.dataChart?.contentVersionSeen;
   reconcileDataChartContent(state.dataChart, DATA_CHART_SEED);
   if (priorDataChartVersion !== state.dataChart.contentVersionSeen) persist();
