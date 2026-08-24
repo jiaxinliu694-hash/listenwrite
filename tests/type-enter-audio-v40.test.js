@@ -17,6 +17,14 @@ test('next type word is queued for speech before rerender',()=>{
 
 test('type-study word audio uses a brisk dedicated rate',()=>{
   const app=fs.readFileSync(new URL('../src/app.js',import.meta.url),'utf8');
-  assert.ok(app.includes('function speakTypeWord(text) { speak(text, 1.12); }'));
+  assert.ok(app.includes('function speakTypeWord(text) {'));
+  assert.ok(app.includes("if (synth.speaking || synth.pending) synth.cancel();"));
   assert.ok(app.includes("document.getElementById('typeReplay').onclick=()=>speakTypeWord(w.en);"));
+});
+
+
+test('type speech prefers a local English voice and primes on entering type mode',()=>{
+  const app=fs.readFileSync(new URL('../src/app.js',import.meta.url),'utf8');
+  assert.ok(app.includes("v.localService && /^en-US$/i.test(v.lang)"));
+  assert.ok(app.includes("if(next==='type')primeTypeSpeech();"));
 });

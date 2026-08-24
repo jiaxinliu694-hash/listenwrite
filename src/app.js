@@ -89,7 +89,39 @@ function speak(text, rateOverride=null) {
   speechSynthesis.speak(u);
 }
 
-function speakTypeWord(text) { speak(text, 1.12); }
+let typeSpeechVoice = null;
+let typeSpeechPrimed = false;
+function resolveTypeSpeechVoice() {
+  if (!window.speechSynthesis?.getVoices) return null;
+  const voices = speechSynthesis.getVoices() || [];
+  typeSpeechVoice = voices.find(v => v.localService && /^en-US$/i.test(v.lang))
+    || voices.find(v => v.localService && /^en(?:-|$)/i.test(v.lang))
+    || voices.find(v => /^en-US$/i.test(v.lang))
+    || voices.find(v => /^en(?:-|$)/i.test(v.lang))
+    || null;
+  return typeSpeechVoice;
+}
+function primeTypeSpeech() {
+  if (!window.speechSynthesis || typeSpeechPrimed) return;
+  resolveTypeSpeechVoice(); typeSpeechPrimed = true;
+  try {
+    const u = new SpeechSynthesisUtterance('.');
+    u.lang = 'en-US'; u.rate = 1.12; u.volume = 0;
+    if (typeSpeechVoice) u.voice = typeSpeechVoice;
+    speechSynthesis.speak(u);
+  } catch {}
+}
+function speakTypeWord(text) {
+  if (!window.speechSynthesis) return toast('当前浏览器不支持朗读');
+  const synth = speechSynthesis;
+  const voice = typeSpeechVoice || resolveTypeSpeechVoice();
+  if (synth.speaking || synth.pending) synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'en-US'; u.rate = 1.12;
+  if (voice) u.voice = voice;
+  synth.resume?.();
+  synth.speak(u);
+}
 
 function startActivity(mode, label, books = []) {
   const id=startStudyActivity(state,mode,label,books);setStudyActivityDate(state,id,currentDayKey());persist();return id;
@@ -125,7 +157,7 @@ function shell(content) {
   document.getElementById('restoreTop').onclick = requestRestore;
   document.getElementById('backupTop').onclick = backup;
 }
-function go(next) { speechSynthesis?.cancel(); view = next; listen = null; typeRun = null; sentenceRun = null; wholeSentenceRun = null; wholeQueue = []; freeListen = null; textReaderId = null; if(next!=='text'){textLibraryCollection=null;textLibraryDetailId=null;textToolsOpen=false;} dataChartUI?.resetToHome?.(); render(); }
+function go(next) { speechSynthesis?.cancel(); if(next==='type')primeTypeSpeech(); view = next; listen = null; typeRun = null; sentenceRun = null; wholeSentenceRun = null; wholeQueue = []; freeListen = null; textReaderId = null; if(next!=='text'){textLibraryCollection=null;textLibraryDetailId=null;textToolsOpen=false;} dataChartUI?.resetToHome?.(); render(); }
 
 function bookChips(selected, scope) {
   const books = allBooks(state);
@@ -583,4 +615,4 @@ window.addEventListener('keydown',(e)=>{if(listen){if(e.key==='1')judgeListen('g
 
 document.addEventListener('visibilitychange',()=>{const activityId=activeStudyActivityId();if(document.hidden){if(activityId)pauseStudyActivity(state,activityId);const wholeInput=document.getElementById('wholeSentenceAnswer');if(wholeSentenceRun&&wholeInput)wholeSentenceRun.input=wholeInput.value;const splitInput=document.getElementById('sentenceAnswer');if(sentenceRun&&splitInput)sentenceRun.input=splitInput.value;persist();}else if(activityId){resumeStudyActivity(state,activityId);persist();mountStudyTimer(activityId);}});
 
-(async function init(){state=await loadState();const priorDataChartVersion=state.dataChart?.contentVersionSeen;reconcileDataChartContent(state.dataChart,DATA_CHART_SEED);if(priorDataChartVersion!==state.dataChart.contentVersionSeen)persist();statDay=currentDayKey();statMonth=calendarDate(statDay);const restored=restoreSentenceSession();if(restored==='whole')renderWholeSentenceRun();else if(restored==='split'){if(sentenceRun.completed)finishSentenceRun();else renderSentenceRun();}else render();})();
+(async function init(){state=await loadState();resolveTypeSpeechVoice();speechSynthesis?.addEventListener?.('voiceschanged',resolveTypeSpeechVoice);const priorDataChartVersion=state.dataChart?.contentVersionSeen;reconcileDataChartContent(state.dataChart,DATA_CHART_SEED);if(priorDataChartVersion!==state.dataChart.contentVersionSeen)persist();statDay=currentDayKey();statMonth=calendarDate(statDay);const restored=restoreSentenceSession();if(restored==='whole')renderWholeSentenceRun();else if(restored==='split'){if(sentenceRun.completed)finishSentenceRun();else renderSentenceRun();}else render();})();
