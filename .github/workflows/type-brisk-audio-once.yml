@@ -1,0 +1,54 @@
+name: One-time brisk type audio patch
+
+on:
+  push:
+    branches: [v40-enter-immediate-audio]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v40-enter-immediate-audio
+      - name: Make type-study word audio brisk
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/app.js')
+          s=p.read_text()
+          anchor="function startActivity(mode, label, books = []) {"
+          helper="function speakTypeWord(text) { speak(text, 1.12); }\n\n"
+          assert helper not in s
+          assert anchor in s
+          s=s.replace(anchor,helper+anchor,1)
+          replacements={
+            "renderTypeRun(); speak(wordById(id).en); }":"renderTypeRun(); speakTypeWord(wordById(id).en); }",
+            "document.getElementById('typeSpeak').onclick=()=>speak(w.en);document.getElementById('typeBufferNext').onclick=()=>{finishCurrent(typeRun.session,'buffer');if(!pickNext(typeRun.session))finishType();else{renderTypeRun();speak(wordById(typeRun.session.current.wordId).en);}};":"document.getElementById('typeSpeak').onclick=()=>speakTypeWord(w.en);document.getElementById('typeBufferNext').onclick=()=>{finishCurrent(typeRun.session,'buffer');if(!pickNext(typeRun.session))finishType();else{const nextWord=wordById(typeRun.session.current.wordId);if(nextWord)speakTypeWord(nextWord.en);renderTypeRun();}};",
+            "document.getElementById('typeSpeak').onclick = () => { speak(w.en); touchActivity(typeRun.activityId); };":"document.getElementById('typeSpeak').onclick = () => { speakTypeWord(w.en); touchActivity(typeRun.activityId); };",
+            "document.getElementById('typeReplay').onclick=()=>speak(w.en);":"document.getElementById('typeReplay').onclick=()=>speakTypeWord(w.en);",
+            "if(nextWord)speak(nextWord.en);renderTypeRun();":"if(nextWord)speakTypeWord(nextWord.en);renderTypeRun();",
+          }
+          for old,new in replacements.items():
+            assert old in s, old
+            s=s.replace(old,new,1)
+          p.write_text(s)
+          t=Path('tests/type-enter-audio-v40.test.js')
+          tests=t.read_text()
+          tests=tests.replace("assert.ok(body.indexOf('speak(nextWord.en)') < body.indexOf('renderTypeRun()'));","assert.ok(body.indexOf('speakTypeWord(nextWord.en)') < body.indexOf('renderTypeRun()'));\n});\n\ntest('type-study word audio uses a brisk dedicated rate',()=>{\n  const app=fs.readFileSync(new URL('../src/app.js',import.meta.url),'utf8');\n  assert.ok(app.includes('function speakTypeWord(text) { speak(text, 1.12); }'));\n  assert.ok(app.includes(\"document.getElementById('typeReplay').onclick=()=>speakTypeWord(w.en);\"));")
+          t.write_text(tests)
+          PY
+          node --check src/app.js
+          node --check tests/type-enter-audio-v40.test.js
+          node --test tests/type-enter-audio-v40.test.js
+      - name: Commit source changes
+        run: |
+          git config user.name "listenwrite-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/app.js tests/type-enter-audio-v40.test.js
+          git commit -m "Make type-study word audio brisk"
+          git push origin HEAD:v40-enter-immediate-audio
