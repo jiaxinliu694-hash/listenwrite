@@ -5587,6 +5587,9 @@ function speak(text, rateOverride = null) {
   u.rate = rateOverride == null ? Number(state.settings.speechRate) || 0.92 : Math.min(1.5, Math.max(0.5, Number(rateOverride) || 0.75));
   speechSynthesis.speak(u);
 }
+function speakTypeWord(text) {
+  speak(text, 1.12);
+}
 function startActivity(mode, label, books = []) {
   const id3 = startStudyActivity(state, mode, label, books);
   setStudyActivityDate(state, id3, currentDayKey());
@@ -6069,7 +6072,7 @@ function startType(ids, label) {
   if (!id3) return toast("\u8FD9\u4E9B\u8BCD\u4ECA\u5929\u5DF2\u7ECF\u624B\u6253\u719F\u6089\u4E86");
   typeRun = { ids, label, session: session2, answer: false, input: "", currentEventId: null, result: null, skipped: 0, activityId: startActivity("type", label, state.settings.typeBooks || []) };
   renderTypeRun();
-  speak(wordById(id3).en);
+  speakTypeWord(wordById(id3).en);
 }
 function typeProgress() {
   const states = typeRun.ids.map((id3) => reinforcementState(eventsOnDay(state, id3, currentDayKey(), "type")));
@@ -6091,13 +6094,14 @@ function renderTypeRun() {
       view = "type";
       renderType();
     };
-    document.getElementById("typeSpeak").onclick = () => speak(w.en);
+    document.getElementById("typeSpeak").onclick = () => speakTypeWord(w.en);
     document.getElementById("typeBufferNext").onclick = () => {
       finishCurrent(typeRun.session, "buffer");
       if (!pickNext(typeRun.session)) finishType();
       else {
+        const nextWord = wordById(typeRun.session.current.wordId);
+        if (nextWord) speakTypeWord(nextWord.en);
         renderTypeRun();
-        speak(wordById(typeRun.session.current.wordId).en);
       }
     };
     mountStudyTimer(typeRun.activityId);
@@ -6112,7 +6116,7 @@ function renderTypeRun() {
     renderType();
   };
   document.getElementById("typeSpeak").onclick = () => {
-    speak(w.en);
+    speakTypeWord(w.en);
     touchActivity(typeRun.activityId);
   };
   if (!typeRun.answer) {
@@ -6136,7 +6140,7 @@ function renderTypeRun() {
   } else {
     document.getElementById("typeGood").onclick = () => judgeType("good");
     document.getElementById("typeBad").onclick = () => judgeType("bad");
-    document.getElementById("typeReplay").onclick = () => speak(w.en);
+    document.getElementById("typeReplay").onclick = () => speakTypeWord(w.en);
     document.getElementById("typeNext").onclick = nextType;
   }
 }
@@ -6162,8 +6166,9 @@ function nextType() {
   touchActivity(typeRun.activityId);
   if (!pickNext(typeRun.session)) finishType();
   else {
+    const nextWord = wordById(typeRun.session.current.wordId);
+    if (nextWord) speakTypeWord(nextWord.en);
     renderTypeRun();
-    speak(wordById(typeRun.session.current.wordId).en);
   }
 }
 function finishType() {
@@ -7616,7 +7621,10 @@ window.addEventListener("keydown", (e) => {
   } else if (typeRun && typeRun.answer) {
     if (e.key === "1") judgeType("good");
     else if (e.key === "2") judgeType("bad");
-    else if (e.key === "Enter" && typeRun.result) nextType();
+    else if (e.key === "Enter" && typeRun.result) {
+      e.preventDefault();
+      nextType();
+    }
   } else if (view === "datachart") {
     getDataChartUI().handleKeydown(e);
   }
