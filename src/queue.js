@@ -96,14 +96,22 @@ function restoreUntouchedNewRandomOrder(state, ids, date, books = [], nonce = 0)
   return [...attempted, ...untouched];
 }
 
+function listenedIdsOnDay(state, date) {
+  return [...new Set((state.events || [])
+    .filter((e) => e.date === date && e.mode === 'listen')
+    .map((e) => e.wordId))];
+}
+
 function seedTodayFromListenHistory(state, plan) {
   if (plan.mode === 'sequential') return;
   const seen = new Set([...plan.newIds, ...plan.reviewIds]);
-  const listenedIds = [...new Set(state.events.filter((e) => e.date === plan.date && e.mode === 'listen').map((e) => e.wordId))];
-  for (const id of listenedIds) {
-    if (seen.has(id) || wordPassedOnDay(state, id, plan.date)) continue;
+  // Formal listening events are durable day history. The selected books only
+  // choose untouched replacement candidates; they must never hide or discard
+  // words already studied earlier in this study day.
+  for (const id of listenedIdsOnDay(state, plan.date)) {
+    if (seen.has(id)) continue;
     const word = state.words.find((w) => w.id === id);
-    if (!word || !matchesBooks(word, plan.books)) continue;
+    if (!word) continue;
     if (wordStudyKind(state, word, plan.date) === 'review') plan.reviewIds.push(id);
     else plan.newIds.push(id);
     seen.add(id);
@@ -124,16 +132,11 @@ function normalizeMixedPlanIdentity(state, plan) {
 
 function reconcileScope(state, plan, books) {
   if (sameBooks(plan.books, books)) return;
-  // Scope controls visibility. Today's events are preserved, but only unfinished
-  // touched words that also belong to the new scope carry into the new queue.
-  const carry = [...new Set([...(plan.newIds || []), ...(plan.reviewIds || [])])].filter((id) => {
-    const word = state.words.find((w) => w.id === id);
-    return Boolean(word)
-      && !word.retired
-      && listenedToday(state, id, plan.date)
-      && !wordPassedOnDay(state, id, plan.date)
-      && matchesBooks(word, books);
-  });
+  // Switching wordbooks redraws only untouched candidates. Every formal word
+  // already heard today remains in the day's fixed denominator and progress,
+  // even when it belongs only to a previously selected book or already passed.
+  const carry = listenedIdsOnDay(state, plan.date)
+    .filter((id) => state.words.some((w) => w.id === id));
   plan.newIds = [];
   plan.reviewIds = [];
   for (const id of carry) {
@@ -141,7 +144,9 @@ function reconcileScope(state, plan, books) {
     if (wordStudyKind(state, word, plan.date) === 'review') plan.reviewIds.push(id);
     else plan.newIds.push(id);
   }
-  plan.resumeWordId = carry.includes(plan.resumeWordId) ? plan.resumeWordId : null;
+  plan.resumeWordId = carry.includes(plan.resumeWordId) && !wordPassedOnDay(state, plan.resumeWordId, plan.date)
+    ? plan.resumeWordId
+    : null;
   plan.books = [...books];
   plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
 }
