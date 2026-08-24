@@ -37,8 +37,8 @@ test('fixed new/review denominators never grow with retries', () => {
   const session = createRetrySession(S, plan);
   assert.equal(session.fixedIds.length, 3);
   const firstId = pickNext(session);
-  assert.equal(firstId, 'r');
-  recordAttempt(S, review, 'listen', 'bad');
+  assert.ok(session.fixedIds.includes(firstId), 'mixed study may start with any stable planned card');
+  recordAttempt(S, S.words.find((w) => w.id === firstId), 'listen', 'bad');
   finishCurrent(session, 'bad');
   assert.equal(session.fixedIds.length, 3);
   assert.equal(plan.newIds.length, 2);
