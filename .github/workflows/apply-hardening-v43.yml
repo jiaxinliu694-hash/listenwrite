@@ -102,7 +102,13 @@ jobs:
           """
           if s.count(old) != 1:
               raise SystemExit('updater match block changed')
-          p.write_text(s.replace(old, new, 1))
+          s = s.replace(old, new, 1)
+          legacy_guard_old = "const heardOnPlanDay = (id) => events.some((event) =>"
+          legacy_guard_new = "const heardOnPlanDay = (id) => Boolean(plan.date) && events.some((event) =>"
+          if s.count(legacy_guard_old) != 1:
+              raise SystemExit('wordbook carry guard anchor changed')
+          s = s.replace(legacy_guard_old, legacy_guard_new, 1)
+          p.write_text(s)
           PY
           node --check /tmp/apply-hardening-v43.mjs
       - name: Preflight source baseline
