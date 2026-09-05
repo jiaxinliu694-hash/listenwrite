@@ -44,7 +44,7 @@ let dataChartUI = null;
 let statRange = 30;
 let statDay = currentDayKey();
 let statMonth = calendarDate(statDay);
-let saveChain = Promise.resolve();
+// State writes are serialized by storage.js.
 let saveFailureShown = false;
 let todayPlanPanelOpen = false;
 let typeFilterPanelOpen = false;
@@ -67,14 +67,12 @@ function scheduleSentenceDraftPersist(){syncActiveSentenceSession();mirrorSenten
 function restoreSentenceSession(){let saved=state?.sentenceSession||null;try{const local=JSON.parse(localStorage.getItem(SENTENCE_DRAFT_KEY)||'null');if(local&&Number(local.updatedAt||0)>Number(saved?.updatedAt||0))saved=local;}catch{}if(saved?.mode==='whole'&&saved.run?.bookId&&saved.run?.entryId&&getSentenceEntry(state,saved.run.bookId,saved.run.entryId).entry){wholeSentenceRun={...saved.run,input:String(saved.run.input||'')};wholeQueue=(saved.queue||[]).filter(item=>getSentenceEntry(state,item.bookId,item.entryId).entry).map(item=>({...item}));sentenceRun=null;view='text';syncActiveSentenceSession();mirrorSentenceDraft();return'whole';}if(saved?.mode==='split'&&Array.isArray(saved.run?.items)){const items=saved.run.items.filter(item=>getSentenceEntry(state,item.bookId,item.entryId).entry?.tokens?.[item.tokenIndex]);if(items.length){const completed=Boolean(saved.run.completed),cursor=completed?Math.max(items.length,Number(saved.run.cursor)||items.length):Math.min(items.length-1,Math.max(0,Number(saved.run.cursor)||0));sentenceRun={...saved.run,items,cursor,input:String(saved.run.input||''),completed};wholeSentenceRun=null;wholeQueue=[];view='text';syncActiveSentenceSession();mirrorSentenceDraft();return'split';}}state.sentenceSession=null;mirrorSentenceDraft();return null;}
 function persist() {
   syncActiveSentenceSession(); mirrorSentenceDraft();
-  saveChain = saveChain
-    .then(() => saveState(state))
+  return saveState(state)
     .then(() => { saveFailureShown = false; })
     .catch((error) => {
       console.error('Listenwrite save failed', error);
       if (!saveFailureShown) { saveFailureShown = true; toast('保存失败，请先导出备份后再继续'); }
     });
-  return saveChain;
 }
 function wordById(id) { return state.words.find((w) => w.id === id); }
 function pct(a, b) { return b ? `${Math.round(a * 100 / b)}%` : '—'; }
@@ -175,7 +173,7 @@ function bindBookChips(scope, rerender) {
 function dueCount() { return state.words.filter((w) => !w.retired && (w.card?.reps || 0) && Number(w.card.due) <= Date.now()).length; }
 
 function planWordKind(plan,id){return wordStudyKind(state,id,plan?.date||currentDayKey())==='review'?'复习':'新词';}
-function planWordBook(plan,id){if(plan?.mode!=='sequential')return'';const seg=(plan.bookSegments||[]).find(x=>(x.newIds||[]).includes(id)||(x.reviewIds||[]).includes(id));return seg?.book||'';}
+function planWordBook(plan,id){if(plan?.mode!=='sequential')return'';if((plan.carryNewIds||[]).includes(id)||(plan.carryReviewIds||[]).includes(id))return'今日已开始';const seg=(plan.bookSegments||[]).find(x=>(x.newIds||[]).includes(id)||(x.reviewIds||[]).includes(id));return seg?.book||'';}
 function planWordMark(plan,id){const w=wordById(id);if(!w)return{label:'已移除',cls:'mark-pending'};if(w.retired||isSimpleLexeme(state,w.en))return{label:'简单',cls:'mark-simple'};const events=eventsOnDay(state,id,plan.date,'listen');const r=reinforcementState(events);if(!r.started)return{label:'未开始',cls:'mark-pending'};if(r.passed)return{label:'已熟悉',cls:'mark-good'};return{label:reinforcementLabel(events),cls:'mark-bad'};}
 function planChecklistHtml(plan,currentId=null){
   const group=(title,ids)=>{const rows=(ids||[]).map((id,index)=>{const w=wordById(id);if(!w)return'';const mark=planWordMark(plan,id),book=planWordBook(plan,id);return`<div class="study-word-row ${id===currentId?'current':''}"><span class="en">${index+1}. ${esc(w.en)}</span><span class="zh">${esc(w.zh||'—')}</span><span class="${mark.cls}">${mark.label}</span><span class="small">${book?esc(book):planWordKind(plan,id)}</span></div>`;}).join('');const done=(ids||[]).filter(id=>['已熟悉','简单'].includes(planWordMark(plan,id).label)).length;return`<div class="study-list-group"><div class="study-list-title"><b>${title}</b><span>${done} / ${(ids||[]).length}</span></div>${rows||'<div class="empty">这一类没有词。</div>'}</div>`;};
@@ -200,13 +198,14 @@ function renderHome() {
 function renderToday() {
   const date = currentDayKey();
   const books = state.settings.todayBooks || [];
+  const planBefore = JSON.stringify(state.dailyPlans[date] || null);
   let plan = ensureDailyPlan(state, planForTodayOptions(date, books));
   if (plan.mode === 'sequential') {
     const existing = new Map((plan.bookSegments || []).map(x => [x.book, x]));
     const chosen = books.map(book => ({ book, newTarget: existing.get(book)?.newTarget ?? 0, reviewTarget: existing.get(book)?.reviewTarget ?? 0 }));
     configureSequentialPlan(state, plan, chosen);
   }
-  persist();
+  if (JSON.stringify(plan) !== planBefore) persist();
   const prog = sessionProgress(state, plan, null);
   const td = todayListeningStats(state, [], date);
   const mins = activityMinutes('listen', date);
