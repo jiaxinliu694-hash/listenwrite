@@ -1,0 +1,48 @@
+name: Apply Listenwrite hardening v43
+
+on:
+  push:
+    branches: [fix/listenwrite-hardening-v43]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Reconstruct and verify updater
+        shell: bash
+        run: |
+          cat .hardening-v43/part-*.b64 | base64 --decode | gunzip > /tmp/apply-hardening-v43.mjs
+          actual="$(sha256sum /tmp/apply-hardening-v43.mjs | cut -d' ' -f1)"
+          expected="f4097cd9bf5799bec2677b17d23ab3fd6836e8fab779d1ed1d04fc970cf31794"
+          test "$actual" = "$expected"
+          node --check /tmp/apply-hardening-v43.mjs
+      - name: Preflight exact source baseline
+        run: node /tmp/apply-hardening-v43.mjs --check
+      - name: Apply, test, and build
+        run: node /tmp/apply-hardening-v43.mjs --verify
+      - name: Remove one-time staging files
+        shell: bash
+        run: |
+          rm -rf .hardening-v43 .listenwrite-hardening-backup-v43-*
+          rm -f .github/workflows/apply-hardening-v43.yml
+      - name: Commit verified changes
+        shell: bash
+        run: |
+          git config user.name "listenwrite-hardening-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Harden cloud sync, storage, daily plans, and CI"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
