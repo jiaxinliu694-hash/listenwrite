@@ -120,6 +120,12 @@ jobs:
         run: |
           rm -rf .hardening-v43 .listenwrite-hardening-backup-v43-*
           rm -f .github/workflows/apply-hardening-v43.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('src/cloudmerge.js', 'src/tokenizer.js', 'src/wordadmin.js'):
+              path = Path(name)
+              path.write_text(path.read_text().rstrip() + '\n')
+          PY
       - name: Commit verified changes
         shell: bash
         run: |
