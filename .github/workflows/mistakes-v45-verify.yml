@@ -1,0 +1,67 @@
+name: Verify daily and per-book mistake review v45
+on:
+  push:
+    branches: [feat/daily-book-mistakes-v45]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mistakes-v45
+  cancel-in-progress: false
+jobs:
+  implement:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Reconstruct checksummed source and checked integration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib, json
+          parts = sorted(Path('.maintenance').glob('mistakes-v45-*.b64'))
+          if len(parts) != 5:
+              raise SystemExit('Expected exactly five source segments')
+          raw = gzip.decompress(base64.b64decode(''.join(p.read_text().strip() for p in parts), validate=True))
+          expected = 'fcb9d1fc558d48a2d2ffd4b49bff43aff97be9effb931d207a49bb311ade1290'
+          if hashlib.sha256(raw).hexdigest() != expected:
+              raise SystemExit('Source checksum mismatch')
+          files = json.loads(raw)
+          allowed = {'src/mistakes.js', 'src/mistakes-ui.js', 'mistakes.css', 'tests/mistakes-v45.test.js', 'tests/mistakes-browser-v45.test.js', 'tests/mistakes-storage-v45.test.js', '.maintenance/apply-mistakes-v45.py'}
+          if set(files) != allowed or not all(isinstance(value, str) for value in files.values()):
+              raise SystemExit('Unexpected source payload')
+          for name, content in files.items():
+              path = Path(name)
+              if path.exists():
+                  raise SystemExit('Refusing to overwrite existing source: ' + name)
+          for name, content in files.items():
+              path = Path(name)
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(content, encoding='utf-8')
+          PY
+          python3 .maintenance/apply-mistakes-v45.py
+      - run: npm ci
+      - name: Validate new modules and all regression tests
+        run: |
+          node --check src/mistakes.js
+          node --check src/mistakes-ui.js
+          npm run check
+      - run: npm run build
+      - name: Recheck built state and whitespace
+        run: |
+          npm test
+          git diff --check
+      - name: Commit verified feature and browser bundle
+        run: |
+          git config user.name 'listenwrite-feature-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src tests mistakes.css index.html app.bundle.js
+          git commit -m 'Add daily and per-book mistake review without altering FSRS'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
