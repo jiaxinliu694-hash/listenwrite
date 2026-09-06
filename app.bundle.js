@@ -35,6 +35,176 @@ setItem(
 );
 DATA_CHART_SEED.contentVersion = "2026-08-15-v2";
 
+// src/cloud-auth.js
+var TERMINAL_REFRESH_CODES = /* @__PURE__ */ new Set([
+  "refresh_token_not_found",
+  "refresh_token_already_used",
+  "session_not_found",
+  "session_expired",
+  "user_not_found",
+  "user_banned"
+]);
+function isTerminalRefreshError(error) {
+  return TERMINAL_REFRESH_CODES.has(error?.code);
+}
+function authError(data = {}, status = 0, retryAfter = 0) {
+  const code = String(data?.error_code || data?.code || data?.error || "");
+  let message = "\u8BA4\u8BC1\u670D\u52A1\u6682\u65F6\u4E0D\u53EF\u7528\uFF0C\u5DF2\u4FDD\u7559\u767B\u5F55\u72B6\u6001\uFF1B\u7A0D\u540E\u81EA\u52A8\u91CD\u8BD5\u3002";
+  if (status === 0) message = "\u6682\u65F6\u8FDE\u63A5\u4E0D\u5230\u8BA4\u8BC1\u670D\u52A1\uFF0C\u5DF2\u4FDD\u7559\u767B\u5F55\u72B6\u6001\uFF1B\u7F51\u7EDC\u6062\u590D\u540E\u518D\u8BD5\u3002";
+  if (code === "invalid_credentials") message = "\u540C\u6B65\u5BC6\u7801\u4E0D\u6B63\u786E\u3002\u8FD9\u91CC\u9700\u8981\u542C\u8BCD\u8D26\u53F7\u7684\u5BC6\u7801\uFF0C\u4E0D\u662F Gmail \u6216 GitHub \u5BC6\u7801\u3002";
+  if (TERMINAL_REFRESH_CODES.has(code)) message = "\u8FD9\u53F0\u8BBE\u5907\u7684\u767B\u5F55\u51ED\u8BC1\u5DF2\u5931\u6548\uFF0C\u8BF7\u7528\u540C\u6B65\u5BC6\u7801\u91CD\u65B0\u8FDE\u63A5\uFF1B\u672C\u673A\u5B66\u4E60\u8BB0\u5F55\u4E0D\u53D7\u5F71\u54CD\u3002";
+  if (code === "otp_expired") message = "\u90AE\u4EF6\u94FE\u63A5\u5DF2\u5931\u6548\u6216\u5DF2\u4F7F\u7528\u3002\u53EF\u6539\u7528\u540C\u6B65\u5BC6\u7801\uFF0C\u4E0D\u5FC5\u7EE7\u7EED\u8BF7\u6C42\u90AE\u4EF6\u3002";
+  if (status === 429 || code === "over_email_send_rate_limit" || code === "over_request_rate_limit") {
+    message = code === "over_email_send_rate_limit" ? "\u90AE\u4EF6\u53D1\u9001\u989D\u5EA6\u5DF2\u7528\u5B8C\u3002\u4E0D\u8981\u53CD\u590D\u91CD\u53D1\uFF1B\u53EF\u76F4\u63A5\u4F7F\u7528\u540C\u6B65\u5BC6\u7801\u3002" : "\u8BA4\u8BC1\u670D\u52A1\u6682\u65F6\u9650\u6D41\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5\uFF1B\u5DF2\u4FDD\u7559\u672C\u673A\u6570\u636E\u548C\u73B0\u6709\u767B\u5F55\u72B6\u6001\u3002";
+  }
+  if (code === "email_not_confirmed") message = "\u6B64\u8D26\u53F7\u5C1A\u672A\u9A8C\u8BC1\u90AE\u7BB1\u3002";
+  if (code === "weak_password") message = "\u65B0\u5BC6\u7801\u4E0D\u7B26\u5408\u670D\u52A1\u7AEF\u8981\u6C42\uFF0C\u8BF7\u4F7F\u7528\u66F4\u957F\u4E14\u66F4\u590D\u6742\u7684\u5BC6\u7801\u3002";
+  if (code === "same_password") message = "\u65B0\u5BC6\u7801\u4E0E\u73B0\u6709\u5BC6\u7801\u76F8\u540C\uFF1B\u53EF\u4EE5\u76F4\u63A5\u5728\u53E6\u4E00\u53F0\u8BBE\u5907\u4F7F\u7528\u8FD9\u4E2A\u5BC6\u7801\u3002";
+  if (code === "reauthentication_needed" || code === "reauthentication_not_valid") {
+    message = "\u670D\u52A1\u7AEF\u8981\u6C42\u8FD1\u671F\u8EAB\u4EFD\u9A8C\u8BC1\uFF1B\u8BF7\u5728\u521A\u521A\u6210\u529F\u767B\u5F55\u7684\u8BBE\u5907\u4E0A\u8BBE\u7F6E\u5BC6\u7801\u3002";
+  }
+  if (status >= 400 && status < 500 && !message.includes("\u5BC6\u7801") && !TERMINAL_REFRESH_CODES.has(code) && status !== 429) {
+    message = `\u8BA4\u8BC1\u8BF7\u6C42\u672A\u5B8C\u6210\uFF08${code || status}\uFF09\uFF0C\u672C\u673A\u6570\u636E\u672A\u6539\u52A8\u3002`;
+  }
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  error.retryAfter = Number(retryAfter) || 0;
+  return error;
+}
+function createCloudAuth({
+  url,
+  key,
+  email,
+  readSession,
+  saveSession: saveSession2,
+  clearSession: clearSession2,
+  fetchImpl = (...args) => globalThis.fetch(...args),
+  now = () => Date.now(),
+  locks = () => globalThis.navigator?.locks
+}) {
+  let refreshInFlight = null;
+  let nextRefreshAt = 0;
+  let refreshFailures = 0;
+  let lastRefreshError = null;
+  let authGeneration = 0;
+  async function request(path, body, { method = "POST", accessToken } = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2e4);
+    timeout?.unref?.();
+    let response;
+    try {
+      response = await fetchImpl(`${url}${path}`, {
+        method,
+        headers: {
+          apikey: key,
+          "Content-Type": "application/json",
+          ...accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const header = response.headers?.get?.("Retry-After");
+        const seconds = Number(header) || Math.max(0, (Date.parse(header) - now()) / 1e3) || 0;
+        throw authError(data, response.status, seconds);
+      }
+      return data;
+    } catch (error) {
+      if (typeof error?.status === "number") throw error;
+      throw authError({}, 0);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  function resetRetry() {
+    nextRefreshAt = 0;
+    refreshFailures = 0;
+    lastRefreshError = null;
+  }
+  async function refresh() {
+    if (refreshInFlight) return refreshInFlight;
+    const initial = readSession();
+    if (!initial?.refresh_token) return null;
+    const generation = authGeneration;
+    const task = async () => {
+      const current = readSession();
+      if (!current?.refresh_token || generation !== authGeneration) return current;
+      if (current.refresh_token !== initial.refresh_token && Number(current.expires_at) * 1e3 > now() + 6e4) {
+        resetRetry();
+        return current;
+      }
+      if (now() < nextRefreshAt && lastRefreshError) throw lastRefreshError;
+      const token = current.refresh_token;
+      try {
+        const data = await request("/auth/v1/token?grant_type=refresh_token", { refresh_token: token });
+        const latest = readSession();
+        if (generation !== authGeneration || !latest || latest.refresh_token !== token) return latest;
+        if (!data?.access_token || !data?.refresh_token) throw authError({}, 502);
+        resetRetry();
+        return saveSession2(data);
+      } catch (error) {
+        const latest = readSession();
+        if (generation !== authGeneration || !latest || latest.refresh_token !== token) return latest;
+        if (isTerminalRefreshError(error)) {
+          clearSession2();
+          resetRetry();
+        } else {
+          refreshFailures += 1;
+          const delay = Math.max(
+            Number(error.retryAfter || 0) * 1e3,
+            Math.min(12e4, 15e3 * 2 ** Math.min(refreshFailures - 1, 3))
+          );
+          nextRefreshAt = now() + delay;
+          lastRefreshError = error;
+        }
+        throw error;
+      }
+    };
+    refreshInFlight = (async () => {
+      const manager = locks();
+      return manager?.request ? manager.request("listenwrite-auth-refresh-v1", task) : task();
+    })();
+    try {
+      return await refreshInFlight;
+    } finally {
+      refreshInFlight = null;
+    }
+  }
+  async function ensure() {
+    const current = readSession();
+    if (!current) return null;
+    if (Number(current.expires_at || 0) * 1e3 <= now() + 6e4) return refresh();
+    return current;
+  }
+  async function signIn(password) {
+    if (typeof password !== "string" || !password.length) throw new Error("\u8BF7\u8F93\u5165\u540C\u6B65\u5BC6\u7801\u3002");
+    const data = await request("/auth/v1/token?grant_type=password", { email, password });
+    if (!data?.access_token || !data?.refresh_token || !data?.user?.id || String(data.user.email || "").toLowerCase() !== email.toLowerCase()) {
+      throw new Error("\u8BA4\u8BC1\u54CD\u5E94\u4E0D\u5B8C\u6574\u6216\u8D26\u53F7\u4E0D\u5339\u914D\uFF0C\u672A\u66FF\u6362\u5F53\u524D\u767B\u5F55\u72B6\u6001\u3002");
+    }
+    authGeneration += 1;
+    resetRetry();
+    return saveSession2(data);
+  }
+  async function setPassword(password) {
+    if (typeof password !== "string" || password.length < 8) throw new Error("\u540C\u6B65\u5BC6\u7801\u81F3\u5C11\u9700\u8981 8 \u4E2A\u5B57\u7B26\u3002");
+    const current = await ensure();
+    if (!current?.access_token || String(current.user?.email || "").toLowerCase() !== email.toLowerCase()) {
+      throw new Error("\u53EA\u80FD\u5728\u5DF2\u767B\u5F55\u672C\u4EBA\u8D26\u53F7\u7684\u8BBE\u5907\u4E0A\u8BBE\u7F6E\u540C\u6B65\u5BC6\u7801\u3002");
+    }
+    const user = await request("/auth/v1/user", { password }, { method: "PUT", accessToken: current.access_token });
+    if (user?.id !== current.user.id) throw new Error("\u5BC6\u7801\u66F4\u65B0\u8FD4\u56DE\u7684\u8D26\u53F7\u4E0D\u5339\u914D\u3002");
+    return true;
+  }
+  function invalidatePending() {
+    authGeneration += 1;
+    resetRetry();
+  }
+  return { ensure, refresh, signIn, setPassword, request, resetRetry, invalidatePending };
+}
+
 // src/studyday.js
 var STUDY_UTC_OFFSET_HOURS = 8;
 var STUDY_DAY_GRACE_END_HOUR = 2;
@@ -4122,7 +4292,21 @@ var syncMessage = "\u672A\u767B\u5F55\u4E91\u540C\u6B65";
 var conflict = null;
 var pendingRemote = null;
 var syncBusy = false;
-var refreshInFlight = null;
+var authUiBusy = false;
+var observersStarted = false;
+var MAIL_COOLDOWN_KEY = "listenwrite-mail-cooldown-v1";
+var auth = createCloudAuth({
+  url: SUPABASE_URL,
+  key: SUPABASE_KEY,
+  email: OWNER_EMAIL,
+  readSession: () => {
+    const stored = normalizeSession2(readStored(SESSION_KEY));
+    if (stored) session = stored;
+    return session;
+  },
+  saveSession,
+  clearSession
+});
 var lastCloudCheck = 0;
 function nowSec() {
   return Math.floor(Date.now() / 1e3);
@@ -4176,16 +4360,6 @@ function clearSession() {
   writeStored(SESSION_KEY, null);
   updateCloudButton();
 }
-async function authRequest(path, body) {
-  const response = await fetch(`${SUPABASE_URL}${path}`, {
-    method: "POST",
-    headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `\u8BF7\u6C42\u5931\u8D25 ${response.status}`);
-  return data;
-}
 function ownerOtpRequest() {
   return {
     url: `${SUPABASE_URL}/auth/v1/otp?redirect_to=${encodeURIComponent(APP_URL)}`,
@@ -4200,31 +4374,20 @@ async function sendOwnerMagicLink(fetchImpl = globalThis.fetch) {
     body: JSON.stringify(body)
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.msg || data?.message || data?.error_description || data?.error || `\u767B\u5F55\u90AE\u4EF6\u53D1\u9001\u5931\u8D25 ${response.status}`);
+  if (!response.ok) throw authError(data, response.status, Number(response.headers?.get?.("Retry-After")) || 0);
   return data;
 }
 async function refreshSession() {
-  if (refreshInFlight) return refreshInFlight;
-  if (!session?.refresh_token) return null;
-  const token = session.refresh_token;
-  refreshInFlight = (async () => {
-    try {
-      const data = await authRequest("/auth/v1/token?grant_type=refresh_token", { refresh_token: token });
-      return saveSession(data);
-    } catch (error) {
-      clearSession();
-      throw error;
-    } finally {
-      refreshInFlight = null;
-    }
-  })();
-  return refreshInFlight;
+  return auth.refresh();
 }
 async function ensureSession() {
-  if (!session) session = normalizeSession2(readStored(SESSION_KEY));
-  if (!session) return null;
-  if (Number(session.expires_at || 0) <= nowSec() + 60) await refreshSession();
-  return session;
+  return auth.ensure();
+}
+async function signInOwnerWithPassword(password) {
+  return auth.signIn(password);
+}
+async function setOwnerSyncPassword(password) {
+  return auth.setPassword(password);
 }
 async function rpcRequest(path, body = {}, retried = false) {
   const current = await ensureSession();
@@ -4440,7 +4603,7 @@ async function mergeConflict() {
 async function reconcileCloud({ force = false } = {}) {
   return withSyncLock(async () => {
     try {
-      const current = await ensureSession().catch(() => null);
+      const current = await ensureSession();
       if (!current) {
         setStatus("offline", "\u672A\u767B\u5F55\u4E91\u540C\u6B65");
         return false;
@@ -4550,12 +4713,19 @@ async function overwriteCloudWithLocalState() {
   });
 }
 async function cloudSignOut() {
-  try {
-    if (session?.access_token) await fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, { method: "POST", headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${session.access_token}` } });
-  } catch {
-  }
+  const accessToken = session?.access_token;
+  auth.invalidatePending();
   clearSession();
   renderCloudModalIfOpen();
+  if (accessToken) {
+    try {
+      await fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, {
+        method: "POST",
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${accessToken}` }
+      });
+    } catch {
+    }
+  }
 }
 function decodeJwtPayload(token) {
   try {
@@ -4572,8 +4742,18 @@ function captureSupabaseAuthCallback(env = {}) {
   const loc = env.location || globalThis.location;
   const hist = env.history || globalThis.history;
   const storage = env.localStorage || globalThis.localStorage;
-  if (!loc?.hash || !storage) return false;
-  const params = new URLSearchParams(loc.hash.replace(/^#/, ""));
+  if (!loc || !storage) return false;
+  const params = new URLSearchParams(String(loc.hash || "").replace(/^#/, ""));
+  const query = new URLSearchParams(loc.search || "");
+  const errorCode = params.get("error_code") || query.get("error_code");
+  if (errorCode || params.has("error") || query.has("error")) {
+    const error = authError({ code: errorCode || "auth_callback_failed" }, 400);
+    setStatus("error", error.message);
+    for (const key of ["error", "error_code", "error_description"]) query.delete(key);
+    hist?.replaceState?.(null, "", loc.pathname + (query.size ? `?${query}` : ""));
+    return false;
+  }
+  if (!loc.hash) return false;
   const access_token = params.get("access_token");
   const refresh_token = params.get("refresh_token");
   if (!access_token || !refresh_token) return false;
@@ -4613,18 +4793,31 @@ function closeCloudModal() {
   document.getElementById("lwCloudMask")?.remove();
 }
 function renderCloudModalIfOpen() {
-  if (document.getElementById("lwCloudMask")) openCloudModal();
+  const mask = document.getElementById("lwCloudMask");
+  if (!mask || authUiBusy) return;
+  if ([...mask.querySelectorAll("input")].some((input) => input.value || input === document.activeElement)) return;
+  openCloudModal();
+}
+function mailButtonState() {
+  const button = document.getElementById("lwCloudMagicLogin");
+  if (!button) return;
+  const remaining = Math.max(0, Math.ceil((Number(readStored(MAIL_COOLDOWN_KEY)) - Date.now()) / 1e3));
+  button.disabled = authUiBusy || remaining > 0;
+  button.textContent = remaining ? `\u6682\u52FF\u91CD\u53D1\uFF08${remaining} \u79D2\uFF09` : "\u53D1\u9001\u5907\u7528\u767B\u5F55\u90AE\u4EF6";
 }
 function openCloudModal() {
   closeCloudModal();
   const mask = document.createElement("div");
   mask.id = "lwCloudMask";
   mask.className = "lw-cloud-mask";
-  const email = session?.user?.email || "\u5F53\u524D\u8D26\u53F7";
+  const email = session?.user?.email || OWNER_EMAIL;
   const conflictHtml = conflict ? `<div class="lw-cloud-status lw-cloud-warning"><b>\u68C0\u6D4B\u5230\u4E24\u7AEF\u90FD\u6709\u4FEE\u6539</b><br>${esc(syncMessage)}</div>` : "";
-  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>\u4E91\u540C\u6B65</h2><p>\u672C\u5730\u4ECD\u7136\u4FDD\u5B58\uFF1B\u4E91\u7AEF\u8D1F\u8D23\u7535\u8111\u3001Safari \u548C\u4E3B\u5C4F\u5E55 App \u540C\u6B65\u3002\u53CC\u7AEF\u540C\u65F6\u4FEE\u6539\u65F6\u5148\u4FDD\u7559\u53CC\u65B9\u5FEB\u7167\uFF0C\u4E0D\u518D\u76F4\u63A5\u8986\u76D6\u3002</p></div><button id="lwCloudClose" style="border:0;background:transparent;font-size:24px">\xD7</button></div>${session ? `<div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div>${conflictHtml}<div class="small">\u5DF2\u767B\u5F55\uFF1A${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">\u7ACB\u5373\u540C\u6B65</button>${conflict ? '<button id="lwCloudMerge" class="primary">\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55</button><button id="lwCloudBackup">\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD</button>' : ""}<button id="lwCloudPull">\u4F7F\u7528\u4E91\u7AEF</button><button id="lwCloudPush">\u4E0A\u4F20\u672C\u673A</button><button id="lwCloudLogout">\u53EA\u9000\u51FA\u672C\u8BBE\u5907</button></div><p style="margin-top:12px">\u6709\u51B2\u7A81\u65F6\u4F18\u5148\u7528\u201C\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55\u201D\u3002\u201C\u4F7F\u7528\u4E91\u7AEF / \u4E0A\u4F20\u672C\u673A\u201D\u5C5E\u4E8E\u6574\u4EFD\u66FF\u6362\uFF0C\u64CD\u4F5C\u524D\u7CFB\u7EDF\u5DF2\u4FDD\u5B58\u51B2\u7A81\u5FEB\u7167\u3002</p>` : `<p>\u79C1\u4EBA\u4E91\u7AEF\u8D26\u53F7\uFF1A<b>${esc(OWNER_EMAIL)}</b></p><div class="lw-cloud-status" id="lwCloudStatus">${esc(syncMessage)}</div><div class="lw-cloud-actions"><button id="lwCloudMagicLogin" class="primary">\u53D1\u9001\u767B\u5F55\u90AE\u4EF6</button></div><p style="margin-top:12px">\u65E0\u9700\u5BC6\u7801\uFF0C\u4E5F\u4E0D\u63D0\u4F9B\u6CE8\u518C\u5165\u53E3\u3002\u767B\u5F55\u90AE\u4EF6\u53EA\u4F1A\u53D1\u7ED9\u8FD9\u4E2A\u5DF2\u6709\u8D26\u53F7\u3002</p>`}</div>`;
-  mask.addEventListener("click", (e) => {
-    if (e.target === mask) closeCloudModal();
+  const passwordSettings = `<details style="margin-top:16px"><summary>\u8BBE\u7F6E\u6216\u4FEE\u6539\u540C\u6B65\u5BC6\u7801</summary><p class="small">\u5728\u5DF2\u767B\u5F55\u7684\u8BBE\u5907\u4E0A\u8BBE\u7F6E\u4E00\u6B21\uFF0C\u5176\u4ED6\u8BBE\u5907\u5C31\u80FD\u7528\u8FD9\u4E2A\u5BC6\u7801\u8FDE\u63A5\uFF0C\u4E0D\u5FC5\u6536\u767B\u5F55\u90AE\u4EF6\u3002\u4E0D\u662F\u4FEE\u6539 Gmail \u5BC6\u7801\u3002</p><form id="lwCloudSetPasswordForm"><label class="lw-cloud-field">\u65B0\u540C\u6B65\u5BC6\u7801<input id="lwCloudNewPassword" type="password" autocomplete="new-password" minlength="8" required></label><label class="lw-cloud-field">\u786E\u8BA4\u65B0\u5BC6\u7801<input id="lwCloudConfirmPassword" type="password" autocomplete="new-password" minlength="8" required></label><div class="lw-cloud-actions"><button type="submit" class="primary">\u4FDD\u5B58\u540C\u6B65\u5BC6\u7801</button></div></form></details>`;
+  const loggedIn = `<div class="lw-cloud-status" id="lwCloudStatus" role="status">${esc(syncMessage)}</div>${conflictHtml}<div class="small">\u5DF2\u8FDE\u63A5\uFF1A${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">\u7ACB\u5373\u540C\u6B65</button>${conflict ? '<button id="lwCloudMerge" class="primary">\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55</button><button id="lwCloudBackup">\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD</button>' : ""}<button id="lwCloudPull">\u4F7F\u7528\u4E91\u7AEF</button><button id="lwCloudPush">\u4E0A\u4F20\u672C\u673A</button><button id="lwCloudLogout">\u53EA\u9000\u51FA\u672C\u8BBE\u5907</button></div><p style="margin-top:12px">\u6709\u51B2\u7A81\u65F6\u4F18\u5148\u5408\u5E76\u3002\u201C\u4F7F\u7528\u4E91\u7AEF / \u4E0A\u4F20\u672C\u673A\u201D\u662F\u6574\u4EFD\u66FF\u6362\u3002</p>${passwordSettings}`;
+  const loggedOut = `<p>\u79C1\u4EBA\u4E91\u7AEF\u8D26\u53F7\uFF1A<b>${esc(OWNER_EMAIL)}</b></p><div class="lw-cloud-status" id="lwCloudStatus" role="status">${esc(syncMessage)}</div><form id="lwCloudPasswordForm"><input type="text" name="username" autocomplete="username" value="${esc(OWNER_EMAIL)}" readonly hidden><label class="lw-cloud-field">\u540C\u6B65\u5BC6\u7801<input id="lwCloudPassword" name="password" type="password" autocomplete="current-password" required placeholder="\u542C\u8BCD\u8D26\u53F7\u5BC6\u7801\uFF0C\u4E0D\u662F Gmail \u5BC6\u7801"></label><div class="lw-cloud-actions"><button id="lwCloudPasswordLogin" type="submit" class="primary">\u7528\u5BC6\u7801\u8FDE\u63A5</button><button id="lwCloudLocalOnly" type="button">\u7EE7\u7EED\u672C\u673A\u5B66\u4E60</button></div></form><p style="margin-top:12px">\u8FDE\u63A5\u540E\u81EA\u52A8\u7EED\u671F\uFF1B\u6682\u65F6\u65AD\u7F51\u4E0D\u4F1A\u6E05\u9664\u767B\u5F55\u72B6\u6001\u3002\u6CA1\u6709\u6216\u5FD8\u8BB0\u540C\u6B65\u5BC6\u7801\uFF0C\u53EF\u5728\u5DF2\u7ECF\u767B\u5F55\u7684\u8BBE\u5907\u4E2D\u8BBE\u7F6E\u3002</p><details><summary>\u5907\u7528\uFF1A\u90AE\u4EF6\u767B\u5F55</summary><p class="small">\u90AE\u4EF6\u53EF\u80FD\u88AB\u9650\u6D41\uFF1B\u5BC6\u7801\u8FDE\u63A5\u4E0D\u9700\u8981\u53D1\u9001\u90AE\u4EF6\u3002\u53EA\u5728\u6CA1\u6709\u53EF\u7528\u5BC6\u7801\u6216\u5DF2\u767B\u5F55\u8BBE\u5907\u65F6\u4F7F\u7528\u3002</p><div class="lw-cloud-actions"><button id="lwCloudMagicLogin">\u53D1\u9001\u5907\u7528\u767B\u5F55\u90AE\u4EF6</button></div></details>`;
+  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true" aria-label="\u4E91\u540C\u6B65"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>\u4E91\u540C\u6B65</h2><p>\u5B66\u4E60\u4E0E\u9519\u8BCD\u590D\u4E60\u53EF\u76F4\u63A5\u4F7F\u7528\u672C\u673A\u6570\u636E\u3002\u4E91\u540C\u6B65\u53EA\u7528\u4E8E\u8BBE\u5907\u95F4\u4EA4\u6362\u8BB0\u5F55\uFF0C\u8FDE\u63A5\u4E0D\u4F1A\u76F4\u63A5\u8986\u76D6\u672C\u673A\u5185\u5BB9\u3002</p></div><button id="lwCloudClose" aria-label="\u5173\u95ED" style="border:0;background:transparent;font-size:24px">\xD7</button></div>${session ? loggedIn : loggedOut}</div>`;
+  mask.addEventListener("click", (event) => {
+    if (event.target === mask && !authUiBusy) closeCloudModal();
   });
   document.body.appendChild(mask);
   document.getElementById("lwCloudClose").onclick = closeCloudModal;
@@ -4635,19 +4828,78 @@ function openCloudModal() {
     document.getElementById("lwCloudPull").onclick = () => useLatestCloudState().catch((e) => setStatus("error", e.message));
     document.getElementById("lwCloudPush").onclick = () => overwriteCloudWithLocalState().catch((e) => setStatus("error", e.message));
     document.getElementById("lwCloudLogout").onclick = cloudSignOut;
-  } else {
-    document.getElementById("lwCloudMagicLogin").onclick = async () => {
-      const button = document.getElementById("lwCloudMagicLogin");
-      if (button) button.disabled = true;
+    document.getElementById("lwCloudSetPasswordForm").onsubmit = async (event) => {
+      event.preventDefault();
+      if (authUiBusy) return;
+      const first = document.getElementById("lwCloudNewPassword");
+      const second = document.getElementById("lwCloudConfirmPassword");
+      if (first.value !== second.value) {
+        setStatus("error", "\u4E24\u6B21\u5BC6\u7801\u8F93\u5165\u4E0D\u4E00\u81F4\u3002");
+        return;
+      }
+      authUiBusy = true;
+      const button = event.currentTarget.querySelector("button");
+      button.disabled = true;
       try {
-        setStatus("syncing", "\u6B63\u5728\u53D1\u9001\u767B\u5F55\u90AE\u4EF6\u2026");
-        await sendOwnerMagicLink();
-        setStatus("ready", "\u767B\u5F55\u90AE\u4EF6\u5DF2\u53D1\u9001\u3002\u6253\u5F00 Gmail \u70B9\u767B\u5F55\u94FE\u63A5\u5373\u53EF\uFF1B\u4E0D\u4F1A\u521B\u5EFA\u65B0\u8D26\u53F7\u3002");
-      } catch (e) {
-        setStatus("error", e?.message || "\u767B\u5F55\u90AE\u4EF6\u53D1\u9001\u5931\u8D25");
-        if (button) button.disabled = false;
+        setStatus("ready", "\u6B63\u5728\u4FDD\u5B58\u540C\u6B65\u5BC6\u7801\u2026");
+        await setOwnerSyncPassword(first.value);
+        first.value = "";
+        second.value = "";
+        setStatus("ready", "\u540C\u6B65\u5BC6\u7801\u5DF2\u4FDD\u5B58\uFF1B\u5176\u4ED6\u8BBE\u5907\u53EF\u4EE5\u7528\u5B83\u8FDE\u63A5\uFF0C\u4E0D\u5FC5\u53D1\u9001\u767B\u5F55\u90AE\u4EF6\u3002");
+      } catch (error) {
+        setStatus("error", error.message);
+      } finally {
+        authUiBusy = false;
+        button.disabled = false;
       }
     };
+  } else {
+    document.getElementById("lwCloudLocalOnly").onclick = closeCloudModal;
+    document.getElementById("lwCloudPasswordForm").onsubmit = async (event) => {
+      event.preventDefault();
+      if (authUiBusy) return;
+      authUiBusy = true;
+      const input = document.getElementById("lwCloudPassword");
+      const button = document.getElementById("lwCloudPasswordLogin");
+      button.disabled = true;
+      let connected = false;
+      try {
+        setStatus("ready", "\u6B63\u5728\u7528\u5BC6\u7801\u8FDE\u63A5\u2026");
+        await signInOwnerWithPassword(input.value);
+        input.value = "";
+        setStatus("ready", "\u5DF2\u8FDE\u63A5\uFF0C\u6B63\u5728\u6838\u5BF9\u4E24\u7AEF\u8BB0\u5F55\u2026");
+        connected = true;
+      } catch (error) {
+        setStatus("error", error.message);
+      } finally {
+        authUiBusy = false;
+        button.disabled = false;
+      }
+      if (connected) {
+        openCloudModal();
+        await reconcileCloud({ force: true });
+      }
+    };
+    document.getElementById("lwCloudMagicLogin").onclick = async () => {
+      if (authUiBusy || Number(readStored(MAIL_COOLDOWN_KEY)) > Date.now()) return;
+      authUiBusy = true;
+      writeStored(MAIL_COOLDOWN_KEY, Date.now() + 6e4);
+      mailButtonState();
+      try {
+        setStatus("ready", "\u6B63\u5728\u53D1\u9001\u5907\u7528\u767B\u5F55\u90AE\u4EF6\u2026");
+        await sendOwnerMagicLink();
+        setStatus("ready", "\u90AE\u4EF6\u5DF2\u53D1\u9001\u3002\u8BF7\u5728\u9700\u8981\u8FDE\u63A5\u7684\u6D4F\u89C8\u5668\u6253\u5F00\u6700\u65B0\u94FE\u63A5\uFF1B\u4E0D\u8981\u5728\u5176\u4ED6\u8BBE\u5907\u5148\u4F7F\u7528\u3002");
+      } catch (error) {
+        if (error.status === 429 || error.code === "over_email_send_rate_limit") {
+          writeStored(MAIL_COOLDOWN_KEY, Date.now() + Math.max(300, error.retryAfter || 0) * 1e3);
+        }
+        setStatus("error", error.message || "\u90AE\u4EF6\u53D1\u9001\u672A\u5B8C\u6210\uFF0C\u53EF\u6539\u7528\u540C\u6B65\u5BC6\u7801\u3002");
+      } finally {
+        authUiBusy = false;
+        mailButtonState();
+      }
+    };
+    mailButtonState();
   }
 }
 function ensureCloudButton() {
@@ -4662,11 +4914,16 @@ function ensureCloudButton() {
   updateCloudButton();
 }
 async function periodicSync(force = false) {
+  mailButtonState();
   if (document.hidden && !force) return;
+  if (authUiBusy || document.querySelector("#lwCloudMask input:focus")) return;
+  if (!session && !readStored(SESSION_KEY)) return;
   await reconcileCloud({ force }).catch(() => {
   });
 }
 function startObservers() {
+  if (observersStarted) return;
+  observersStarted = true;
   injectStyles();
   ensureCloudButton();
   const observer = new MutationObserver(ensureCloudButton);
@@ -4676,10 +4933,21 @@ function startObservers() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) periodicSync(true);
   });
-  window.addEventListener("online", () => periodicSync(true));
+  window.addEventListener("online", () => {
+    auth.resetRetry();
+    periodicSync(true);
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key !== SESSION_KEY) return;
+    session = normalizeSession2(readStored(SESSION_KEY));
+    auth.invalidatePending();
+    setStatus(session ? "ready" : "offline", session ? "\u5DF2\u63A5\u6536\u6B64\u6D4F\u89C8\u5668\u5176\u4ED6\u6807\u7B7E\u9875\u7684\u767B\u5F55\u72B6\u6001\u3002" : "\u672C\u6D4F\u89C8\u5668\u5DF2\u9000\u51FA\u4E91\u540C\u6B65\uFF0C\u672C\u673A\u8BB0\u5F55\u4ECD\u7136\u4FDD\u7559\u3002");
+    renderCloudModalIfOpen();
+    if (session) periodicSync(true);
+  });
 }
 async function initCloudSync() {
-  if (typeof window === "undefined" || typeof document === "undefined" || typeof indexedDB === "undefined") return;
+  if (typeof window === "undefined" || typeof document === "undefined") return;
   captureSupabaseAuthCallback();
   session = normalizeSession2(readStored(SESSION_KEY));
   startObservers();
