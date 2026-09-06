@@ -1,0 +1,42 @@
+name: Verify signed-in device entry v49
+on:
+  push:
+    branches: [feat/direct-personal-sync-v48]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: device-entry-v49
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply checked integration
+        run: python3 tools/integrate-device-entry-v49.py
+      - run: npm ci
+      - name: Full regression checks
+        run: |
+          node --check src/device-entry.js
+          node --check src/device-entry-ui.js
+          npm run check
+      - name: Build and retest
+        run: |
+          npm run build
+          npm test
+          git diff --check
+      - name: Commit verified runtime
+        run: |
+          rm tools/integrate-device-entry-v49.py .github/workflows/device-entry-v49-verify.yml
+          git config user.name 'listenwrite-device-entry-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Add owner-authenticated device link button without password or email'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
