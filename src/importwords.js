@@ -1,3 +1,5 @@
+import { inspectWordText } from './wordtext.js';
+
 const FIELD_ALIASES = {
   en: ['en', 'english', 'word', '单词', '英文'],
   zh: ['zh', 'chinese', 'meaning', 'translation', '中文', '释义', '中文释义'],
@@ -72,14 +74,15 @@ export function inferFieldMap(rows) {
   const first = rows[0] || [];
   const map = { en: 0, zh: 1, pos: 2, def: 3, source: 4, example: 5 };
   let matches = 0;
+  const detected = {};
   for (const [field, aliases] of Object.entries(FIELD_ALIASES)) {
     const index = first.findIndex((cell) => aliases.includes(normalizedHeader(cell)));
     if (index >= 0) {
-      map[field] = index;
+      detected[field] = index;
       matches += 1;
     }
   }
-  return { map, hasHeader: matches > 0 };
+  return { map: matches ? Object.fromEntries(Object.keys(map).map(field => [field, detected[field] ?? -1])) : map, hasHeader: matches > 0 };
 }
 
 export function buildImportDraft(text, fileName = '导入词库') {
@@ -106,7 +109,9 @@ export function recordsFromDraft(draft, map = draft?.map || {}) {
       const index = Number(map[field]);
       return Number.isInteger(index) && index >= 0 ? cleanCell(row[index]) : '';
     };
-    const en = value('en');
+    const originalEn = value('en');
+    const cleaning = inspectWordText(originalEn);
+    const en = cleaning.text;
     return {
       rowIndex,
       en,
@@ -115,7 +120,10 @@ export function recordsFromDraft(draft, map = draft?.map || {}) {
       def: value('def'),
       source: value('source') || draft.sourceName || '导入词库',
       example: value('example'),
-      valid: Boolean(en),
+      originalEn,
+      cleaned: cleaning.valid && cleaning.changed,
+      issue: cleaning.issue,
+      valid: cleaning.valid,
     };
   });
 }

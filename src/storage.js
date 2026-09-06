@@ -1,3 +1,4 @@
+import { repairWordTextState, hasWordTextRepairs } from './wordtext.js';
 import { emptyCard, rebuildCard } from './scheduler.js';
 import { calendarDayKey } from './studyday.js';
 import { normalizeSentenceBooks, ensureSimpleWords, normalizeLexeme } from './sentencebooks.js';
@@ -226,6 +227,7 @@ function normalizeSentenceSession(value) {
 }
 
 export function normalizeState(input) {
+  input = repairWordTextState(input);
   const base = defaultState();
   const inputVersion = Number(input?.version) || 0;
   const migrateScheduling = inputVersion < STATE_VERSION;
@@ -309,7 +311,20 @@ export async function readPersistedState() {
 export async function loadState() {
   try {
     const saved = await dbGet(STATE_KEY);
-    if (saved) return normalizeState(saved);
+    if (saved) {
+      const normalized = normalizeState(saved);
+      if (hasWordTextRepairs(saved)) {
+        // Keep the exact original local state alongside the repaired state.
+        // A failed migration write must never fall through to empty sample data.
+        try {
+          await queueWrite(() => dbSetMany([
+            ['word-text-backup-v1', cloneForStorage(saved)],
+            [STATE_KEY, normalized],
+          ]));
+        } catch (error) { console.warn('Word text repair remains in memory; original local data retained', error); }
+      }
+      return normalized;
+    }
     const fallback = await parseLocal(FALLBACK_KEY);
     if (fallback) { await queueWrite(() => dbSet(STATE_KEY, fallback)); return fallback; }
     const legacy = await parseLocal(LEGACY_KEY);
@@ -331,7 +346,7 @@ export async function saveState(state) {
   if (remoteApplying) return;
   state.version = STATE_VERSION;
   ensureSimpleWords(state);
-  const snapshot = cloneForStorage(state);
+  const snapshot = cloneForStorage(repairWordTextState(state));
   return queueWrite(async () => {
     if (remoteApplying) return;
     try { await dbSet(STATE_KEY, snapshot); localStorage.removeItem(FALLBACK_KEY); }
