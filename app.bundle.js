@@ -35,6 +35,62 @@ setItem(
 );
 DATA_CHART_SEED.contentVersion = "2026-08-15-v2";
 
+// src/studyday.js
+var STUDY_UTC_OFFSET_HOURS = 8;
+var STUDY_DAY_GRACE_END_HOUR = 2;
+var OFFSET_MS = STUDY_UTC_OFFSET_HOURS * 36e5;
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function calendarDayKey(ts = Date.now()) {
+  const local = new Date(Number(ts) + OFFSET_MS);
+  return `${local.getUTCFullYear()}-${pad2(local.getUTCMonth() + 1)}-${pad2(local.getUTCDate())}`;
+}
+function shanghaiClock(ts = Date.now()) {
+  const local = new Date(Number(ts) + OFFSET_MS);
+  return {
+    year: local.getUTCFullYear(),
+    month: local.getUTCMonth() + 1,
+    day: local.getUTCDate(),
+    hour: local.getUTCHours(),
+    minute: local.getUTCMinutes(),
+    second: local.getUTCSeconds()
+  };
+}
+function isGraceWindow(ts = Date.now()) {
+  const { hour } = shanghaiClock(ts);
+  return hour >= 0 && hour < STUDY_DAY_GRACE_END_HOUR;
+}
+function studyDayParts(key = calendarDayKey()) {
+  const [year, month, day] = String(key).split("-").map(Number);
+  return { year, month, day };
+}
+function formatDayKey(year, month, day) {
+  return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+function addStudyDays(key, amount) {
+  const { year, month, day } = studyDayParts(key);
+  const d = new Date(Date.UTC(year, month - 1, day + Number(amount || 0), 12));
+  return formatDayKey(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+}
+function studyDayStart(key = calendarDayKey()) {
+  const { year, month, day } = studyDayParts(key);
+  return Date.UTC(year, month - 1, day, -STUDY_UTC_OFFSET_HOURS, 0, 0, 0);
+}
+function studyDayEnd(key = calendarDayKey()) {
+  return studyDayStart(addStudyDays(key, 1)) - 1;
+}
+function calendarDate(key = calendarDayKey()) {
+  const { year, month, day } = studyDayParts(key);
+  return new Date(Date.UTC(year, month - 1, day, 12));
+}
+function calendarKey(date) {
+  return formatDayKey(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
+}
+function studyDayLabel() {
+  return "\u4E1C\u516B\u533A \xB7 24:00 \u6B63\u5E38\u6362\u65E5\uFF1B\u672A\u5B8C\u6210\u53EF\u5EF6\u7EED\u5230 02:00";
+}
+
 // src/wordtext.js
 var ENTITIES = Object.freeze({
   amp: "&",
@@ -149,6 +205,197 @@ function wordTextDuplicateGroups(state2) {
     groups.get(key).push(word?.id);
   }
   return [...groups].filter(([, ids]) => ids.length > 1).map(([en, ids]) => ({ en, ids }));
+}
+
+// src/mistakes.js
+var PRACTICE_MODES = ["free", "review-listen", "review-spelling"];
+var MISTAKE_MODE_LABELS = Object.freeze({
+  listen: "\u6B63\u5F0F\u542C\u8BCD",
+  type: "\u4E2D\u6587\u624B\u6253",
+  free: "\u81EA\u7531\u542C",
+  "review-listen": "\u9519\u8BCD\u542C\u97F3\u590D\u4E60",
+  "review-spelling": "\u9519\u8BCD\u62FC\u5199\u590D\u4E60"
+});
+var NO_BOOK = "\uFF08\u672A\u5F52\u5C5E\u8BCD\u4E66\uFF09";
+var uniqueStrings = (values) => [...new Set((Array.isArray(values) ? values : []).filter((value) => typeof value === "string").map((value) => value.trim()).filter(Boolean))];
+var validDate = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+var skill = (mode) => mode === "review-spelling" ? "spelling" : mode === "type" ? "type" : "listen";
+var compareEvents = (a, b) => Number(a.ts) - Number(b.ts) || String(a.id).localeCompare(String(b.id));
+function normalizePracticeEvents(value) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const event of Array.isArray(value) ? value : []) {
+    if (!event || typeof event.id !== "string" || !event.id || typeof event.wordId !== "string" || !PRACTICE_MODES.includes(event.mode) || !["good", "bad"].includes(event.result) || !Number.isFinite(Number(event.ts)) || Number(event.ts) <= 0) continue;
+    const normalized = {
+      ...event,
+      ts: Number(event.ts),
+      date: validDate(event.date) ? event.date : calendarDayKey(event.ts),
+      booksSnapshot: uniqueStrings(event.booksSnapshot),
+      studyBooks: uniqueStrings(event.studyBooks),
+      enSnapshot: String(event.enSnapshot || ""),
+      zhSnapshot: String(event.zhSnapshot || ""),
+      sourceDates: uniqueStrings(event.sourceDates).filter(validDate)
+    };
+    const previous = byId.get(event.id);
+    if (!previous || Number(normalized.editedAt || normalized.ts) >= Number(previous.editedAt || previous.ts)) byId.set(event.id, normalized);
+  }
+  return [...byId.values()].sort(compareEvents);
+}
+function recordVocabularyPractice(state2, word, mode, result, context = {}) {
+  if (!word?.id || !PRACTICE_MODES.includes(mode) || !["good", "bad"].includes(result)) throw new Error("\u65E0\u6548\u7684\u8BCD\u6C47\u7EC3\u4E60\u7ED3\u679C");
+  const ts = Number(context.ts ?? Date.now());
+  if (!Number.isFinite(ts) || ts <= 0) throw new Error("\u65E0\u6548\u7684\u7EC3\u4E60\u65F6\u95F4");
+  const event = {
+    id: context.id || `vp_${globalThis.crypto?.randomUUID?.() || `${ts.toString(36)}_${Math.random().toString(36).slice(2)}`}`,
+    wordId: word.id,
+    date: validDate(context.date) ? context.date : calendarDayKey(ts),
+    ts,
+    mode,
+    result,
+    originalResult: result,
+    editedAt: null,
+    sessionId: context.sessionId || null,
+    booksSnapshot: uniqueStrings(word.sources),
+    studyBooks: uniqueStrings(context.studyBooks),
+    enSnapshot: String(word.en || ""),
+    zhSnapshot: String(word.zh || ""),
+    input: String(context.input || ""),
+    sourceDates: uniqueStrings(context.sourceDates).filter(validDate)
+  };
+  if (!Array.isArray(state2.vocabPracticeEvents)) state2.vocabPracticeEvents = [];
+  const existing = state2.vocabPracticeEvents.find((item) => item.id === event.id);
+  if (existing) return existing;
+  state2.vocabPracticeEvents.push(event);
+  return event;
+}
+function editVocabularyPractice(state2, id3, result, ts = Date.now()) {
+  if (!["good", "bad"].includes(result)) return null;
+  const event = (state2.vocabPracticeEvents || []).find((item) => item.id === id3);
+  if (!event || event.result === result) return event || null;
+  event.result = result;
+  event.editedAt = ts;
+  return event;
+}
+function buildMistakeIndex(state2) {
+  const words = new Map((state2?.words || []).map((word) => [word.id, word]));
+  const seen = /* @__PURE__ */ new Set();
+  const history = [
+    ...(state2?.events || []).filter((event) => ["listen", "type"].includes(event?.mode)),
+    ...normalizePracticeEvents(state2?.vocabPracticeEvents)
+  ].filter((event) => {
+    if (!event?.wordId || !["good", "bad"].includes(event.result) || !validDate(event.date)) return false;
+    const key = `${PRACTICE_MODES.includes(event.mode) ? "practice" : "formal"}:${event.id}`;
+    if (event.id && seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort(compareEvents);
+  const groups = /* @__PURE__ */ new Map(), latestBySkill = /* @__PURE__ */ new Map();
+  for (const event of history) {
+    latestBySkill.set(`${event.wordId}|${skill(event.mode)}`, event);
+    if (event.result !== "bad") continue;
+    const key = `${event.date}|${event.wordId}`;
+    if (!groups.has(key)) groups.set(key, { date: event.date, wordId: event.wordId, failures: [] });
+    groups.get(key).failures.push(event);
+  }
+  const rows = [...groups.values()].map((group) => {
+    const latestEvents = Object.fromEntries(["listen", "spelling", "type"].map((s) => [s, latestBySkill.get(`${group.wordId}|${s}`)]));
+    return describeRow(group, words.get(group.wordId), latestEvents);
+  }).sort((a, b) => b.date.localeCompare(a.date) || b.lastBadTs - a.lastBadTs || a.en.localeCompare(b.en));
+  return { rows, history };
+}
+function eventBooks(event, word) {
+  const names = uniqueStrings(Array.isArray(event.booksSnapshot) ? event.booksSnapshot : word?.sources);
+  return names.length ? names : [NO_BOOK];
+}
+function describeRow(group, word, latestEvents) {
+  const lastBad = group.failures.at(-1), books = /* @__PURE__ */ new Set(), studyBooks = /* @__PURE__ */ new Set();
+  let inferredBooks = false;
+  for (const event of group.failures) {
+    if (!Array.isArray(event.booksSnapshot)) inferredBooks = true;
+    eventBooks(event, word).forEach((name) => books.add(name));
+    uniqueStrings(event.studyBooks).forEach((name) => studyBooks.add(name));
+  }
+  const skills = [...new Set(group.failures.map((event) => skill(event.mode)))];
+  const latest = skills.map((s) => latestEvents[s]).filter(Boolean);
+  const pendingSkills = skills.filter((s) => latestEvents[s]?.result !== "good");
+  return {
+    ...group,
+    key: `${group.date}|${group.wordId}`,
+    word,
+    latestEvents,
+    en: word?.en || lastBad.enSnapshot || "\uFF08\u5DF2\u5220\u9664\u8BCD\u6761\uFF09",
+    zh: word?.zh || lastBad.zhSnapshot || "",
+    books: [...books],
+    studyBooks: [...studyBooks],
+    inferredBooks,
+    modes: [...new Set(group.failures.map((event) => event.mode))],
+    badCount: group.failures.length,
+    lastBadTs: Number(lastBad.ts),
+    latest: latest.sort(compareEvents).at(-1),
+    resolved: pendingSkills.length === 0,
+    pendingSkills,
+    selectable: Boolean(word),
+    answers: [...new Set(group.failures.map((event) => event.input).filter(Boolean))]
+  };
+}
+function filterMistakeRows(rows, filters = {}) {
+  const q = normalizeWordLexeme(filters.query || "");
+  return rows.flatMap((original) => {
+    if (filters.from && original.date < filters.from || filters.to && original.date > filters.to) return [];
+    const failures = original.failures.filter((event) => (!filters.mode || event.mode === filters.mode || filters.mode === "review" && event.mode.startsWith("review-")) && (!filters.book || eventBooks(event, original.word).includes(filters.book)));
+    if (!failures.length) return [];
+    const row = failures.length === original.failures.length ? original : describeRow({ date: original.date, wordId: original.wordId, failures }, original.word, original.latestEvents);
+    if (filters.status === "pending" && row.resolved || filters.status === "answered" && !row.resolved) return [];
+    if (q && !normalizeWordLexeme(row.en).includes(q) && !row.zh.toLowerCase().includes(q)) return [];
+    return [row];
+  });
+}
+function mistakeSummary(rows) {
+  const ids = new Set(rows.map((row) => row.wordId));
+  return {
+    words: ids.size,
+    errors: rows.reduce((sum, row) => sum + row.badCount, 0),
+    days: new Set(rows.map((row) => row.date)).size,
+    pending: new Set(rows.filter((row) => !row.resolved).map((row) => row.wordId)).size
+  };
+}
+function groupMistakeRows(rows, by = "date") {
+  const groups = /* @__PURE__ */ new Map();
+  for (const row of rows) for (const key of by === "book" ? row.books : [row.date]) {
+    if (!groups.has(key)) groups.set(key, []);
+    const failures = by === "book" ? row.failures.filter((event) => eventBooks(event, row.word).includes(key)) : row.failures;
+    if (!failures.length) continue;
+    groups.get(key).push(failures.length === row.failures.length ? row : describeRow({ date: row.date, wordId: row.wordId, failures }, row.word, row.latestEvents));
+  }
+  return [...groups].map(([key, items]) => ({ key, rows: items, ...mistakeSummary(items) })).sort((a, b) => by === "date" ? b.key.localeCompare(a.key) : b.words - a.words || a.key.localeCompare(b.key));
+}
+function latestMistakeDay(rows, today, beforeToday = false) {
+  return rows.map((row) => row.date).filter((date) => beforeToday ? date < today : date <= today).sort().at(-1) || "";
+}
+function selectedMistakeWords(state2, selectedIds) {
+  const words = new Map((state2.words || []).map((word) => [word.id, word]));
+  return [...new Set(selectedIds)].map((id3) => words.get(id3)).filter(Boolean);
+}
+function mistakesToCSV(rows) {
+  const cell = (value) => {
+    let text = String(value ?? "");
+    if (/^[\s]*[=+@-]/.test(text)) text = `'${text}`;
+    return `"${text.replace(/"/g, '""')}"`;
+  };
+  const header = ["\u9519\u8BEF\u65E5\u671F", "\u82F1\u6587", "\u4E2D\u6587", "\u6240\u5C5E\u8BCD\u4E66", "\u5F53\u65F6\u7EC3\u4E60\u8BCD\u4E66", "\u8BB0\u5F55\u6A21\u5F0F", "\u9519\u8BEF\u6B21\u6570", "\u6700\u65B0\u72B6\u6001", "\u6700\u8FD1\u5224\u65AD\u65F6\u95F4", "\u66FE\u8F93\u5165\u7684\u9519\u8BEF\u7B54\u6848", "\u5F52\u5C5E\u4F9D\u636E"];
+  const lines = rows.map((row) => [
+    row.date,
+    row.en,
+    row.zh,
+    row.books.join("\uFF1B"),
+    row.studyBooks.join("\uFF1B"),
+    row.modes.map((mode) => MISTAKE_MODE_LABELS[mode]).join("\uFF1B"),
+    row.badCount,
+    row.resolved ? "\u6700\u8FD1\u5DF2\u7B54\u5BF9\uFF08\u4E0D\u4EE3\u8868\u957F\u671F\u638C\u63E1\uFF09" : "\u6700\u8FD1\u4ECD\u9519\uFF0F\u5F85\u590D\u4E60",
+    row.latest?.ts ? new Date(Number(row.latest.ts)).toISOString() : "",
+    row.answers.join("\uFF1B"),
+    row.inferredBooks ? "\u542B\u6309\u5F53\u524D\u5F52\u5C5E\u8865\u5145\u7684\u65E7\u8BB0\u5F55" : "\u4F5C\u7B54\u65F6\u5FEB\u7167"
+  ]);
+  return "\uFEFF" + [header, ...lines].map((row) => row.map(cell).join(",")).join("\r\n");
 }
 
 // node_modules/ts-fsrs/dist/index.mjs
@@ -449,10 +696,10 @@ var BasicLearningStepsStrategy = (params, state2, cur_step) => {
   return result;
 };
 function DefaultInitSeedStrategy() {
-  const time = this.review_time.getTime();
+  const time2 = this.review_time.getTime();
   const reps = this.current.reps;
   const mul = this.current.difficulty * this.current.stability;
-  return `${time}_${reps}_${mul}`;
+  return `${time2}_${reps}_${mul}`;
 }
 var StrategyMode = /* @__PURE__ */ ((StrategyMode2) => {
   StrategyMode2["SCHEDULER"] = "Scheduler";
@@ -1929,14 +2176,14 @@ var FSRS = class extends FSRSAlgorithm {
    * console.log(results_short)
    * ```
    */
-  reschedule(current_card, reviews = [], options = {}) {
+  reschedule(current_card, reviews = [], options2 = {}) {
     const {
       recordLogHandler,
       reviewsOrderBy,
       skipManual = true,
       now = /* @__PURE__ */ new Date(),
       update_memory_state: updateMemoryState = false
-    } = options;
+    } = options2;
     if (reviewsOrderBy && typeof reviewsOrderBy === "function") {
       reviews.sort(reviewsOrderBy);
     }
@@ -1945,7 +2192,7 @@ var FSRS = class extends FSRSAlgorithm {
     }
     const rescheduleSvc = new Reschedule(this);
     const collections = rescheduleSvc.reschedule(
-      options.first_card || createEmptyCard(),
+      options2.first_card || createEmptyCard(),
       reviews
     );
     const len = collections.length;
@@ -2037,62 +2284,6 @@ function retrievability(card, now = Date.now(), retention = 0.9) {
   } catch {
     return 0;
   }
-}
-
-// src/studyday.js
-var STUDY_UTC_OFFSET_HOURS = 8;
-var STUDY_DAY_GRACE_END_HOUR = 2;
-var OFFSET_MS = STUDY_UTC_OFFSET_HOURS * 36e5;
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-function calendarDayKey(ts = Date.now()) {
-  const local = new Date(Number(ts) + OFFSET_MS);
-  return `${local.getUTCFullYear()}-${pad2(local.getUTCMonth() + 1)}-${pad2(local.getUTCDate())}`;
-}
-function shanghaiClock(ts = Date.now()) {
-  const local = new Date(Number(ts) + OFFSET_MS);
-  return {
-    year: local.getUTCFullYear(),
-    month: local.getUTCMonth() + 1,
-    day: local.getUTCDate(),
-    hour: local.getUTCHours(),
-    minute: local.getUTCMinutes(),
-    second: local.getUTCSeconds()
-  };
-}
-function isGraceWindow(ts = Date.now()) {
-  const { hour } = shanghaiClock(ts);
-  return hour >= 0 && hour < STUDY_DAY_GRACE_END_HOUR;
-}
-function studyDayParts(key = calendarDayKey()) {
-  const [year, month, day] = String(key).split("-").map(Number);
-  return { year, month, day };
-}
-function formatDayKey(year, month, day) {
-  return `${year}-${pad2(month)}-${pad2(day)}`;
-}
-function addStudyDays(key, amount) {
-  const { year, month, day } = studyDayParts(key);
-  const d = new Date(Date.UTC(year, month - 1, day + Number(amount || 0), 12));
-  return formatDayKey(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
-}
-function studyDayStart(key = calendarDayKey()) {
-  const { year, month, day } = studyDayParts(key);
-  return Date.UTC(year, month - 1, day, -STUDY_UTC_OFFSET_HOURS, 0, 0, 0);
-}
-function studyDayEnd(key = calendarDayKey()) {
-  return studyDayStart(addStudyDays(key, 1)) - 1;
-}
-function calendarDate(key = calendarDayKey()) {
-  const { year, month, day } = studyDayParts(key);
-  return new Date(Date.UTC(year, month - 1, day, 12));
-}
-function calendarKey(date) {
-  return formatDayKey(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
-}
-function studyDayLabel() {
-  return "\u4E1C\u516B\u533A \xB7 24:00 \u6B63\u5E38\u6362\u65E5\uFF1B\u672A\u5B8C\u6210\u53EF\u5EF6\u7EED\u5230 02:00";
 }
 
 // src/sentencebooks.js
@@ -2467,10 +2658,10 @@ var TOKEN_RE = /[A-Za-z]+\d+[A-Za-z0-9-]*|\d+[A-Za-z]+(?:-[A-Za-z0-9]+)*|(?:[$£
 function normalizeToken(value) {
   return String(value || "").trim().toLowerCase().replace(/’/g, "'").replace(/\s+/g, " ");
 }
-function tokenizeEnglish(text, options = {}) {
+function tokenizeEnglish(text, options2 = {}) {
   const words = String(text || "").match(TOKEN_RE) || [];
   const normalized = words.map((word) => word.replace(/’/g, "'").replace(/\s+/g, " "));
-  if (!options.unique) return normalized;
+  if (!options2.unique) return normalized;
   const seen = /* @__PURE__ */ new Set();
   return normalized.filter((word) => {
     const key = normalizeToken(word);
@@ -3431,7 +3622,7 @@ function storageContext(env = {}) {
 function hasUserData(state2) {
   if (!state2 || typeof state2 !== "object") return false;
   if ((state2.texts || []).length) return true;
-  if ((state2.events || []).length) return true;
+  if ((state2.events || []).length || (state2.vocabPracticeEvents || []).length) return true;
   if ((state2.activities || []).length) return true;
   if ((state2.simpleWords || []).length || (state2.errorBooks || []).length) return true;
   if (Object.keys(state2.dailyPlans || {}).length) return true;
@@ -3462,6 +3653,7 @@ function defaultState() {
     version: STATE_VERSION,
     words: [],
     events: [],
+    vocabPracticeEvents: [],
     texts: [],
     sentenceBooks: [],
     sentenceSession: null,
@@ -3525,6 +3717,10 @@ function normalizeEvent(event, index, preserveDate) {
     mode: event.mode === "type" ? "type" : "listen",
     result: event.result || event.res || "bad",
     originalResult: event.originalResult || event.result || event.res || "bad",
+    ...Array.isArray(event.booksSnapshot) ? { booksSnapshot: [...new Set(event.booksSnapshot.filter((value) => typeof value === "string"))] } : {},
+    ...Array.isArray(event.studyBooks) ? { studyBooks: [...new Set(event.studyBooks.filter((value) => typeof value === "string"))] } : {},
+    ...typeof event.enSnapshot === "string" ? { enSnapshot: event.enSnapshot } : {},
+    ...typeof event.zhSnapshot === "string" ? { zhSnapshot: event.zhSnapshot } : {},
     cold: false,
     attempt: 1,
     source: event.source || null,
@@ -3631,6 +3827,7 @@ function normalizeState(input) {
   const preserveDates = inputVersion >= 4;
   state2.words = (input?.words || []).map(normalizeWord).filter((w) => w.en);
   state2.events = reindexEvents((input?.events || []).map((e, i) => normalizeEvent(e, i, preserveDates)).filter((e) => e.wordId));
+  state2.vocabPracticeEvents = normalizePracticeEvents(input?.vocabPracticeEvents);
   state2.texts = normalizeTexts(input?.texts);
   state2.sentenceBooks = normalizeSentenceBooks(input?.sentenceBooks);
   state2.sentenceSession = normalizeSentenceSession(input?.sentenceSession);
@@ -3791,7 +3988,7 @@ function clone(value) {
   return value == null ? value : structuredClone(value);
 }
 var SET_ARRAY_PATHS = /* @__PURE__ */ new Set(["simpleWords", "errorBooks"]);
-var ID_ARRAY_PATHS = /* @__PURE__ */ new Set(["words", "texts", "activities", "events"]);
+var ID_ARRAY_PATHS = /* @__PURE__ */ new Set(["words", "texts", "activities", "events", "vocabPracticeEvents"]);
 function isDerivedPath(path) {
   return /^words\{[^}]+\}\.card(?:\.|$)/.test(path) || /^events\{[^}]+\}\.(?:cold|attempt)$/.test(path);
 }
@@ -4089,7 +4286,7 @@ function setStatus(status, message) {
 }
 function busyWithStudy() {
   if (typeof document === "undefined") return false;
-  if (document.querySelector(".immersive")) return true;
+  if (document.querySelector('.immersive, [data-cloud-editing="true"]')) return true;
   const active = document.activeElement;
   return Boolean(active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName) && !active.closest("#lwCloudMask"));
 }
@@ -4493,19 +4690,242 @@ if (typeof window !== "undefined" && typeof document !== "undefined") queueMicro
   setStatus("error", error?.message || "\u4E91\u540C\u6B65\u521D\u59CB\u5316\u5931\u8D25");
 }));
 
+// src/mistakes-ui.js
+var UI_KEY = "listenwrite-mistakes-view-v1";
+var esc2 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+var time = (ts) => Number(ts) > 0 ? new Date(Number(ts)).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "\u2014";
+var options = (items, selected) => items.map(([value, label]) => `<option value="${esc2(value)}" ${value === selected ? "selected" : ""}>${esc2(label)}</option>`).join("");
+function createMistakesUI(host) {
+  let filters = null, selected = /* @__PURE__ */ new Map(), limit = 80, run = null;
+  function remember() {
+    try {
+      localStorage.setItem(UI_KEY, JSON.stringify({ filters, selected: [...selected] }));
+    } catch {
+    }
+  }
+  function initialize(rows) {
+    if (filters) return;
+    const today = host.today(), date = latestMistakeDay(rows, today, true) || latestMistakeDay(rows, today) || today;
+    filters = { from: date, to: date, book: "", mode: "", status: "", query: "" };
+    try {
+      const saved = JSON.parse(localStorage.getItem(UI_KEY) || "null");
+      if (saved?.filters && typeof saved.filters === "object") for (const key of Object.keys(filters)) {
+        if (typeof saved.filters[key] === "string") filters[key] = saved.filters[key];
+      }
+      if (Array.isArray(saved?.selected)) selected = new Map(saved.selected.filter((pair) => Array.isArray(pair) && typeof pair[0] === "string" && pair[1] && typeof pair[1] === "object"));
+    } catch {
+    }
+  }
+  const currentWord = () => (host.state().words || []).find((word) => word.id === run?.ids[run.index]);
+  function selectRows(rows) {
+    for (const row of rows.filter((row2) => row2.selectable)) {
+      const previous = selected.get(row.wordId);
+      selected.set(row.wordId, { dates: [.../* @__PURE__ */ new Set([...previous?.dates || [], row.date])], books: [.../* @__PURE__ */ new Set([...previous?.books || [], ...row.books])] });
+    }
+    remember();
+  }
+  function updateSelection() {
+    document.querySelectorAll("[data-mistake-word]").forEach((box) => {
+      box.checked = selected.has(box.dataset.mistakeWord);
+    });
+    const panel = document.getElementById("mistakes-page");
+    if (panel) panel.dataset.cloudEditing = selected.size ? "true" : "false";
+    const label = document.getElementById("mistakeSelectedCount");
+    if (label) label.textContent = `\u5DF2\u9009 ${selected.size} \u4E2A\u8BCD\uFF08\u8DE8\u65E5\u671F\u53BB\u91CD\uFF0C\u5207\u6362\u7B5B\u9009\u4FDD\u7559\u9009\u62E9\uFF09`;
+    for (const id3 of ["mistakeListen", "mistakeSpelling"]) {
+      const button = document.getElementById(id3);
+      if (button) button.disabled = !selected.size;
+    }
+  }
+  function setFilters(patch) {
+    Object.assign(filters, patch);
+    limit = 80;
+    remember();
+    render2();
+  }
+  function render2() {
+    if (run) return renderRun();
+    const state2 = host.state(), { rows } = buildMistakeIndex(state2);
+    initialize(rows);
+    const existing = new Set((state2.words || []).map((word) => word.id));
+    for (const id3 of selected.keys()) if (!existing.has(id3)) selected.delete(id3);
+    const filtered = filterMistakeRows(rows, filters), summary = mistakeSummary(filtered);
+    const books = [...new Set(rows.flatMap((row) => row.books))].sort((a, b) => a.localeCompare(b));
+    const byBook = groupMistakeRows(filterMistakeRows(rows, { ...filters, book: "" }), "book");
+    const byDay = groupMistakeRows(filterMistakeRows(rows, { ...filters, from: "", to: "" }), "date");
+    const list = groupMistakeRows(filtered.slice(0, limit), "date").map((group) => `<section class="card mistake-day"><div class="space"><h2 class="section-title">${esc2(group.key)}</h2><button class="soft" data-select-day="${esc2(group.key)}">\u52FE\u9009\u8FD9\u5929\u7684\u7B5B\u9009\u7ED3\u679C</button></div>${group.rows.map((row) => `<article class="mistake-row"><label class="mistake-word"><input type="checkbox" data-mistake-word="${esc2(row.wordId)}" data-mistake-date="${esc2(row.date)}" ${selected.has(row.wordId) ? "checked" : ""} ${row.selectable ? "" : "disabled"}><span><b>${esc2(row.en)}</b><span class="mistake-meaning">${esc2(row.zh || "\u6682\u65E0\u4E2D\u6587")}</span></span></label><div class="row"><span class="tag bad">\u5F53\u5929\u9519 ${row.badCount} \u6B21</span><span class="tag ${row.resolved ? "good" : "bad"}">${row.resolved ? "\u6700\u8FD1\u5DF2\u7B54\u5BF9" : "\u6700\u8FD1\u4ECD\u9519\uFF0F\u5F85\u590D\u4E60"}</span>${!row.selectable ? '<span class="tag">\u539F\u8BCD\u5DF2\u5220\u9664\uFF0C\u4E0D\u53EF\u590D\u4E60</span>' : ""}</div><div class="small">\u6240\u5C5E\u8BCD\u4E66\uFF1A${row.books.map(esc2).join("\uFF1B")}</div>${row.studyBooks.length ? `<div class="small">\u5F53\u65F6\u7EC3\u4E60\uFF1A${row.studyBooks.map(esc2).join("\uFF1B")}</div>` : ""}<div class="small">${row.modes.map((mode) => MISTAKE_MODE_LABELS[mode]).map(esc2).join(" \xB7 ")} \xB7 \u6700\u8FD1\u5224\u65AD ${esc2(time(row.latest?.ts))}</div>${row.inferredBooks ? '<div class="small">\u65E7\u8BB0\u5F55\u672A\u4FDD\u5B58\u5F53\u65F6\u5F52\u5C5E\uFF0C\u6B64\u5904\u6309\u5F53\u524D\u8BCD\u5E93\u8865\u5145\u3002</div>' : ""}${row.answers.length ? `<div class="small">\u66FE\u5199\u6210\uFF1A${row.answers.map(esc2).join("\uFF1B")}</div>` : ""}<details class="details"><summary>\u67E5\u770B\u5F53\u5929\u9519\u8BEF\u8BB0\u5F55</summary>${row.failures.map((event) => `<div class="small">${esc2(time(event.ts))} \xB7 ${esc2(MISTAKE_MODE_LABELS[event.mode])}${event.input ? ` \xB7 \u8F93\u5165\uFF1A${esc2(event.input)}` : ""}</div>`).join("")}</details></article>`).join("")}</section>`).join("");
+    host.shell(`<div class="stack" id="mistakes-page"><section class="card hero"><h2>\u6309\u5929\u3001\u6309\u8BCD\u4E66\u6574\u7406\u9519\u8BCD</h2><p>\u9519\u8FC7\u5C31\u4FDD\u7559\u5728\u539F\u65E5\u671F\u6E05\u5355\u91CC\uFF0C\u540E\u6765\u7B54\u5BF9\u4E0D\u4F1A\u62B9\u6389\u5386\u53F2\u3002\u201C\u6700\u8FD1\u5DF2\u7B54\u5BF9\u201D\u4EC5\u8868\u793A\u76F8\u5173\u9898\u578B\u7684\u6700\u65B0\u7ED3\u679C\uFF0C\u4E0D\u7B49\u4E8E\u957F\u671F\u638C\u63E1\u3002</p><div class="row"><button class="soft" data-mistake-range="today">\u4ECA\u5929</button><button class="soft" data-mistake-range="yesterday">\u6628\u5929</button><button class="soft" data-mistake-range="previous">\u4E0A\u6B21\u9519\u8BCD</button><button class="soft" data-mistake-range="week">\u8FD1 7 \u5929</button><button class="soft" data-mistake-range="all">\u5168\u90E8\u5386\u53F2</button></div><div class="filtergrid" style="margin-top:12px"><label class="field">\u5F00\u59CB\u65E5\u671F<input id="mistakeFrom" type="date" value="${esc2(filters.from)}"></label><label class="field">\u7ED3\u675F\u65E5\u671F<input id="mistakeTo" type="date" value="${esc2(filters.to)}"></label><label class="field">\u6240\u5C5E\u8BCD\u4E66<select id="mistakeBook">${options([["", "\u5168\u90E8\u8BCD\u4E66"], ...books.map((book) => [book, book])], filters.book)}</select></label><label class="field">\u9519\u8BEF\u6765\u6E90<select id="mistakeMode">${options([["", "\u6240\u6709\u6A21\u5F0F"], ["listen", "\u6B63\u5F0F\u542C\u8BCD"], ["type", "\u4E2D\u6587\u624B\u6253"], ["free", "\u81EA\u7531\u542C"], ["review", "\u9519\u8BCD\u590D\u4E60"]], filters.mode)}</select></label><label class="field">\u6700\u8FD1\u72B6\u6001<select id="mistakeStatus">${options([["", "\u5168\u90E8\uFF0C\u5305\u62EC\u540E\u6765\u7B54\u5BF9\u7684"], ["pending", "\u6700\u8FD1\u4ECD\u9519\uFF0F\u5F85\u590D\u4E60"], ["answered", "\u6700\u8FD1\u5DF2\u7B54\u5BF9"]], filters.status)}</select></label><form id="mistakeSearchForm" class="field"><label for="mistakeQuery">\u641C\u7D22\u82F1\u6587\u6216\u4E2D\u6587</label><div class="row"><input id="mistakeQuery" value="${esc2(filters.query)}" placeholder="\u5982 leader / \u9886\u5BFC\u8005"><button class="soft" type="submit">\u641C\u7D22</button></div></form></div>${filters.from && filters.to && filters.from > filters.to ? '<p class="bad">\u5F00\u59CB\u65E5\u671F\u4E0D\u80FD\u665A\u4E8E\u7ED3\u675F\u65E5\u671F\u3002</p>' : ""}<div class="grid4" style="margin-top:12px"><div class="statbox"><b>${summary.words}</b><span>\u7B5B\u9009\u5185\u53BB\u91CD\u9519\u8BCD</span></div><div class="statbox"><b>${summary.errors}</b><span>\u9519\u8BEF\u6B21\u6570</span></div><div class="statbox"><b>${summary.days}</b><span>\u6709\u9519\u8BCD\u7684\u5929\u6570</span></div><div class="statbox"><b>${summary.pending}</b><span>\u6700\u8FD1\u4ECD\u9519\u8BCD\u6570</span></div></div><details class="details"><summary>\u7EDF\u8BA1\u53E3\u5F84\u4E0E\u65E7\u8BB0\u5F55\u8BF4\u660E</summary><p class="small">\u6B63\u5F0F\u542C\u8BCD\u548C\u4E2D\u6587\u624B\u6253\u4ECE\u5DF2\u6709\u9010\u8BCD\u4E8B\u4EF6\u6574\u7406\u3002\u65B0\u7248\u5F00\u59CB\u4FDD\u5B58\u81EA\u7531\u542C\u7684\u6BCF\u6B21\u719F\u6089\uFF0F\u4E0D\u719F\u6089\uFF1B\u65E7\u7248\u81EA\u7531\u542C\u6CA1\u6709\u843D\u76D8\u7684\u9519\u8BCD\u65E0\u6CD5\u8865\u56DE\u3002\u8FD9\u91CC\u7EDF\u8BA1\u72EC\u7ACB\u8BCD\u5E93\uFF0C\u4E0D\u628A\u6574\u53E5\u542C\u5199\u6216\u6570\u636E\u56FE\u6DF7\u7B97\u6210\u5355\u8BCD\u9519\u8BEF\u3002\u65B0\u8BB0\u5F55\u4FDD\u5B58\u4F5C\u7B54\u65F6\u7684\u8BCD\u4E66\u5F52\u5C5E\u3002\u4E00\u4E2A\u8BCD\u53EF\u5C5E\u4E8E\u591A\u672C\u4E66\uFF0C\u6240\u4EE5\u5404\u672C\u5C0F\u8BA1\u53EF\u80FD\u91CD\u53E0\uFF0C\u9876\u90E8\u603B\u6570\u548C\u52FE\u9009\u6309\u5355\u8BCD ID \u53BB\u91CD\u3002\u7EFF\u8272\u7279\u522B\u6CE8\u610F\u4ECD\u662F\u9644\u52A0\u5F52\u5C5E\uFF0C\u4E0D\u5F3A\u5236\u62C6\u6210\u65B0\u5355\u8BCD\u3002</p></details></section><section class="card"><details class="details" open><summary>\u6309\u8BCD\u4E66\u7EDF\u8BA1\uFF08\u70B9\u51FB\u7B5B\u9009\uFF09</summary><div class="row mistake-groups">${byBook.map((group) => `<button class="chip ${filters.book === group.key ? "on" : ""}" data-mistake-book="${esc2(group.key)}">${esc2(group.key)} \xB7 ${group.words} \u8BCD / ${group.errors} \u6B21</button>`).join("") || '<span class="small">\u5F53\u524D\u8303\u56F4\u6CA1\u6709\u9519\u8BCD</span>'}</div></details><details class="details"><summary>\u6309\u65E5\u671F\u7EDF\u8BA1\uFF08\u6700\u8FD1 30 \u4E2A\u9519\u8BEF\u65E5\uFF1B\u66F4\u65E9\u53EF\u7528\u65E5\u671F\u7B5B\u9009\uFF09</summary><div class="row mistake-groups">${byDay.slice(0, 30).map((group) => `<button class="chip" data-mistake-day="${esc2(group.key)}">${esc2(group.key)} \xB7 ${group.words} \u8BCD / ${group.errors} \u6B21</button>`).join("")}</div></details></section><section class="card mistake-selection"><b id="mistakeSelectedCount" aria-live="polite"></b><div class="row" style="margin-top:10px"><button id="mistakeSelectAll" class="soft">\u5168\u9009\u672C\u7B5B\u9009 \xB7 ${summary.words} \u8BCD</button><button id="mistakeClear" class="ghost">\u6E05\u7A7A\u9009\u62E9</button><button id="mistakeExport" class="soft" ${filtered.length ? "" : "disabled"}>\u5BFC\u51FA\u672C\u7B5B\u9009 CSV</button></div><div class="row" style="margin-top:10px"><button id="mistakeListen" class="primary">\u542C\u97F3\u590D\u4E60\u5DF2\u9009</button><button id="mistakeSpelling" class="soft">\u62FC\u5199\u590D\u4E60\u5DF2\u9009</button></div><div class="small">\u9009\u4E2D\u540E\u53EF\u91CD\u590D\u7EC3\uFF0C\u4E0D\u53D7\u201C\u4ECA\u5929\u5DF2\u901A\u8FC7\u201D\u9650\u5236\uFF1B\u4E0D\u4FEE\u6539 FSRS\uFF0C\u4E0D\u5360\u4ECA\u65E5\u8BA1\u5212\u540D\u989D\u3002\u5237\u65B0\u4F1A\u4FDD\u7559\u7B5B\u9009\u548C\u52FE\u9009\uFF0C\u5DF2\u63D0\u4EA4\u7684\u590D\u4E60\u7ED3\u679C\u968F\u5B8C\u6574\u5907\u4EFD\u548C\u4E91\u540C\u6B65\u4FDD\u5B58\u3002</div></section>${list || '<section class="card empty">\u8FD9\u7EC4\u7B5B\u9009\u6CA1\u6709\u9519\u8BCD\u3002\u53EF\u4EE5\u9009\u62E9\u5176\u4ED6\u65E5\u671F\u6216\u201C\u5168\u90E8\u5386\u53F2\u201D\u3002</section>'}${filtered.length > limit ? `<button id="mistakeMore" class="soft">\u7EE7\u7EED\u663E\u793A \xB7 \u5269\u4F59 ${filtered.length - limit} \u6761\u65E5\u671F\u8BB0\u5F55</button>` : ""}</div>`);
+    for (const [id3, key] of [["mistakeFrom", "from"], ["mistakeTo", "to"], ["mistakeBook", "book"], ["mistakeMode", "mode"], ["mistakeStatus", "status"]]) document.getElementById(id3).onchange = (e) => setFilters({ [key]: e.target.value });
+    document.getElementById("mistakeSearchForm").onsubmit = (e) => {
+      e.preventDefault();
+      setFilters({ query: document.getElementById("mistakeQuery").value.trim() });
+    };
+    document.querySelectorAll("[data-mistake-range]").forEach((button) => button.onclick = () => {
+      const today = host.today(), range = button.dataset.mistakeRange;
+      const previous = latestMistakeDay(filterMistakeRows(rows, { book: filters.book, mode: filters.mode }), today, true) || latestMistakeDay(rows, today) || today;
+      const from = range === "today" ? today : range === "yesterday" ? addStudyDays(today, -1) : range === "previous" ? previous : range === "week" ? addStudyDays(today, -6) : "";
+      setFilters({ from, to: range === "all" ? "" : range === "week" ? today : from });
+    });
+    document.querySelectorAll("[data-mistake-book]").forEach((button) => button.onclick = () => setFilters({ book: button.dataset.mistakeBook }));
+    document.querySelectorAll("[data-mistake-day]").forEach((button) => button.onclick = () => setFilters({ from: button.dataset.mistakeDay, to: button.dataset.mistakeDay }));
+    document.querySelectorAll("[data-select-day]").forEach((button) => button.onclick = () => {
+      selectRows(filtered.filter((row) => row.date === button.dataset.selectDay));
+      updateSelection();
+    });
+    document.querySelectorAll("[data-mistake-word]").forEach((box) => box.onchange = () => {
+      if (box.checked) selectRows(filtered.filter((row) => row.wordId === box.dataset.mistakeWord));
+      else {
+        selected.delete(box.dataset.mistakeWord);
+        remember();
+      }
+      updateSelection();
+    });
+    document.getElementById("mistakeSelectAll").onclick = () => {
+      selectRows(filtered);
+      updateSelection();
+    };
+    document.getElementById("mistakeClear").onclick = () => {
+      selected.clear();
+      remember();
+      updateSelection();
+    };
+    document.getElementById("mistakeExport").onclick = () => host.download(`listenwrite-mistakes-${filters.from || "all"}-${filters.to || "all"}.csv`, mistakesToCSV(filtered), "text/csv;charset=utf-8");
+    document.getElementById("mistakeListen").onclick = () => startReview("review-listen");
+    document.getElementById("mistakeSpelling").onclick = () => startReview("review-spelling");
+    const more = document.getElementById("mistakeMore");
+    if (more) more.onclick = () => {
+      limit += 80;
+      render2();
+    };
+    updateSelection();
+  }
+  function startReview(mode, ids = [...selected.keys()]) {
+    const words = selectedMistakeWords(host.state(), ids);
+    if (!words.length) return host.toast("\u5148\u52FE\u9009\u9700\u8981\u590D\u4E60\u7684\u8BCD");
+    run = {
+      mode,
+      ids: words.map((word) => word.id),
+      index: 0,
+      input: "",
+      event: null,
+      outcomes: /* @__PURE__ */ new Map(),
+      skipped: 0,
+      sessionId: `mr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`,
+      activityId: host.startActivity("mistake", mode === "review-listen" ? "\u9519\u8BCD\u542C\u97F3\u590D\u4E60" : "\u9519\u8BCD\u62FC\u5199\u590D\u4E60", [])
+    };
+    renderRun();
+    host.speak(words[0].en);
+  }
+  function judge(result) {
+    const word = currentWord();
+    if (!word || run.done) return;
+    if (run.event) editVocabularyPractice(host.state(), run.event.id, result);
+    else run.event = recordVocabularyPractice(host.state(), word, run.mode, result, {
+      date: host.today(),
+      input: run.input,
+      sessionId: run.sessionId,
+      sourceDates: selected.get(word.id)?.dates || []
+    });
+    run.outcomes.set(word.id, result);
+    host.touchActivity(run.activityId);
+    host.persist();
+    renderRun();
+  }
+  function next(skip = false) {
+    if (!run || run.done || !run.event && !skip) return;
+    if (skip && !run.event) run.skipped++;
+    run.index++;
+    run.event = null;
+    run.input = "";
+    if (run.index >= run.ids.length) {
+      run.done = true;
+      host.finishActivity(run.activityId);
+    }
+    renderRun();
+    const word = currentWord();
+    if (word && !run.done) host.speak(word.en);
+  }
+  function exit() {
+    if (run && !run.done) host.finishActivity(run.activityId);
+    run = null;
+    host.stopSpeech();
+    render2();
+  }
+  function renderRun() {
+    if (!run) return render2();
+    if (run.done) {
+      const wrong = [...run.outcomes].filter(([, result]) => result === "bad").map(([id3]) => id3);
+      host.root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><h2>\u8FD9\u8F6E\u9519\u8BCD\u590D\u4E60\u5B8C\u6210</h2><p>\u7B54\u5BF9 ${run.outcomes.size - wrong.length} \xB7 \u4ECD\u9519 ${wrong.length} \xB7 \u8DF3\u8FC7 ${run.skipped}</p><p class="small">\u6BCF\u6B21\u5224\u65AD\u5DF2\u4FDD\u5B58\uFF1B\u539F\u6765\u65E5\u671F\u7684\u9519\u8BCD\u6E05\u5355\u4ECD\u5728\uFF0C\u4E0D\u6539 FSRS \u6216\u4ECA\u65E5\u8BA1\u5212\u3002</p><div class="row"><button id="mistakeRunBack" class="primary">\u8FD4\u56DE\u9519\u8BCD\u6E05\u5355</button>${wrong.length ? '<button id="mistakeRetry" class="soft">\u518D\u7EC3\u672C\u8F6E\u9519\u8BCD</button>' : ""}</div></div></div></main>`;
+      document.getElementById("mistakeRunBack").onclick = exit;
+      const retry = document.getElementById("mistakeRetry");
+      if (retry) retry.onclick = () => startReview(run.mode, wrong);
+      return;
+    }
+    const word = currentWord();
+    if (!word) return next(true);
+    const spelling = run.mode === "review-spelling", revealed = Boolean(run.event);
+    host.root.innerHTML = `<main class="immersive"><div class="studytop"><button id="mistakeRunBack" class="back" aria-label="\u8FD4\u56DE\u9519\u8BCD\u6E05\u5355">\u2039</button><div class="studyprogress">${spelling ? "\u9519\u8BCD\u62FC\u5199" : "\u9519\u8BCD\u542C\u97F3"} \xB7 ${run.index + 1}/${run.ids.length}</div></div><div class="studybody"><div class="small">\u53EA\u7EC3\u5DF2\u9009\u9519\u8BCD\uFF0C\u4E0D\u5F71\u54CD FSRS \u548C\u4ECA\u65E5\u540D\u989D</div><button id="mistakeSpeak" class="speaker" aria-label="\u91CD\u542C">\u25D6))</button>${revealed ? `<div class="word ${run.event.result === "good" ? "good" : "bad"}">${esc2(word.en)}</div><div class="meaning">${esc2(word.zh || "\u6682\u65E0\u4E2D\u6587")}</div>${spelling ? `<div class="typed"><b>\u4F60\u7684\u8F93\u5165</b><div>${esc2(run.input || "\uFF08\u7A7A\u767D\uFF09")}</div></div>` : ""}<div class="source-tags">${(word.sources || []).map((book) => `<span class="tag">${esc2(book)}</span>`).join("")}</div><div class="row" style="margin-top:16px"><button id="mistakeRejudge" class="soft">${run.event.result === "good" ? "\u6539\u5224\u9519\u8BEF" : "\u6539\u5224\u6B63\u786E"}</button><button id="mistakeNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>` : spelling ? `<form id="mistakeAnswerForm" class="mistake-answer"><label for="mistakeAnswer">\u8F93\u5165\u542C\u5230\u7684\u82F1\u6587\u5355\u8BCD\u6216\u8BCD\u7EC4</label><input id="mistakeAnswer" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc2(run.input)}"><button class="primary" type="submit">\u68C0\u67E5\u62FC\u5199</button></form>` : '<p>\u542C\u5230\u58F0\u97F3\uFF0C\u610F\u601D\u80FD\u76F4\u63A5\u51FA\u6765\u5417\uFF1F</p><div class="judges"><button id="mistakeGood" class="goodbtn">\u719F\u6089</button><button id="mistakeBad" class="badbtn">\u4E0D\u719F\u6089</button></div>'}${!revealed ? '<button id="mistakeSkip" class="ghost">\u8DF3\u8FC7\uFF0C\u4E0D\u8BA1\u9519\u8BEF</button>' : ""}</div></main>`;
+    host.mountTimer(run.activityId);
+    document.getElementById("mistakeRunBack").onclick = exit;
+    document.getElementById("mistakeSpeak").onclick = () => host.speak(word.en);
+    if (revealed) {
+      document.getElementById("mistakeRejudge").onclick = () => judge(run.event.result === "good" ? "bad" : "good");
+      document.getElementById("mistakeNext").onclick = () => next();
+    } else {
+      document.getElementById("mistakeSkip").onclick = () => next(true);
+      if (spelling) {
+        const input = document.getElementById("mistakeAnswer");
+        input.oninput = () => {
+          run.input = input.value;
+        };
+        document.getElementById("mistakeAnswerForm").onsubmit = (e) => {
+          e.preventDefault();
+          run.input = input.value;
+          judge(spellingMatches(run.input, word.en) ? "good" : "bad");
+        };
+        input.focus();
+      } else {
+        document.getElementById("mistakeGood").onclick = () => judge("good");
+        document.getElementById("mistakeBad").onclick = () => judge("bad");
+      }
+    }
+  }
+  function handleKeydown(event) {
+    if (!run || run.done || event.isComposing || event.repeat || ["INPUT", "TEXTAREA"].includes(event.target?.tagName)) return;
+    if (event.key === "Enter" && run.event) {
+      event.preventDefault();
+      next();
+    } else if (run.mode === "review-listen" && ["1", "2"].includes(event.key)) {
+      event.preventDefault();
+      judge(event.key === "1" ? "good" : "bad");
+    }
+  }
+  return {
+    render: render2,
+    handleKeydown,
+    isActive: () => Boolean(run),
+    activeActivityId: () => run && !run.done ? run.activityId : null,
+    reset() {
+      run = null;
+      filters = null;
+      selected = /* @__PURE__ */ new Map();
+    }
+  };
+}
+
 // src/wordtext-ui.js
-function importCleaningHtml(rows, esc3) {
+function importCleaningHtml(rows, esc4) {
   const cleaned = rows.filter((row) => row.cleaned);
   const rejected = rows.filter((row) => !row.valid);
   if (!cleaned.length && !rejected.length) return "";
-  return `<details class="details" open><summary>\u8BCD\u6761\u6E05\u6D17\uFF1A${cleaned.length} \u884C\u5DF2\u6E05\u7406 \xB7 ${rejected.length} \u884C\u4E0D\u5BFC\u5165</summary><div class="small">\u53EA\u6E05\u7406\u82F1\u6587\u8FB9\u754C\u6742\u5B57\u7B26\uFF0C\u4E2D\u6587\u91CA\u4E49\u3001\u8BCD\u6027\u3001\u6765\u6E90\u548C\u4F8B\u53E5\u4E0D\u505A\u5B57\u7B26\u5220\u6539\u3002\u65E0\u6CD5\u53EF\u9760\u5224\u65AD\u7684\u884C\u4F1A\u8DF3\u8FC7\u3002</div><div class="list">${[...cleaned, ...rejected].slice(0, 80).map((row) => `<div class="listitem"><code>${esc3(row.originalEn || "\uFF08\u7A7A\uFF09")}</code> \u2192 ${row.valid ? `<b>${esc3(row.en)}</b>` : `<span class="bad">\u8DF3\u8FC7\uFF1A${esc3(row.issue)}</span>`}</div>`).join("")}</div>${cleaned.length + rejected.length > 80 ? '<div class="small">\u8FD9\u91CC\u53EA\u663E\u793A\u524D 80 \u884C\uFF0C\u6E05\u6D17\u89C4\u5219\u4F1A\u5E94\u7528\u5230\u5168\u90E8\u5BFC\u5165\u884C\u3002</div>' : ""}</details>`;
+  return `<details class="details" open><summary>\u8BCD\u6761\u6E05\u6D17\uFF1A${cleaned.length} \u884C\u5DF2\u6E05\u7406 \xB7 ${rejected.length} \u884C\u4E0D\u5BFC\u5165</summary><div class="small">\u53EA\u6E05\u7406\u82F1\u6587\u8FB9\u754C\u6742\u5B57\u7B26\uFF0C\u4E2D\u6587\u91CA\u4E49\u3001\u8BCD\u6027\u3001\u6765\u6E90\u548C\u4F8B\u53E5\u4E0D\u505A\u5B57\u7B26\u5220\u6539\u3002\u65E0\u6CD5\u53EF\u9760\u5224\u65AD\u7684\u884C\u4F1A\u8DF3\u8FC7\u3002</div><div class="list">${[...cleaned, ...rejected].slice(0, 80).map((row) => `<div class="listitem"><code>${esc4(row.originalEn || "\uFF08\u7A7A\uFF09")}</code> \u2192 ${row.valid ? `<b>${esc4(row.en)}</b>` : `<span class="bad">\u8DF3\u8FC7\uFF1A${esc4(row.issue)}</span>`}</div>`).join("")}</div>${cleaned.length + rejected.length > 80 ? '<div class="small">\u8FD9\u91CC\u53EA\u663E\u793A\u524D 80 \u884C\uFF0C\u6E05\u6D17\u89C4\u5219\u4F1A\u5E94\u7528\u5230\u5168\u90E8\u5BFC\u5165\u884C\u3002</div>' : ""}</details>`;
 }
-function wordTextRepairHtml(state2, esc3) {
+function wordTextRepairHtml(state2, esc4) {
   const repaired = Object.values(state2.wordTextRepairs || {}).filter((row) => row && typeof row === "object");
   const review = wordTextReviewRows(state2);
   const duplicates = wordTextDuplicateGroups(state2);
   if (!repaired.length && !review.length) return "";
-  return `<section class="card"><h2 class="section-title">\u8BCD\u6761\u6742\u5B57\u7B26\u4FEE\u590D</h2><p class="small">\u5DF2\u6E05\u7406 ${repaired.length} \u9879\u3002\u5355\u8BCD ID\u3001\u5B66\u4E60\u8BB0\u5F55\u3001\u590D\u4E60\u5361\u7247\u548C\u8BCD\u4E66\u5F52\u5C5E\u4FDD\u6301\u4E0D\u53D8\uFF1B\u91CD\u540D\u8BCD\u4FDD\u7559\u5404\u81EA\u8BB0\u5F55\uFF0C\u4E0D\u81EA\u52A8\u5408\u5E76\u6216\u5220\u9664\u3002</p>${repaired.length ? `<details class="details"><summary>\u67E5\u770B\u4FEE\u6539\u524D\u540E</summary><div class="list">${repaired.slice(0, 80).map((row) => `<div class="listitem"><code>${esc3(row.before)}</code> \u2192 <b>${esc3(row.after)}</b></div>`).join("")}</div><button id="exportWordTextRepairs" class="soft">\u5BFC\u51FA\u5B8C\u6574\u4FEE\u590D\u8BB0\u5F55</button></details>` : ""}${review.length ? `<details class="details"><summary>\u4ECD\u9700\u68C0\u67E5 ${review.length} \u9879</summary><div class="small">\u8FD9\u4E9B\u539F\u8BCD\u6761\u6CA1\u6709\u5220\u9664\u3002\u53EF\u5728\u4E0B\u65B9\u8BCD\u5E93\u641C\u7D22\u540E\u5904\u7406\u3002</div>${review.slice(0, 40).map(({ word, check }) => `<div class="listitem">${esc3(word.en)} \xB7 ${esc3(check.issue)}</div>`).join("")}</details>` : ""}${duplicates.length ? `<div class="small">\u6E05\u6D17\u540E\u6709 ${duplicates.length} \u7EC4\u540C\u540D\u8BCD\uFF0C\u5DF2\u4FDD\u7559\u5168\u90E8 ID \u548C\u5386\u53F2\uFF0C\u672A\u81EA\u52A8\u5408\u5E76\u3002</div>` : ""}</section>`;
+  return `<section class="card"><h2 class="section-title">\u8BCD\u6761\u6742\u5B57\u7B26\u4FEE\u590D</h2><p class="small">\u5DF2\u6E05\u7406 ${repaired.length} \u9879\u3002\u5355\u8BCD ID\u3001\u5B66\u4E60\u8BB0\u5F55\u3001\u590D\u4E60\u5361\u7247\u548C\u8BCD\u4E66\u5F52\u5C5E\u4FDD\u6301\u4E0D\u53D8\uFF1B\u91CD\u540D\u8BCD\u4FDD\u7559\u5404\u81EA\u8BB0\u5F55\uFF0C\u4E0D\u81EA\u52A8\u5408\u5E76\u6216\u5220\u9664\u3002</p>${repaired.length ? `<details class="details"><summary>\u67E5\u770B\u4FEE\u6539\u524D\u540E</summary><div class="list">${repaired.slice(0, 80).map((row) => `<div class="listitem"><code>${esc4(row.before)}</code> \u2192 <b>${esc4(row.after)}</b></div>`).join("")}</div><button id="exportWordTextRepairs" class="soft">\u5BFC\u51FA\u5B8C\u6574\u4FEE\u590D\u8BB0\u5F55</button></details>` : ""}${review.length ? `<details class="details"><summary>\u4ECD\u9700\u68C0\u67E5 ${review.length} \u9879</summary><div class="small">\u8FD9\u4E9B\u539F\u8BCD\u6761\u6CA1\u6709\u5220\u9664\u3002\u53EF\u5728\u4E0B\u65B9\u8BCD\u5E93\u641C\u7D22\u540E\u5904\u7406\u3002</div>${review.slice(0, 40).map(({ word, check }) => `<div class="listitem">${esc4(word.en)} \xB7 ${esc4(check.issue)}</div>`).join("")}</details>` : ""}${duplicates.length ? `<div class="small">\u6E05\u6D17\u540E\u6709 ${duplicates.length} \u7EC4\u540C\u540D\u8BCD\uFF0C\u5DF2\u4FDD\u7559\u5168\u90E8 ID \u548C\u5386\u53F2\uFF0C\u672A\u81EA\u52A8\u5408\u5E76\u3002</div>` : ""}</section>`;
 }
 function bindWordTextRepair(state2, download2) {
   const button = document.getElementById("exportWordTextRepairs");
@@ -4605,6 +5025,10 @@ function recordAttempt(state2, word, mode, result, context = {}) {
     originalResult: result,
     cold,
     attempt,
+    booksSnapshot: [...new Set((word.sources || []).filter((value) => typeof value === "string"))],
+    studyBooks: [...new Set((context.studyBooks || []).filter((value) => typeof value === "string"))],
+    enSnapshot: String(word.en || ""),
+    zhSnapshot: String(word.zh || ""),
     source: context.source || null,
     sentence: context.sentence || null,
     editedAt: null
@@ -4783,15 +5207,15 @@ function syncSequentialTotals(plan) {
   plan.reviewTarget = plan.carryReviewIds.length + (plan.bookSegments || []).reduce((sum, segment) => sum + Math.max(0, Number(segment.reviewTarget) || 0), 0);
   plan.books = (plan.bookSegments || []).map((segment) => segment.book).filter(Boolean);
 }
-function ensureDailyPlan(state2, options = {}) {
-  const date = options.date || activeStudyDayKey(state2);
+function ensureDailyPlan(state2, options2 = {}) {
+  const date = options2.date || activeStudyDayKey(state2);
   let plan = state2.dailyPlans[date];
   const before = planContentSnapshot(plan);
   if (!plan) {
     plan = state2.dailyPlans[date] = {
       date,
       mode: state2.settings.todayPlanMode === "sequential" ? "sequential" : "mixed",
-      books: [...options.books ?? state2.settings.todayBooks ?? []],
+      books: [...options2.books ?? state2.settings.todayBooks ?? []],
       newTarget: Math.max(0, Number(state2.settings.defaultNewTarget) || 0),
       reviewTarget: Math.max(0, Number(state2.settings.defaultReviewTarget) || 0),
       newIds: [],
@@ -4805,21 +5229,21 @@ function ensureDailyPlan(state2, options = {}) {
       updatedAt: Date.now()
     };
   }
-  if (options.mode === "mixed" && plan.mode !== "mixed") {
-    convertPlanToMixed(state2, plan, options.books ?? plan.books);
+  if (options2.mode === "mixed" && plan.mode !== "mixed") {
+    convertPlanToMixed(state2, plan, options2.books ?? plan.books);
   }
   if (plan.mode === "sequential") {
     syncSequentialTotals(plan);
     return touchPlanIfChanged(plan, before);
   }
-  if (Object.prototype.hasOwnProperty.call(options, "books")) reconcileScope(state2, plan, options.books || []);
+  if (Object.prototype.hasOwnProperty.call(options2, "books")) reconcileScope(state2, plan, options2.books || []);
   seedTodayFromListenHistory(state2, plan);
   normalizeMixedPlanIdentity(state2, plan);
   const minNew = attemptedCount(state2, plan.newIds, plan.date);
   const minReview = attemptedCount(state2, plan.reviewIds, plan.date);
-  if (options.newTarget != null) plan.newTarget = Math.max(minNew, Math.max(0, Number(options.newTarget) || 0));
+  if (options2.newTarget != null) plan.newTarget = Math.max(minNew, Math.max(0, Number(options2.newTarget) || 0));
   else plan.newTarget = Math.max(minNew, Number(plan.newTarget) || 0);
-  if (options.reviewTarget != null) plan.reviewTarget = Math.max(minReview, Math.max(0, Number(options.reviewTarget) || 0));
+  if (options2.reviewTarget != null) plan.reviewTarget = Math.max(minReview, Math.max(0, Number(options2.reviewTarget) || 0));
   else plan.reviewTarget = Math.max(minReview, Number(plan.reviewTarget) || 0);
   plan.newIds = restoreUntouchedNewRandomOrder(state2, plan.newIds, plan.date, plan.books, plan.drawNonce);
   plan.newIds = trimIdsToTarget(state2, plan.newIds, plan.date, plan.newTarget);
@@ -5351,6 +5775,7 @@ function deleteWordEverywhere(state2, wordId) {
   const lexeme = normalizeLexeme(word.en);
   state2.words = state2.words.filter((w) => w.id !== wordId);
   state2.events = (state2.events || []).filter((event) => event.wordId !== wordId);
+  if (Array.isArray(state2.vocabPracticeEvents)) state2.vocabPracticeEvents = state2.vocabPracticeEvents.filter((event) => event.wordId !== wordId);
   state2.simpleWords = (state2.simpleWords || []).filter((value) => normalizeLexeme(value) !== lexeme);
   for (const plan of Object.values(state2.dailyPlans || {})) {
     plan.newIds = removeId(plan.newIds, wordId);
@@ -5462,7 +5887,7 @@ function createDataChartUI(deps) {
     shell: shell2,
     persist: persist2,
     toast: toast2,
-    esc: esc3,
+    esc: esc4,
     speak: speak2,
     startActivity: startActivity2,
     touchActivity: touchActivity2,
@@ -5495,7 +5920,7 @@ function createDataChartUI(deps) {
     if (item.example) return item.example;
     return String(item.answer || "").replace(/\s*\/\s*/g, ", ").replace(/\s*\+\s*[A-Z][A-Z _/-]*/g, " ").replace(/\s+/g, " ").trim();
   }
-  function startSession(options) {
+  function startSession(options2) {
     const current = dc().session;
     if (current && !current.completedAt) {
       const ok = confirm("\u5F53\u524D\u8FD8\u6709\u4E00\u8F6E\u6CA1\u6709\u505A\u5B8C\u3002\u5F00\u59CB\u65B0\u4E00\u8F6E\u4F1A\u7ED3\u675F\u5F53\u524D\u4F1A\u8BDD\uFF0C\u4F46\u5DF2\u7ECF\u70B9\u8FC7\u7684\u201C\u4F1A / \u4E0D\u4F1A\u201D\u8BB0\u5F55\u90FD\u4F1A\u4FDD\u7559\u3002\u7EE7\u7EED\u5417\uFF1F");
@@ -5504,17 +5929,17 @@ function createDataChartUI(deps) {
       clearDataChartSession(dc());
     }
     const session2 = createDataChartSession(dc(), DATA_CHART_SEED, {
-      ...options,
+      ...options2,
       date: currentDayKey2(),
       now: Date.now()
     });
     if (!session2.itemIds.length || !session2.currentId) {
       clearDataChartSession(dc());
       persist2();
-      toast2(options.mode === "weak" ? "\u5F53\u524D\u6CA1\u6709\u5F3A\u5316\u4E2D\u7684\u6761\u76EE" : "\u8FD9\u7EC4\u6CA1\u6709\u9700\u8981\u7EC3\u7684\u6761\u76EE");
+      toast2(options2.mode === "weak" ? "\u5F53\u524D\u6CA1\u6709\u5F3A\u5316\u4E2D\u7684\u6761\u76EE" : "\u8FD9\u7EC4\u6CA1\u6709\u9700\u8981\u7EC3\u7684\u6761\u76EE");
       return;
     }
-    session2.activityId = startActivity2("datachart", options.label || "\u6570\u636E\u56FE", []);
+    session2.activityId = startActivity2("datachart", options2.label || "\u6570\u636E\u56FE", []);
     reveal = false;
     browseHome = false;
     persist2();
@@ -5565,7 +5990,7 @@ function createDataChartUI(deps) {
     if (!pickerOpen) return "";
     const learned = new Set(dataChartLearnedSectionIds(dc(), DATA_CHART_SEED));
     const rows = sections().filter((section) => learned.has(section.id));
-    return `<section class="card dc-picker"><div class="space"><div><h2 class="section-title">\u6309\u5C0F\u8282\u590D\u4E60</h2><div class="small">\u9009\u4E2D\u7684\u5C0F\u8282\u4F1A\u5408\u5728\u4E00\u8D77\u968F\u673A\u51FA\u73B0\u3002</div></div><button id="dcClosePicker" class="ghost">\u6536\u8D77</button></div><div class="dc-checklist">${rows.map((section) => `<label><input type="checkbox" data-dc-pick="${esc3(section.id)}" ${pickedSections.has(section.id) ? "checked" : ""}> <span>${esc3(formatSectionLabel(section))}</span></label>`).join("") || '<div class="empty">\u8FD8\u6CA1\u6709\u5B66\u8FC7\u7684\u5C0F\u8282\u3002</div>'}</div><div class="row" style="margin-top:12px"><button id="dcStartPicked" class="primary" ${rows.length ? "" : "disabled"}>\u5F00\u59CB\u6DF7\u6392 \xB7 ${pickedSections.size} \u8282</button><button id="dcPickAll" class="soft" ${rows.length ? "" : "disabled"}>\u5168\u9009\u5DF2\u5B66</button><button id="dcPickNone" class="ghost">\u6E05\u7A7A</button></div></section>`;
+    return `<section class="card dc-picker"><div class="space"><div><h2 class="section-title">\u6309\u5C0F\u8282\u590D\u4E60</h2><div class="small">\u9009\u4E2D\u7684\u5C0F\u8282\u4F1A\u5408\u5728\u4E00\u8D77\u968F\u673A\u51FA\u73B0\u3002</div></div><button id="dcClosePicker" class="ghost">\u6536\u8D77</button></div><div class="dc-checklist">${rows.map((section) => `<label><input type="checkbox" data-dc-pick="${esc4(section.id)}" ${pickedSections.has(section.id) ? "checked" : ""}> <span>${esc4(formatSectionLabel(section))}</span></label>`).join("") || '<div class="empty">\u8FD8\u6CA1\u6709\u5B66\u8FC7\u7684\u5C0F\u8282\u3002</div>'}</div><div class="row" style="margin-top:12px"><button id="dcStartPicked" class="primary" ${rows.length ? "" : "disabled"}>\u5F00\u59CB\u6DF7\u6392 \xB7 ${pickedSections.size} \u8282</button><button id="dcPickAll" class="soft" ${rows.length ? "" : "disabled"}>\u5168\u9009\u5DF2\u5B66</button><button id="dcPickNone" class="ghost">\u6E05\u7A7A</button></div></section>`;
   }
   function sectionListHtml() {
     return (DATA_CHART_SEED.chapters || []).map((chapter) => {
@@ -5574,9 +5999,9 @@ function createDataChartUI(deps) {
         const learned = Boolean(p.completedAt);
         const status = learned ? p.unseen ? `\u5DF2\u5B66 \xB7 \u65B0\u589E ${p.unseen} \u6761\u672A\u5B66${p.reinforcing ? ` \xB7 \u5F3A\u5316 ${p.reinforcing}` : ""}` : p.reinforcing ? `\u5DF2\u5B66 \xB7 \u5F3A\u5316 ${p.reinforcing}` : "\u5DF2\u5B66" : p.mastered || p.reinforcing ? `\u5B66\u4E60\u4E2D \xB7 ${p.mastered}/${p.total}` : "\u672A\u5B66";
         const action = learned ? p.unseen ? "\u8865\u5B66" : "\u590D\u4E60" : p.mastered || p.reinforcing ? "\u7EE7\u7EED" : "\u5B66\u4E60";
-        return `<div class="dc-section-row"><div class="dc-section-main"><b>${esc3(formatSectionLabel(section))}</b><span class="small">${status}${p.reinforcing ? ` \xB7 ${p.reinforcing} \u6761 3/3` : ""}</span><div class="progressline"><i style="width:${p.total ? p.mastered * 100 / p.total : 0}%"></i></div></div><button class="soft" data-dc-section="${esc3(section.id)}">${action}</button></div>`;
+        return `<div class="dc-section-row"><div class="dc-section-main"><b>${esc4(formatSectionLabel(section))}</b><span class="small">${status}${p.reinforcing ? ` \xB7 ${p.reinforcing} \u6761 3/3` : ""}</span><div class="progressline"><i style="width:${p.total ? p.mastered * 100 / p.total : 0}%"></i></div></div><button class="soft" data-dc-section="${esc4(section.id)}">${action}</button></div>`;
       }).join("");
-      return `<details class="dc-chapter" ${chapter.num === "01" ? "open" : ""}><summary><b>${esc3(chapter.num)} ${esc3(chapter.title)}</b><span class="small">${chapter.sections.length} \u5C0F\u8282</span></summary><div class="dc-section-list">${rows}</div></details>`;
+      return `<details class="dc-chapter" ${chapter.num === "01" ? "open" : ""}><summary><b>${esc4(chapter.num)} ${esc4(chapter.title)}</b><span class="small">${chapter.sections.length} \u5C0F\u8282</span></summary><div class="dc-section-list">${rows}</div></details>`;
     }).join("");
   }
   function renderHome2() {
@@ -5590,8 +6015,8 @@ function createDataChartUI(deps) {
     const session2 = dc().session;
     const learnTarget = Math.max(0, Number(dc().settings.dailyLearnSections) || 0);
     const reviewTarget = Math.max(0, Number(dc().settings.dailyReviewSections) || 0);
-    const sessionCard = session2 && !session2.completedAt ? `<section class="card dc-resume"><div class="space"><div><b>\u672C\u8F6E\u8FD8\u6CA1\u505A\u5B8C</b><div class="small">${esc3(sessionTitle(session2))} \xB7 \u8FDB\u5EA6\u4F1A\u4E00\u76F4\u4FDD\u7559</div></div><button id="dcResume" class="primary">\u7EE7\u7EED\u672C\u8F6E</button></div></section>` : session2?.completedAt ? `<section class="card dc-resume"><div class="space"><div><b>\u4E0A\u4E00\u8F6E\u5DF2\u7ECF\u5B8C\u6210</b><div class="small">${esc3(sessionTitle(session2))}</div></div><button id="dcViewFinish" class="soft">\u67E5\u770B\u7ED3\u679C</button></div></section>` : "";
-    shell2(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6570\u636E\u56FE</h2><p>\u6309\u539F\u8D44\u6599\u5C0F\u8282\u80CC\u8868\u8FBE\uFF1A\u770B\u4E2D\u6587 \u2192 \u81EA\u5DF1\u56DE\u5FC6 \u2192 \u63ED\u6653 \u2192 \u4F1A / \u4E0D\u4F1A\u3002\u7B2C\u4E00\u6B21\u4F1A\u5C31\u901A\u8FC7\uFF1B\u70B9\u8FC7\u4E0D\u4F1A\u540E\u8981\u8FDE\u7EED\u4F1A 3 \u6B21\u3002</p></div><span class="tag">${all.length} \u5C0F\u8282</span></div><div class="grid4 dc-summary" style="margin-top:14px"><div class="statbox"><b>${day.learned} / ${learnTarget}</b><span>\u4ECA\u65E5\u65B0\u5B66\u5C0F\u8282</span></div><div class="statbox"><b>${day.reviewed} / ${reviewTarget}</b><span>\u4ECA\u65E5\u590D\u4E60\u5C0F\u8282</span></div><div class="statbox"><b>${learned.length} / ${all.length}</b><span>\u5DF2\u5B66\u5C0F\u8282</span></div><div class="statbox"><b class="${weak.length ? "bad" : ""}">${weak.length}</b><span>\u5F3A\u5316\u4E2D\u6761\u76EE</span></div></div><div class="small" style="margin-top:10px">\u4ECA\u65E5\u6570\u636E\u56FE ${activityMinutes3("datachart", date)} \u5206\u949F \xB7 \u6559\u6750\u7248\u672C ${esc3(DATA_CHART_SEED.contentVersion || "\u5185\u7F6E")}</div><div class="row" style="margin-top:14px"><button id="dcContinueLearn" class="primary">${next ? `\u7EE7\u7EED\u5B66\u4E60 \xB7 ${esc3(next.code)}` : "\u5168\u90E8\u5C0F\u8282\u5DF2\u5B66"}</button><button id="dcDailyReview" class="soft">\u7EE7\u7EED\u4ECA\u65E5\u590D\u4E60</button></div></section>${sessionCard}<section class="card"><h2 class="section-title">\u590D\u4E60\u5165\u53E3</h2><div class="quick" style="margin-top:12px"><button id="dcBySection"><span class="num">${learned.length}</span><b>\u6309\u5C0F\u8282\u590D\u4E60</b><span class="small">\u81EA\u5DF1\u9009\u591A\u4E2A\u5DF2\u5B66\u5C0F\u8282\uFF0C\u5408\u5E76\u6253\u4E71</span></button><button id="dcWeak"><span class="num">${weak.length}</span><b>\u5F3A\u5316\u4E2D</b><span class="small">\u53EA\u5237 0/3\u30011/3\u30012/3</span></button><button id="dcMixed"><span class="num">${dc().settings.mixedLimit || "\u5168"}</span><b>\u5DF2\u5B66\u8303\u56F4\u6DF7\u6392</b><span class="small">\u4ECE\u6240\u6709\u5DF2\u5B66\u5C0F\u8282\u968F\u673A\u62BD\u4E00\u8F6E</span></button></div></section>${pickerHtml()}<section class="card"><details class="details"><summary>\u6BCF\u65E5\u76EE\u6807\u4E0E\u6DF7\u6392\u6570\u91CF</summary><div class="grid3" style="margin-top:12px"><div class="field"><label>\u6BCF\u5929\u65B0\u5B66\u5C0F\u8282</label><input id="dcLearnTarget" type="number" min="0" max="10" value="${dc().settings.dailyLearnSections}"></div><div class="field"><label>\u6BCF\u5929\u590D\u4E60\u5C0F\u8282</label><input id="dcReviewTarget" type="number" min="0" max="20" value="${dc().settings.dailyReviewSections}"></div><div class="field"><label>\u5DF2\u5B66\u6DF7\u6392\u6BCF\u8F6E</label><select id="dcMixedLimit"><option value="20" ${dc().settings.mixedLimit === 20 ? "selected" : ""}>20 \u6761</option><option value="40" ${dc().settings.mixedLimit === 40 ? "selected" : ""}>40 \u6761</option><option value="60" ${dc().settings.mixedLimit === 60 ? "selected" : ""}>60 \u6761</option><option value="0" ${dc().settings.mixedLimit === 0 ? "selected" : ""}>\u5168\u90E8</option></select></div></div><div class="small" style="margin-top:9px">\u76EE\u6807\u53EA\u662F\u6BCF\u5929\u7684\u7EE9\u6548\u53C2\u8003\uFF0C\u4E0D\u4F1A\u9501\u4F4F\u4F60\u7EE7\u7EED\u5B66\u3002\u6559\u6750\u6587\u5B57\u548C\u5B66\u4E60\u8FDB\u5EA6\u5206\u5F00\u4FDD\u5B58\uFF1B\u4EE5\u540E\u6539\u82F1\u6587\u7B54\u6848\uFF0C\u53EA\u8981\u540C\u4E00\u6761\u76EE\u7684 ID \u4E0D\u53D8\uFF0C\u539F\u6765\u7684\u4F1A/\u4E0D\u4F1A\u548C 3/3 \u8FDB\u5EA6\u90FD\u4F1A\u4FDD\u7559\u3002</div></details></section><section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u5C0F\u8282</h2><div class="small">\u5B66\u4E60\u6309\u8D44\u6599\u987A\u5E8F\u63A8\u8FDB\uFF0C\u4E5F\u53EF\u4EE5\u81EA\u7531\u70B9\u5F00\u4EFB\u610F\u5C0F\u8282\u3002</div></div></div><div class="dc-curriculum" style="margin-top:12px">${sectionListHtml()}</div></section></div>`);
+    const sessionCard = session2 && !session2.completedAt ? `<section class="card dc-resume"><div class="space"><div><b>\u672C\u8F6E\u8FD8\u6CA1\u505A\u5B8C</b><div class="small">${esc4(sessionTitle(session2))} \xB7 \u8FDB\u5EA6\u4F1A\u4E00\u76F4\u4FDD\u7559</div></div><button id="dcResume" class="primary">\u7EE7\u7EED\u672C\u8F6E</button></div></section>` : session2?.completedAt ? `<section class="card dc-resume"><div class="space"><div><b>\u4E0A\u4E00\u8F6E\u5DF2\u7ECF\u5B8C\u6210</b><div class="small">${esc4(sessionTitle(session2))}</div></div><button id="dcViewFinish" class="soft">\u67E5\u770B\u7ED3\u679C</button></div></section>` : "";
+    shell2(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6570\u636E\u56FE</h2><p>\u6309\u539F\u8D44\u6599\u5C0F\u8282\u80CC\u8868\u8FBE\uFF1A\u770B\u4E2D\u6587 \u2192 \u81EA\u5DF1\u56DE\u5FC6 \u2192 \u63ED\u6653 \u2192 \u4F1A / \u4E0D\u4F1A\u3002\u7B2C\u4E00\u6B21\u4F1A\u5C31\u901A\u8FC7\uFF1B\u70B9\u8FC7\u4E0D\u4F1A\u540E\u8981\u8FDE\u7EED\u4F1A 3 \u6B21\u3002</p></div><span class="tag">${all.length} \u5C0F\u8282</span></div><div class="grid4 dc-summary" style="margin-top:14px"><div class="statbox"><b>${day.learned} / ${learnTarget}</b><span>\u4ECA\u65E5\u65B0\u5B66\u5C0F\u8282</span></div><div class="statbox"><b>${day.reviewed} / ${reviewTarget}</b><span>\u4ECA\u65E5\u590D\u4E60\u5C0F\u8282</span></div><div class="statbox"><b>${learned.length} / ${all.length}</b><span>\u5DF2\u5B66\u5C0F\u8282</span></div><div class="statbox"><b class="${weak.length ? "bad" : ""}">${weak.length}</b><span>\u5F3A\u5316\u4E2D\u6761\u76EE</span></div></div><div class="small" style="margin-top:10px">\u4ECA\u65E5\u6570\u636E\u56FE ${activityMinutes3("datachart", date)} \u5206\u949F \xB7 \u6559\u6750\u7248\u672C ${esc4(DATA_CHART_SEED.contentVersion || "\u5185\u7F6E")}</div><div class="row" style="margin-top:14px"><button id="dcContinueLearn" class="primary">${next ? `\u7EE7\u7EED\u5B66\u4E60 \xB7 ${esc4(next.code)}` : "\u5168\u90E8\u5C0F\u8282\u5DF2\u5B66"}</button><button id="dcDailyReview" class="soft">\u7EE7\u7EED\u4ECA\u65E5\u590D\u4E60</button></div></section>${sessionCard}<section class="card"><h2 class="section-title">\u590D\u4E60\u5165\u53E3</h2><div class="quick" style="margin-top:12px"><button id="dcBySection"><span class="num">${learned.length}</span><b>\u6309\u5C0F\u8282\u590D\u4E60</b><span class="small">\u81EA\u5DF1\u9009\u591A\u4E2A\u5DF2\u5B66\u5C0F\u8282\uFF0C\u5408\u5E76\u6253\u4E71</span></button><button id="dcWeak"><span class="num">${weak.length}</span><b>\u5F3A\u5316\u4E2D</b><span class="small">\u53EA\u5237 0/3\u30011/3\u30012/3</span></button><button id="dcMixed"><span class="num">${dc().settings.mixedLimit || "\u5168"}</span><b>\u5DF2\u5B66\u8303\u56F4\u6DF7\u6392</b><span class="small">\u4ECE\u6240\u6709\u5DF2\u5B66\u5C0F\u8282\u968F\u673A\u62BD\u4E00\u8F6E</span></button></div></section>${pickerHtml()}<section class="card"><details class="details"><summary>\u6BCF\u65E5\u76EE\u6807\u4E0E\u6DF7\u6392\u6570\u91CF</summary><div class="grid3" style="margin-top:12px"><div class="field"><label>\u6BCF\u5929\u65B0\u5B66\u5C0F\u8282</label><input id="dcLearnTarget" type="number" min="0" max="10" value="${dc().settings.dailyLearnSections}"></div><div class="field"><label>\u6BCF\u5929\u590D\u4E60\u5C0F\u8282</label><input id="dcReviewTarget" type="number" min="0" max="20" value="${dc().settings.dailyReviewSections}"></div><div class="field"><label>\u5DF2\u5B66\u6DF7\u6392\u6BCF\u8F6E</label><select id="dcMixedLimit"><option value="20" ${dc().settings.mixedLimit === 20 ? "selected" : ""}>20 \u6761</option><option value="40" ${dc().settings.mixedLimit === 40 ? "selected" : ""}>40 \u6761</option><option value="60" ${dc().settings.mixedLimit === 60 ? "selected" : ""}>60 \u6761</option><option value="0" ${dc().settings.mixedLimit === 0 ? "selected" : ""}>\u5168\u90E8</option></select></div></div><div class="small" style="margin-top:9px">\u76EE\u6807\u53EA\u662F\u6BCF\u5929\u7684\u7EE9\u6548\u53C2\u8003\uFF0C\u4E0D\u4F1A\u9501\u4F4F\u4F60\u7EE7\u7EED\u5B66\u3002\u6559\u6750\u6587\u5B57\u548C\u5B66\u4E60\u8FDB\u5EA6\u5206\u5F00\u4FDD\u5B58\uFF1B\u4EE5\u540E\u6539\u82F1\u6587\u7B54\u6848\uFF0C\u53EA\u8981\u540C\u4E00\u6761\u76EE\u7684 ID \u4E0D\u53D8\uFF0C\u539F\u6765\u7684\u4F1A/\u4E0D\u4F1A\u548C 3/3 \u8FDB\u5EA6\u90FD\u4F1A\u4FDD\u7559\u3002</div></details></section><section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u5C0F\u8282</h2><div class="small">\u5B66\u4E60\u6309\u8D44\u6599\u987A\u5E8F\u63A8\u8FDB\uFF0C\u4E5F\u53EF\u4EE5\u81EA\u7531\u70B9\u5F00\u4EFB\u610F\u5C0F\u8282\u3002</div></div></div><div class="dc-curriculum" style="margin-top:12px">${sectionListHtml()}</div></section></div>`);
     const learnBtn = document.getElementById("dcContinueLearn");
     learnBtn.disabled = !next;
     learnBtn.onclick = startNextLearning;
@@ -5663,8 +6088,8 @@ function createDataChartUI(deps) {
     const p = dataChartSessionProgress(dc());
     const itemState = dataChartItemProgress(dc(), item.id);
     const stateLabel = itemState.status === "reinforcing" ? dataChartItemLabel(dc(), item.id) : "";
-    const detail = reveal ? `<div class="dc-answer">${esc3(item.answer || "")}</div>${item.kind === "adjadv" && (item.adj || item.adv) ? `<div class="dc-pairs">${item.adj ? `<span>\u5F62\u5BB9\u8BCD \xB7 ${esc3(item.adj)}</span>` : ""}${item.adv ? `<span>\u526F\u8BCD \xB7 ${esc3(item.adv === "\u2014" ? "\u65E0" : item.adv)}</span>` : ""}</div>` : ""}${item.note ? `<div class="dc-note">${esc3(item.note)}</div>` : ""}${item.example ? `<div class="example">${esc3(item.example)}</div>` : ""}<div class="row dc-audio-row"><button id="dcSpeak" class="soft">\u{1F50A} ${item.example ? "\u542C\u6781\u77ED\u4F8B" : "\u542C\u7B54\u6848"}</button></div><div class="judges"><button id="dcGood" class="goodbtn">1\u3000\u4F1A</button><button id="dcBad" class="badbtn">2\u3000\u4E0D\u4F1A</button></div>` : `<div class="dc-cue">${esc3(item.cue || "")}</div><button id="dcReveal" class="primary dc-reveal">\u63ED\u6653\u7B54\u6848</button><div class="small">\u5148\u81EA\u5DF1\u8C03\u51FA\u82F1\u6587\uFF1B\u4E0D\u9700\u8981\u8F93\u5165\u6574\u4E32\u7B54\u6848\u3002</div>`;
-    root2.innerHTML = `<main class="immersive"><div class="studytop"><button id="dcBack" class="back">\u2039</button><div class="studyprogress">${esc3(sessionTitle(session2))}<br><span class="small">\u5DF2\u89C1 ${p.seen} / ${p.total}${p.reinforcing ? ` \xB7 \u5F3A\u5316 ${p.reinforcing}` : ""}</span></div></div><div class="studybody dc-studybody"><div class="source-tags"><span class="tag">${esc3(formatSectionLabel(section))}</span>${item.tag ? `<span class="tag">${esc3(item.tag)}</span>` : ""}${stateLabel ? `<span class="tag dc-reinforce">${esc3(stateLabel)}</span>` : ""}</div>${detail}</div></main>`;
+    const detail = reveal ? `<div class="dc-answer">${esc4(item.answer || "")}</div>${item.kind === "adjadv" && (item.adj || item.adv) ? `<div class="dc-pairs">${item.adj ? `<span>\u5F62\u5BB9\u8BCD \xB7 ${esc4(item.adj)}</span>` : ""}${item.adv ? `<span>\u526F\u8BCD \xB7 ${esc4(item.adv === "\u2014" ? "\u65E0" : item.adv)}</span>` : ""}</div>` : ""}${item.note ? `<div class="dc-note">${esc4(item.note)}</div>` : ""}${item.example ? `<div class="example">${esc4(item.example)}</div>` : ""}<div class="row dc-audio-row"><button id="dcSpeak" class="soft">\u{1F50A} ${item.example ? "\u542C\u6781\u77ED\u4F8B" : "\u542C\u7B54\u6848"}</button></div><div class="judges"><button id="dcGood" class="goodbtn">1\u3000\u4F1A</button><button id="dcBad" class="badbtn">2\u3000\u4E0D\u4F1A</button></div>` : `<div class="dc-cue">${esc4(item.cue || "")}</div><button id="dcReveal" class="primary dc-reveal">\u63ED\u6653\u7B54\u6848</button><div class="small">\u5148\u81EA\u5DF1\u8C03\u51FA\u82F1\u6587\uFF1B\u4E0D\u9700\u8981\u8F93\u5165\u6574\u4E32\u7B54\u6848\u3002</div>`;
+    root2.innerHTML = `<main class="immersive"><div class="studytop"><button id="dcBack" class="back">\u2039</button><div class="studyprogress">${esc4(sessionTitle(session2))}<br><span class="small">\u5DF2\u89C1 ${p.seen} / ${p.total}${p.reinforcing ? ` \xB7 \u5F3A\u5316 ${p.reinforcing}` : ""}</span></div></div><div class="studybody dc-studybody"><div class="source-tags"><span class="tag">${esc4(formatSectionLabel(section))}</span>${item.tag ? `<span class="tag">${esc4(item.tag)}</span>` : ""}${stateLabel ? `<span class="tag dc-reinforce">${esc4(stateLabel)}</span>` : ""}</div>${detail}</div></main>`;
     mountStudyTimer2(session2.activityId);
     document.getElementById("dcBack").onclick = () => {
       touchActivity2(session2.activityId);
@@ -5707,7 +6132,7 @@ function createDataChartUI(deps) {
       return renderHome2();
     }
     const p = dataChartSessionProgress(dc());
-    root2.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish dc-finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>${esc3(sessionTitle(session2))}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.total}</b><span>\u672C\u8F6E\u6761\u76EE</span></div><div class="statbox"><b class="good">${p.good}</b><span>\u70B9\u201C\u4F1A\u201D</span></div><div class="statbox"><b class="bad">${p.bad}</b><span>\u70B9\u201C\u4E0D\u4F1A\u201D</span></div></div><div class="small">\u70B9\u8FC7\u201C\u4E0D\u4F1A\u201D\u7684\u6761\u76EE\u53EA\u6709\u8FDE\u7EED 3 \u6B21\u201C\u4F1A\u201D\u624D\u4F1A\u9000\u51FA\u5F3A\u5316\u3002</div><button id="dcFinishBack" class="primary" style="margin-top:18px">\u8FD4\u56DE\u6570\u636E\u56FE</button></div></div></main>`;
+    root2.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish dc-finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>${esc4(sessionTitle(session2))}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.total}</b><span>\u672C\u8F6E\u6761\u76EE</span></div><div class="statbox"><b class="good">${p.good}</b><span>\u70B9\u201C\u4F1A\u201D</span></div><div class="statbox"><b class="bad">${p.bad}</b><span>\u70B9\u201C\u4E0D\u4F1A\u201D</span></div></div><div class="small">\u70B9\u8FC7\u201C\u4E0D\u4F1A\u201D\u7684\u6761\u76EE\u53EA\u6709\u8FDE\u7EED 3 \u6B21\u201C\u4F1A\u201D\u624D\u4F1A\u9000\u51FA\u5F3A\u5316\u3002</div><button id="dcFinishBack" class="primary" style="margin-top:18px">\u8FD4\u56DE\u6570\u636E\u56FE</button></div></div></main>`;
     document.getElementById("dcFinishBack").onclick = () => {
       clearDataChartSession(dc());
       persist2();
@@ -5956,6 +6381,7 @@ var wordEditId = null;
 var importDraft = null;
 var freeListen = null;
 var dataChartUI = null;
+var mistakesUI = null;
 var statRange = 30;
 var statDay = currentDayKey();
 var statMonth = calendarDate(statDay);
@@ -5976,9 +6402,10 @@ var labels = {
   datachart: ["\u6570\u636E\u56FE", "\u6570\u636E\u56FE"],
   library: ["\u8BCD\u5E93", "\u8BCD\u5E93"],
   recent: ["\u8BB0\u5F55", "\u8FD1 3 \u5929\u5B66\u4E60\u8BB0\u5F55"],
+  mistakes: ["\u9519\u8BCD", "\u9519\u8BCD\u590D\u4E60"],
   stats: ["\u7EDF\u8BA1", "\u5B66\u4E60\u7EDF\u8BA1"]
 };
-function esc2(v) {
+function esc3(v) {
   return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 function toast(message) {
@@ -6130,10 +6557,10 @@ function activityMinutes2(mode = null, date = currentDayKey()) {
   return activityMinutes(state, mode, date);
 }
 function activeStudyActivityId() {
-  return listen?.activityId || typeRun?.activityId || wholeSentenceRun?.activityId || sentenceRun?.activityId || freeListen?.activityId || dataChartUI?.activeActivityId?.() || null;
+  return mistakesUI?.activeActivityId?.() || listen?.activityId || typeRun?.activityId || wholeSentenceRun?.activityId || sentenceRun?.activityId || freeListen?.activityId || dataChartUI?.activeActivityId?.() || null;
 }
 function moduleTimerLabel(mode) {
-  return mode === "listen" ? "\u4ECA\u65E5\u542C\u8BCD" : mode === "type" ? "\u4ECA\u65E5\u624B\u6253" : mode === "sentence" ? "\u4ECA\u65E5\u53E5\u5B50" : mode === "free" ? "\u4ECA\u65E5\u81EA\u7531\u542C" : mode === "datachart" ? "\u4ECA\u65E5\u6570\u636E\u56FE" : "\u4ECA\u65E5\u5B66\u4E60";
+  return mode === "listen" ? "\u4ECA\u65E5\u542C\u8BCD" : mode === "type" ? "\u4ECA\u65E5\u624B\u6253" : mode === "sentence" ? "\u4ECA\u65E5\u53E5\u5B50" : mode === "free" ? "\u4ECA\u65E5\u81EA\u7531\u542C" : mode === "datachart" ? "\u4ECA\u65E5\u6570\u636E\u56FE" : mode === "mistake" ? "\u4ECA\u65E5\u9519\u8BCD" : "\u4ECA\u65E5\u5B66\u4E60";
 }
 function mountStudyTimer(activityId) {
   clearInterval(studyTimerInterval);
@@ -6166,13 +6593,13 @@ function mountStudyTimer(activityId) {
   studyTimerInterval?.unref?.();
 }
 function navHtml() {
-  const items = [["home", "\u9996\u9875"], ["today", "\u4ECA\u65E5"], ["type", "\u624B\u6253"], ["text", "\u6587\u672C"], ["datachart", "\u6570\u636E\u56FE"], ["library", "\u8BCD\u5E93"]];
+  const items = [["home", "\u9996\u9875"], ["today", "\u4ECA\u65E5"], ["type", "\u624B\u6253"], ["text", "\u6587\u672C"], ["datachart", "\u6570\u636E\u56FE"], ["mistakes", "\u9519\u8BCD"], ["library", "\u8BCD\u5E93"]];
   return `<nav class="nav">${items.map(([id3, t]) => `<button data-nav="${id3}" class="${view === id3 ? "on" : ""}">${t}</button>`).join("")}</nav>`;
 }
 function shell(content) {
   const [ey, title] = labels[view] || ["", ""];
   const storage = storageContext();
-  root.innerHTML = `<main class="shell"><header class="topbar"><div><div class="eyebrow">${ey}</div><h1>${title}</h1><div class="small">${esc2(storage.label)}</div></div><div class="toolbar"><button id="restoreTop" class="soft">\u6062\u590D</button><button id="backupTop" class="soft">\u5907\u4EFD</button></div></header>${content}</main>${navHtml()}`;
+  root.innerHTML = `<main class="shell"><header class="topbar"><div><div class="eyebrow">${ey}</div><h1>${title}</h1><div class="small">${esc3(storage.label)}</div></div><div class="toolbar"><button id="restoreTop" class="soft">\u6062\u590D</button><button id="backupTop" class="soft">\u5907\u4EFD</button></div></header>${content}</main>${navHtml()}`;
   document.querySelectorAll("[data-nav]").forEach((b) => b.onclick = () => go(b.dataset.nav));
   document.getElementById("restoreTop").onclick = requestRestore;
   document.getElementById("backupTop").onclick = backup;
@@ -6198,7 +6625,7 @@ function go(next) {
 }
 function bookChips(selected, scope) {
   const books = allBooks(state);
-  return `<div class="chips"><button class="chip ${selected.length ? "" : "on"}" data-book-scope="${scope}" data-book="__all__">\u5168\u90E8\u8BCD\u4E66</button>${books.map((b) => `<button class="chip ${selected.includes(b) ? "on" : ""}" data-book-scope="${scope}" data-book="${esc2(b)}">${esc2(b)}</button>`).join("")}</div>`;
+  return `<div class="chips"><button class="chip ${selected.length ? "" : "on"}" data-book-scope="${scope}" data-book="__all__">\u5168\u90E8\u8BCD\u4E66</button>${books.map((b) => `<button class="chip ${selected.includes(b) ? "on" : ""}" data-book-scope="${scope}" data-book="${esc3(b)}">${esc3(b)}</button>`).join("")}</div>`;
 }
 function bindBookChips(scope, rerender) {
   document.querySelectorAll(`[data-book-scope="${scope}"]`).forEach((b) => b.onclick = () => {
@@ -6240,7 +6667,7 @@ function planChecklistHtml(plan, currentId = null) {
       const w = wordById(id3);
       if (!w) return "";
       const mark = planWordMark(plan, id3), book = planWordBook(plan, id3);
-      return `<div class="study-word-row ${id3 === currentId ? "current" : ""}"><span class="en">${index + 1}. ${esc2(w.en)}</span><span class="zh">${esc2(w.zh || "\u2014")}</span><span class="${mark.cls}">${mark.label}</span><span class="small">${book ? esc2(book) : planWordKind(plan, id3)}</span></div>`;
+      return `<div class="study-word-row ${id3 === currentId ? "current" : ""}"><span class="en">${index + 1}. ${esc3(w.en)}</span><span class="zh">${esc3(w.zh || "\u2014")}</span><span class="${mark.cls}">${mark.label}</span><span class="small">${book ? esc3(book) : planWordKind(plan, id3)}</span></div>`;
     }).join("");
     const done = (ids || []).filter((id3) => ["\u5DF2\u719F\u6089", "\u7B80\u5355"].includes(planWordMark(plan, id3).label)).length;
     return `<div class="study-list-group"><div class="study-list-title"><b>${title}</b><span>${done} / ${(ids || []).length}</span></div>${rows || '<div class="empty">\u8FD9\u4E00\u7C7B\u6CA1\u6709\u8BCD\u3002</div>'}</div>`;
@@ -6263,18 +6690,19 @@ function errorBookSectionHtml() {
   if (!books.length) return `<section class="card"><h2 class="section-title">\u9519\u9898\u672C</h2><div class="empty">\u8FD8\u6CA1\u6709\u9519\u9898\u672C\u3002\u53E5\u5B50\u542C\u5199\u7ED3\u675F\u540E\u53EF\u4EE5\u628A\u4E0D\u719F\u6089\u7684\u8BCD\u4E00\u952E\u52A0\u5165\u3002</div></section>`;
   return `<section class="card"><div class="space"><div><h2 class="section-title">\u9519\u9898\u672C</h2><div class="small">\u9ED8\u8BA4\u6298\u53E0\uFF0C\u53EA\u663E\u793A\u540D\u79F0\u548C\u8BCD\u6570\uFF1B\u5C55\u5F00\u540E\u7528\u7D27\u51D1\u5217\u8868\u67E5\u770B\u3002</div></div></div><div class="error-books">${books.map((book) => {
     const words = state.words.filter((w) => (w.sources || []).includes(book));
-    const preview = words.slice(0, 60).map((w) => `<div class="error-row"><span class="en">${esc2(w.en)}</span><span class="zh">${esc2(w.zh || "")}</span>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : "<span></span>"}</div>`).join("");
-    return `<details class="error-book"><summary><b>${esc2(book)}</b><span class="small">${words.length} \u8BCD</span></summary><div class="error-compact">${preview || '<div class="empty">\u6682\u65E0\u5355\u8BCD</div>'}</div>${words.length > 60 ? `<div class="small" style="padding:8px 0">\u8FD9\u91CC\u53EA\u9884\u89C8\u524D 60 \u4E2A\uFF1B\u70B9\u4E0B\u9762\u67E5\u770B\u5168\u90E8\u3002</div>` : ""}<div class="row" style="padding:9px 0"><button class="soft" data-open-error-book="${esc2(book)}">\u5728\u8BCD\u5E93\u4E2D\u67E5\u770B\u5168\u90E8</button></div></details>`;
+    const preview = words.slice(0, 60).map((w) => `<div class="error-row"><span class="en">${esc3(w.en)}</span><span class="zh">${esc3(w.zh || "")}</span>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : "<span></span>"}</div>`).join("");
+    return `<details class="error-book"><summary><b>${esc3(book)}</b><span class="small">${words.length} \u8BCD</span></summary><div class="error-compact">${preview || '<div class="empty">\u6682\u65E0\u5355\u8BCD</div>'}</div>${words.length > 60 ? `<div class="small" style="padding:8px 0">\u8FD9\u91CC\u53EA\u9884\u89C8\u524D 60 \u4E2A\uFF1B\u70B9\u4E0B\u9762\u67E5\u770B\u5168\u90E8\u3002</div>` : ""}<div class="row" style="padding:9px 0"><button class="soft" data-open-error-book="${esc3(book)}">\u5728\u8BCD\u5E93\u4E2D\u67E5\u770B\u5168\u90E8</button></div></details>`;
   }).join("")}</div></section>`;
 }
 function renderHome() {
   const today = todayListeningStats(state, [], currentDayKey());
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929</h2><p>\u9996\u9875\u53EA\u7559\u4ECA\u65E5\u5B8C\u6210\u5C0F\u8BA1\u548C\u5165\u53E3\u3002</p></div><button id="goToday" class="primary">\u8FDB\u5165\u4ECA\u65E5\u5B66\u4E60</button></div><div class="grid2" style="margin-top:16px"><div class="statbox"><b>${today.newCount}</b><span>\u4ECA\u65E5\u65B0\u8BCD\u5B8C\u6210</span></div><div class="statbox"><b>${today.reviewCount}</b><span>\u4ECA\u65E5\u590D\u4E60\u5B8C\u6210</span></div></div></section><div class="grid2"><button id="homeToday" class="entry"><b>\u4ECA\u65E5\u5B66\u4E60</b><span>\u7EE7\u7EED\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u5F53\u5929\u5F85\u5DE9\u56FA\u3002</span></button><button id="goType" class="entry"><b>\u624B\u6253\u5F3A\u5316</b><span>\u6309\u65E5\u671F\u3001\u8BCD\u4E66\u548C\u4E0D\u719F\u6B21\u6570\u7B5B\u9009\u5F3A\u5316\u3002</span></button><button id="goText" class="entry"><b>\u6587\u672C\u4E0E\u53E5\u5B50</b><span>\u6587\u672C\u5E93\u3001\u53E5\u5B50\u62C6\u8BCD\u542C\u5199\u548C\u53E5\u5B50\u9519\u8BCD\u3002</span></button><button id="goDataChart" class="entry"><b>\u6570\u636E\u56FE</b><span>\u6309\u5C0F\u8282\u80CC Task 1 \u8868\u8FBE\uFF0C\u652F\u6301 3/3 \u5F3A\u5316\u548C\u6DF7\u6392\u590D\u4E60\u3002</span></button><button id="goRecent" class="entry"><b>\u8FD1 3 \u5929\u5B66\u4E60\u8BB0\u5F55</b><span>\u67E5\u770B\u6BCF\u5929\u542C\u8FC7\u7684\u8BCD\u548C\u5F53\u524D\u72B6\u6001\uFF0C\u8BEF\u5224\u53EF\u4EE5\u76F4\u63A5\u6539\u3002</span></button><button id="goStats" class="entry"><b>\u5B66\u4E60\u7EDF\u8BA1</b><span>\u65E5\u5386\u3001\u9996\u8F6E\u7ED3\u679C\u3001\u56F0\u96BE\u8BCD\u548C\u590D\u4E60\u9884\u6D4B\u3002</span></button></div></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929</h2><p>\u9996\u9875\u53EA\u7559\u4ECA\u65E5\u5B8C\u6210\u5C0F\u8BA1\u548C\u5165\u53E3\u3002</p></div><button id="goToday" class="primary">\u8FDB\u5165\u4ECA\u65E5\u5B66\u4E60</button></div><div class="grid2" style="margin-top:16px"><div class="statbox"><b>${today.newCount}</b><span>\u4ECA\u65E5\u65B0\u8BCD\u5B8C\u6210</span></div><div class="statbox"><b>${today.reviewCount}</b><span>\u4ECA\u65E5\u590D\u4E60\u5B8C\u6210</span></div></div></section><div class="grid2"><button id="homeToday" class="entry"><b>\u4ECA\u65E5\u5B66\u4E60</b><span>\u7EE7\u7EED\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u5F53\u5929\u5F85\u5DE9\u56FA\u3002</span></button><button id="goType" class="entry"><b>\u624B\u6253\u5F3A\u5316</b><span>\u6309\u65E5\u671F\u3001\u8BCD\u4E66\u548C\u4E0D\u719F\u6B21\u6570\u7B5B\u9009\u5F3A\u5316\u3002</span></button><button id="goText" class="entry"><b>\u6587\u672C\u4E0E\u53E5\u5B50</b><span>\u6587\u672C\u5E93\u3001\u53E5\u5B50\u62C6\u8BCD\u542C\u5199\u548C\u53E5\u5B50\u9519\u8BCD\u3002</span></button><button id="goDataChart" class="entry"><b>\u6570\u636E\u56FE</b><span>\u6309\u5C0F\u8282\u80CC Task 1 \u8868\u8FBE\uFF0C\u652F\u6301 3/3 \u5F3A\u5316\u548C\u6DF7\u6392\u590D\u4E60\u3002</span></button><button id="goMistakes" class="entry"><b>\u9519\u8BCD\u590D\u4E60</b><span>\u6309\u65E5\u671F\u548C\u8BCD\u4E66\u6574\u7406\u9519\u8BCD\uFF0C\u52FE\u9009\u540E\u542C\u97F3\u6216\u62FC\u5199\u590D\u4E60\u3002</span></button><button id="goRecent" class="entry"><b>\u8FD1 3 \u5929\u5B66\u4E60\u8BB0\u5F55</b><span>\u67E5\u770B\u6BCF\u5929\u542C\u8FC7\u7684\u8BCD\u548C\u5F53\u524D\u72B6\u6001\uFF0C\u8BEF\u5224\u53EF\u4EE5\u76F4\u63A5\u6539\u3002</span></button><button id="goStats" class="entry"><b>\u5B66\u4E60\u7EDF\u8BA1</b><span>\u65E5\u5386\u3001\u9996\u8F6E\u7ED3\u679C\u3001\u56F0\u96BE\u8BCD\u548C\u590D\u4E60\u9884\u6D4B\u3002</span></button></div></div>`);
   document.getElementById("goToday").onclick = () => go("today");
   document.getElementById("homeToday").onclick = () => go("today");
   document.getElementById("goType").onclick = () => go("type");
   document.getElementById("goText").onclick = () => go("text");
   document.getElementById("goDataChart").onclick = () => go("datachart");
+  document.getElementById("goMistakes").onclick = () => go("mistakes");
   document.getElementById("goRecent").onclick = () => go("recent");
   document.getElementById("goStats").onclick = () => go("stats");
 }
@@ -6299,18 +6727,18 @@ function renderToday() {
     const nd = st.new.done, rd = st.review.done;
     const newShort = seg.newIds.length < seg.newTarget ? ` \xB7 \u53EF\u5206\u914D ${seg.newIds.length}` : "";
     const reviewShort = seg.reviewIds.length < seg.reviewTarget ? ` \xB7 \u53EF\u5206\u914D ${seg.reviewIds.length}` : "";
-    return `<div class="bookrow" style="grid-template-columns:minmax(90px,1.4fr) 1fr 1fr"><b>${i + 1}. ${esc2(seg.book)}${currentSeg?.book === seg.book ? " \xB7 \u5F53\u524D" : ""}</b><label class="small">\u65B0\u8BCD <input data-seq-new="${i}" type="number" min="0" value="${seg.newTarget}" style="width:78px"> <span>${nd}/${seg.newIds.length}${newShort}</span></label><label class="small">\u590D\u4E60 <input data-seq-review="${i}" type="number" min="0" value="${seg.reviewTarget}" style="width:78px"> <span>${rd}/${seg.reviewIds.length}${reviewShort}</span></label></div>`;
+    return `<div class="bookrow" style="grid-template-columns:minmax(90px,1.4fr) 1fr 1fr"><b>${i + 1}. ${esc3(seg.book)}${currentSeg?.book === seg.book ? " \xB7 \u5F53\u524D" : ""}</b><label class="small">\u65B0\u8BCD <input data-seq-new="${i}" type="number" min="0" value="${seg.newTarget}" style="width:78px"> <span>${nd}/${seg.newIds.length}${newShort}</span></label><label class="small">\u590D\u4E60 <input data-seq-review="${i}" type="number" min="0" value="${seg.reviewTarget}" style="width:78px"> <span>${rd}/${seg.reviewIds.length}${reviewShort}</span></label></div>`;
   }).join("") : "";
   const bookRows = plan.mode === "sequential" ? (plan.bookSegments || []).map((seg) => {
     const x = segmentStatus(state, plan, seg);
-    return `<div class="bookrow"><b>${esc2(seg.book)}</b><span>${x.new.done}/${seg.newIds.length} \u65B0</span><span>${x.review.done}/${seg.reviewIds.length} \u590D\u4E60</span><span class="mobilehide">\u672C\u8F6E\u5B9E\u9645\u5F52\u5C5E</span><span class="mobilehide">\u53BB\u91CD\u540E\u7EDF\u8BA1</span></div>`;
+    return `<div class="bookrow"><b>${esc3(seg.book)}</b><span>${x.new.done}/${seg.newIds.length} \u65B0</span><span>${x.review.done}/${seg.reviewIds.length} \u590D\u4E60</span><span class="mobilehide">\u672C\u8F6E\u5B9E\u9645\u5F52\u5C5E</span><span class="mobilehide">\u53BB\u91CD\u540E\u7EDF\u8BA1</span></div>`;
   }).join("") : allBooks(state).map((b) => {
     const x = todayListeningStats(state, [b], date);
-    return `<div class="bookrow"><b>${esc2(b)}</b><span>${x.newCount} \u65B0</span><span>${x.reviewCount} \u590D\u4E60</span><span class="mobilehide good">${x.firstGood} \u719F\u6089</span><span class="mobilehide bad">${x.firstBad} \u4E0D\u719F</span></div>`;
+    return `<div class="bookrow"><b>${esc3(b)}</b><span>${x.newCount} \u65B0</span><span>${x.reviewCount} \u590D\u4E60</span><span class="mobilehide good">${x.firstGood} \u719F\u6089</span><span class="mobilehide bad">${x.firstBad} \u4E0D\u719F</span></div>`;
   }).join("");
   const bookStatsNote = plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21\u6309\u4ECA\u65E5\u4EFB\u52A1\u7684\u5B9E\u9645\u5F52\u5C5E\u7EDF\u8BA1\uFF0C\u5171\u4EAB\u8BCD\u53EA\u7B97\u5728\u524D\u9762\u7B2C\u4E00\u672C\u3002" : "\u6DF7\u5408\u6A21\u5F0F\u6309\u8BCD\u4E66\u6765\u6E90\u5206\u522B\u7EDF\u8BA1\uFF1B\u540C\u4E00\u4E2A\u5171\u4EAB\u8BCD\u53EF\u80FD\u540C\u65F6\u51FA\u73B0\u5728\u591A\u672C\u8BCD\u4E66\uFF0C\u56E0\u6B64\u5404\u884C\u4E0D\u8981\u76F4\u63A5\u76F8\u52A0\u3002";
   const planControls = plan.mode === "sequential" ? `<div class="small" style="margin:10px 0">\u6309\u4E0B\u9762\u987A\u5E8F\u4E00\u672C\u4E00\u672C\u5B66\u5B8C\u3002\u91CD\u590D\u8BCD\u53EA\u5F52\u524D\u9762\u7B2C\u4E00\u672C\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5360\u540D\u989D\u3002</div>${sequentialRows || '<div class="empty">\u5148\u9009\u62E9\u81F3\u5C11\u4E00\u672C\u5177\u4F53\u8BCD\u4E66\u3002</div>'}` : `<div class="grid2" style="margin-top:12px"><div class="field"><label>\u4ECA\u5929\u65B0\u8BCD\u76EE\u6807</label><input id="todayNewTarget" type="number" min="0" value="${plan.newTarget}"></div><div class="field"><label>\u4ECA\u5929\u590D\u4E60\u76EE\u6807</label><input id="todayReviewTarget" type="number" min="0" value="${plan.reviewTarget}"></div></div>`;
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc2(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">${plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21" : "\u6DF7\u5408"} \xB7 FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">\u5F53\u524D\u8BCD\u4E66\uFF1A<b>${esc2(currentSeg.book)}</b>\uFF0C\u5B8C\u6210\u540E\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u672C\u3002</div>` : ""}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u672C\u8F6E\u5355\u8BCD\u6E05\u5355 \xB7 ${prog.newTotal + prog.reviewTotal}</summary><div style="margin-top:10px">${planChecklistHtml(plan)}</div></details><details id="todayPlanDetails" class="details" ${todayPlanPanelOpen ? "open" : ""}><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="field"><label>\u5B66\u4E60\u65B9\u5F0F</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === "mixed" ? "selected" : ""}>\u6DF7\u5408\u5B66\u4E60\uFF1A\u65B0\u8BCD\u548C\u590D\u4E60\u8BCD\u6253\u4E71\u51FA\u73B0\uFF0C\u591A\u672C\u8BCD\u4E66\u5171\u7528\u4E00\u4E2A\u603B\u91CF</option><option value="sequential" ${plan.mode === "sequential" ? "selected" : ""}>\u5206\u672C\u4F9D\u6B21\uFF1A\u4E00\u672C\u5B66\u5B8C\u518D\u4E0B\u4E00\u672C\uFF0C\u672C\u5185\u65B0\u8BCD/\u590D\u4E60\u6253\u4E71</option></select></div><div class="small" style="margin:10px 0">\u5207\u6362\u8BCD\u4E66\u6216\u964D\u4F4E\u76EE\u6807\u53EA\u4F1A\u66FF\u6362/\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u5019\u9009\u8BCD\uFF1B\u4ECA\u5929\u5DF2\u7ECF\u6B63\u5F0F\u542C\u8FC7\u7684\u8BCD\uFF0C\u65E0\u8BBA\u6765\u81EA\u54EA\u672C\u8BCD\u4E66\u3001\u662F\u5426\u5DF2\u719F\u6089\uFF0C\u90FD\u4F1A\u4FDD\u7559\u5728\u4ECA\u5929\u7684\u8FDB\u5EA6\u91CC\u3002</div>${bookChips(books, "today")}${planControls}</div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u53EA\u5F71\u54CD\u4E4B\u540E\u65B0\u751F\u6210\u7684\u6DF7\u5408\u8BA1\u5212\uFF1B\u5206\u672C\u6A21\u5F0F\u6BCF\u672C\u5355\u72EC\u8BBE\u7F6E\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002${bookStatsNote}</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u4ECA\u5929\u5148\u5B8C\u6210\u8FD9\u4E00\u7EC4</h2><div class="small">${esc3(selectedText)} \xB7 ${studyDayLabel()}</div></div><span class="tag">${plan.mode === "sequential" ? "\u5206\u672C\u4F9D\u6B21" : "\u6DF7\u5408"} \xB7 FSRS</span></div><div class="plan" style="margin-top:15px"><div class="statbox"><b>${prog.newDone} / ${prog.newTotal}</b><span>\u65B0\u8BCD</span><div class="progressline"><i style="width:${prog.newTotal ? prog.newDone * 100 / prog.newTotal : 0}%"></i></div></div><div class="statbox"><b>${prog.reviewDone} / ${prog.reviewTotal}</b><span>\u590D\u4E60</span><div class="progressline"><i style="width:${prog.reviewTotal ? prog.reviewDone * 100 / prog.reviewTotal : 0}%"></i></div></div><div class="statbox"><b class="${prog.retry ? "bad" : ""}">${prog.retry}</b><span>\u5F85\u5DE9\u56FA</span><div class="small">\u4E0D\u589E\u52A0\u65B0\u8BCD/\u590D\u4E60\u5206\u6BCD</div></div></div>${currentSeg ? `<div class="small" style="margin-top:10px">\u5F53\u524D\u8BCD\u4E66\uFF1A<b>${esc3(currentSeg.book)}</b>\uFF0C\u5B8C\u6210\u540E\u81EA\u52A8\u7EE7\u7EED\u4E0B\u4E00\u672C\u3002</div>` : ""}<div class="row" style="margin-top:16px"><button id="startListen" class="primary">${prog.remaining ? "\u7EE7\u7EED\u4ECA\u65E5\u542C\u97F3" : "\u4ECA\u65E5\u5DF2\u5B8C\u6210"}</button><span class="small">\u542C\u97F3 ${mins} \u5206\u949F \xB7 \u9996\u8F6E\u719F\u6089 ${pct(td.firstGood, td.firstGood + td.firstBad)}</span></div><details class="details"><summary>\u672C\u8F6E\u5355\u8BCD\u6E05\u5355 \xB7 ${prog.newTotal + prog.reviewTotal}</summary><div style="margin-top:10px">${planChecklistHtml(plan)}</div></details><details id="todayPlanDetails" class="details" ${todayPlanPanelOpen ? "open" : ""}><summary>\u8C03\u6574\u4ECA\u5929\u7684\u8BA1\u5212\u4E0E\u8BCD\u4E66</summary><div style="margin-top:12px"><div class="field"><label>\u5B66\u4E60\u65B9\u5F0F</label><select id="todayPlanMode"><option value="mixed" ${plan.mode === "mixed" ? "selected" : ""}>\u6DF7\u5408\u5B66\u4E60\uFF1A\u65B0\u8BCD\u548C\u590D\u4E60\u8BCD\u6253\u4E71\u51FA\u73B0\uFF0C\u591A\u672C\u8BCD\u4E66\u5171\u7528\u4E00\u4E2A\u603B\u91CF</option><option value="sequential" ${plan.mode === "sequential" ? "selected" : ""}>\u5206\u672C\u4F9D\u6B21\uFF1A\u4E00\u672C\u5B66\u5B8C\u518D\u4E0B\u4E00\u672C\uFF0C\u672C\u5185\u65B0\u8BCD/\u590D\u4E60\u6253\u4E71</option></select></div><div class="small" style="margin:10px 0">\u5207\u6362\u8BCD\u4E66\u6216\u964D\u4F4E\u76EE\u6807\u53EA\u4F1A\u66FF\u6362/\u88C1\u6389\u5B8C\u5168\u6CA1\u78B0\u8FC7\u7684\u5019\u9009\u8BCD\uFF1B\u4ECA\u5929\u5DF2\u7ECF\u6B63\u5F0F\u542C\u8FC7\u7684\u8BCD\uFF0C\u65E0\u8BBA\u6765\u81EA\u54EA\u672C\u8BCD\u4E66\u3001\u662F\u5426\u5DF2\u719F\u6089\uFF0C\u90FD\u4F1A\u4FDD\u7559\u5728\u4ECA\u5929\u7684\u8FDB\u5EA6\u91CC\u3002</div>${bookChips(books, "today")}${planControls}</div></details><details class="details"><summary>\u4EE5\u540E\u6BCF\u5929\u7684\u9ED8\u8BA4\u76EE\u6807</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u65B0\u8BCD</label><input id="defaultNewTarget" type="number" min="0" value="${state.settings.defaultNewTarget}"></div><div class="field"><label>\u4EE5\u540E\u9ED8\u8BA4\u590D\u4E60</label><input id="defaultReviewTarget" type="number" min="0" value="${state.settings.defaultReviewTarget}"></div></div><div class="small" style="margin-top:8px">\u53EA\u5F71\u54CD\u4E4B\u540E\u65B0\u751F\u6210\u7684\u6DF7\u5408\u8BA1\u5212\uFF1B\u5206\u672C\u6A21\u5F0F\u6BCF\u672C\u5355\u72EC\u8BBE\u7F6E\u3002</div></details></section><section class="card"><h2 class="section-title">\u4ECA\u65E5\u542C\u97F3\u6570\u636E</h2><div class="grid4" style="margin-top:13px"><div class="statbox"><b>${td.newCount}</b><span>\u542C\u97F3\u65B0\u8BCD</span></div><div class="statbox"><b>${td.reviewCount}</b><span>\u542C\u97F3\u590D\u4E60</span></div><div class="statbox"><b class="good">${td.firstGood}</b><span>\u9996\u8F6E\u719F\u6089</span></div><div class="statbox"><b class="bad">${td.firstBad}</b><span>\u9996\u8F6E\u4E0D\u719F</span></div></div></section><section class="card"><h2 class="section-title">\u5404\u8BCD\u4E66\u4ECA\u5929\u7684\u60C5\u51B5</h2><div class="small">\u53EA\u7EDF\u8BA1\u542C\u97F3\uFF0C\u4E0D\u6DF7\u5165\u624B\u6253\u3002${bookStatsNote}</div><div style="margin-top:8px">${bookRows || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section></div>`);
   const todayPlanDetails = document.getElementById("todayPlanDetails");
   if (todayPlanDetails) todayPlanDetails.ontoggle = () => {
     todayPlanPanelOpen = todayPlanDetails.open;
@@ -6416,7 +6844,7 @@ function renderListen() {
   }
   if (!listen.historyView && listen.session.current?.source === "buffer") {
     const gap = nextRetryGap(listen.session);
-    root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">\u95F4\u9694\u8BCD \xB7 \u4E0D\u8BA1\u5B66\u4E60\u8BB0\u5F55</div></div><div class="studybody"><div class="small">\u961F\u5C3E\u5F85\u5DE9\u56FA\u8BCD\u8FD8\u5DEE\u7EA6 ${gap} \u4E2A\u5176\u4ED6\u8BCD\uFF1B\u8FD9\u5F20\u53EA\u8D1F\u8D23\u62C9\u5F00\u95F4\u9694\uFF0C\u4E0D\u6539 FSRS\u3001\u4E0D\u6539 3/3\u3002</div><button id="speakWord" class="speaker">\u25D6))</button><div class="word">${esc2(w.en)}</div><div class="meaning">${esc2(w.zh || "")}</div><button id="bufferNext" class="primary" style="margin-top:18px">\u7EE7\u7EED</button></div></main>`;
+    root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">\u95F4\u9694\u8BCD \xB7 \u4E0D\u8BA1\u5B66\u4E60\u8BB0\u5F55</div></div><div class="studybody"><div class="small">\u961F\u5C3E\u5F85\u5DE9\u56FA\u8BCD\u8FD8\u5DEE\u7EA6 ${gap} \u4E2A\u5176\u4ED6\u8BCD\uFF1B\u8FD9\u5F20\u53EA\u8D1F\u8D23\u62C9\u5F00\u95F4\u9694\uFF0C\u4E0D\u6539 FSRS\u3001\u4E0D\u6539 3/3\u3002</div><button id="speakWord" class="speaker">\u25D6))</button><div class="word">${esc3(w.en)}</div><div class="meaning">${esc3(w.zh || "")}</div><button id="bufferNext" class="primary" style="margin-top:18px">\u7EE7\u7EED</button></div></main>`;
     document.getElementById("listenBack").onclick = () => {
       touchActivity(listen.activityId);
       listen = null;
@@ -6439,7 +6867,7 @@ function renderListen() {
   const currentId = w.id;
   const gapShortfall = !reviewing ? Number(listen.session.current?.gapShortfall || 0) : 0;
   const gapNotice = gapShortfall ? '<div class="statusline">\u961F\u5217\u5DF2\u5230\u5C3E\u90E8\uFF0C\u53EF\u7528\u95F4\u9694\u8BCD\u4E0D\u8DB3\uFF0C\u8FD8\u5DEE\u7EA6 ' + gapShortfall + " \u4E2A\uFF1B\u8FD9\u6B21\u4ECD\u8981\u4F60\u91CD\u65B0\u5224\u65AD\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u7B97\u901A\u8FC7\u3002</div>" : "";
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">${listen.segmentBook ? `${esc2(listen.segmentBook)} \xB7 ` : ""}\u65B0\u8BCD ${p.newDone} / ${p.newTotal}\u3000\u590D\u4E60 ${p.reviewDone} / ${p.reviewTotal}${p.retry ? `\u3000\u5F85\u5DE9\u56FA ${p.retry}` : ""}</div><div class="study-actions"><button id="studyListButton">${listen.showList ? "\u6536\u8D77\u6E05\u5355" : "\u672C\u8F6E\u6E05\u5355"}</button>${!reviewing ? '<button id="retireWord">\u6807\u8BB0\u7B80\u5355</button>' : ""}</div></div>${listen.showList ? `<section class="study-sheet"><div class="study-sheet-head"><div><b>\u672C\u8F6E\u5355\u8BCD</b><div class="small">\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u6BCF\u4E2A\u8BCD\u5F53\u524D\u6807\u8BB0</div></div><button id="closeStudyList" class="soft">\u5173\u95ED</button></div>${planChecklistHtml(listen.plan, currentId)}</section>` : ""}<div class="studybody"><button id="speakWord" class="speaker">\u25D6))</button>${answer ? `<div class="word ${result === "good" ? "good" : result === "bad" ? "bad" : ""}">${esc2(w.en)}</div><div class="meaning">${esc2(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc2(w.pos)}${w.def ? ` \xB7 ${esc2(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc2(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc2(s)}</span>`).join("")}</div>` : '<div class="small">\u542C\u5230\u4EE5\u540E\uFF0C\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div>'}<div class="judges"><button id="judgeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="judgeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div>${answer || listen.session.history.length ? `<div class="move"><button id="prevWord" class="soft" ${listen.session.history.length ? "" : "disabled"}>\u4E0A\u4E00\u8BCD</button>${answer ? `<button id="nextWord" class="primary">${reviewing ? "\u56DE\u5230\u5F53\u524D\u8BCD" : "\u4E0B\u4E00\u8BCD"}</button>` : ""}</div>` : ""}${gapNotice}<div class="statusline">${reviewing ? "\u4FEE\u6539\u5386\u53F2\u5224\u65AD\u540E\u4F1A\u91CD\u65B0\u8BA1\u7B97\u5F53\u5929\u961F\u5217\u548C FSRS \u72B6\u6001\u3002" : "\u53EA\u64AD\u653E\u4F46\u6CA1\u5224\u65AD\u7684\u8BCD\u4E0D\u4EA7\u751F\u5B66\u4E60\u8BB0\u5F55\uFF1B\u9000\u51FA\u540E\u4F1A\u5C3D\u91CF\u4ECE\u5B83\u7EE7\u7EED\u3002"}</div></div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="listenBack" class="back">\u2039</button><div class="studyprogress">${listen.segmentBook ? `${esc3(listen.segmentBook)} \xB7 ` : ""}\u65B0\u8BCD ${p.newDone} / ${p.newTotal}\u3000\u590D\u4E60 ${p.reviewDone} / ${p.reviewTotal}${p.retry ? `\u3000\u5F85\u5DE9\u56FA ${p.retry}` : ""}</div><div class="study-actions"><button id="studyListButton">${listen.showList ? "\u6536\u8D77\u6E05\u5355" : "\u672C\u8F6E\u6E05\u5355"}</button>${!reviewing ? '<button id="retireWord">\u6807\u8BB0\u7B80\u5355</button>' : ""}</div></div>${listen.showList ? `<section class="study-sheet"><div class="study-sheet-head"><div><b>\u672C\u8F6E\u5355\u8BCD</b><div class="small">\u65B0\u8BCD\u3001\u590D\u4E60\u548C\u6BCF\u4E2A\u8BCD\u5F53\u524D\u6807\u8BB0</div></div><button id="closeStudyList" class="soft">\u5173\u95ED</button></div>${planChecklistHtml(listen.plan, currentId)}</section>` : ""}<div class="studybody"><button id="speakWord" class="speaker">\u25D6))</button>${answer ? `<div class="word ${result === "good" ? "good" : result === "bad" ? "bad" : ""}">${esc3(w.en)}</div><div class="meaning">${esc3(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc3(w.pos)}${w.def ? ` \xB7 ${esc3(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc3(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc3(s)}</span>`).join("")}</div>` : '<div class="small">\u542C\u5230\u4EE5\u540E\uFF0C\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div>'}<div class="judges"><button id="judgeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="judgeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div>${answer || listen.session.history.length ? `<div class="move"><button id="prevWord" class="soft" ${listen.session.history.length ? "" : "disabled"}>\u4E0A\u4E00\u8BCD</button>${answer ? `<button id="nextWord" class="primary">${reviewing ? "\u56DE\u5230\u5F53\u524D\u8BCD" : "\u4E0B\u4E00\u8BCD"}</button>` : ""}</div>` : ""}${gapNotice}<div class="statusline">${reviewing ? "\u4FEE\u6539\u5386\u53F2\u5224\u65AD\u540E\u4F1A\u91CD\u65B0\u8BA1\u7B97\u5F53\u5929\u961F\u5217\u548C FSRS \u72B6\u6001\u3002" : "\u53EA\u64AD\u653E\u4F46\u6CA1\u5224\u65AD\u7684\u8BCD\u4E0D\u4EA7\u751F\u5B66\u4E60\u8BB0\u5F55\uFF1B\u9000\u51FA\u540E\u4F1A\u5C3D\u91CF\u4ECE\u5B83\u7EE7\u7EED\u3002"}</div></div></main>`;
   document.getElementById("listenBack").onclick = () => {
     touchActivity(listen.activityId);
     persist();
@@ -6485,7 +6913,7 @@ function judgeListen(result) {
     return;
   }
   if (!listen.currentEventId) {
-    const ev = recordAttempt(state, w, "listen", result, { date: listen.plan.date });
+    const ev = recordAttempt(state, w, "listen", result, { date: listen.plan.date, studyBooks: listen.segmentBook ? [listen.segmentBook] : (listen.plan.books || []).filter((book) => (w.sources || []).includes(book)) });
     listen.currentEventId = ev.id;
     listen.session.current.eventId = ev.id;
   } else editAttempt(state, listen.currentEventId, result);
@@ -6583,7 +7011,7 @@ function renderTypeCustom() {
   const ids = customTypeIds();
   const limit = Number(document.getElementById("typeLimit")?.value || 50);
   const q = limit ? ids.slice(0, limit) : ids;
-  box.innerHTML = `<div class="space"><div><b>${ids.length} \u4E2A\u8BCD\u5339\u914D</b><div class="small">${q.slice(0, 8).map((id3) => esc2(wordById(id3)?.en)).join(" \xB7 ")}</div></div><button id="startCustomType" class="soft" ${q.length ? "" : "disabled"}>\u5F00\u59CB\u8FD9\u7EC4${q.length ? ` \xB7 ${q.length}` : ""}</button></div>`;
+  box.innerHTML = `<div class="space"><div><b>${ids.length} \u4E2A\u8BCD\u5339\u914D</b><div class="small">${q.slice(0, 8).map((id3) => esc3(wordById(id3)?.en)).join(" \xB7 ")}</div></div><button id="startCustomType" class="soft" ${q.length ? "" : "disabled"}>\u5F00\u59CB\u8FD9\u7EC4${q.length ? ` \xB7 ${q.length}` : ""}</button></div>`;
   document.getElementById("startCustomType").onclick = () => startType(q, "\u81EA\u5B9A\u4E49\u5F3A\u5316");
 }
 function startType(ids, label) {
@@ -6611,7 +7039,7 @@ function renderTypeRun() {
   const gapShortfall = Number(typeRun.session.current?.gapShortfall || 0);
   if (typeRun.session.current?.source === "buffer") {
     const gap = nextRetryGap(typeRun.session);
-    root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">\u95F4\u9694\u8BCD \xB7 \u624B\u6253\u4E0D\u8BA1\u5206</div></div><div class="studybody"><div class="small">\u4E3A\u4E86\u62C9\u5F00 3/3 \u7684\u8BCD\u95F4\u8DDD\u4E34\u65F6\u7A7F\u63D2\uFF1B\u8FD8\u5DEE\u7EA6 ${gap} \u4E2A\u5176\u4ED6\u8BCD\u3002</div><button id="typeSpeak" class="speaker">\u25D6))</button><div class="word">${esc2(w.en)}</div><div class="meaning">${esc2(w.zh || "")}</div><button id="typeBufferNext" class="primary" style="margin-top:18px">\u7EE7\u7EED</button></div></main>`;
+    root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">\u95F4\u9694\u8BCD \xB7 \u624B\u6253\u4E0D\u8BA1\u5206</div></div><div class="studybody"><div class="small">\u4E3A\u4E86\u62C9\u5F00 3/3 \u7684\u8BCD\u95F4\u8DDD\u4E34\u65F6\u7A7F\u63D2\uFF1B\u8FD8\u5DEE\u7EA6 ${gap} \u4E2A\u5176\u4ED6\u8BCD\u3002</div><button id="typeSpeak" class="speaker">\u25D6))</button><div class="word">${esc3(w.en)}</div><div class="meaning">${esc3(w.zh || "")}</div><button id="typeBufferNext" class="primary" style="margin-top:18px">\u7EE7\u7EED</button></div></main>`;
     document.getElementById("typeBack").onclick = () => {
       typeRun = null;
       view = "type";
@@ -6630,7 +7058,7 @@ function renderTypeRun() {
     mountStudyTimer(typeRun.activityId);
     return;
   }
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">${p.done} / ${p.total}${p.bad ? `\u3000\u5F85\u5DE9\u56FA ${p.bad}` : ""} \xB7 ${esc2(typeRun.label)}</div></div><div class="studybody"><button id="typeSpeak" class="speaker">\u25D6))</button>${!typeRun.answer ? `<div class="small">\u542C\u97F3\u540E\u5199\u51FA\u4F60\u76F4\u63A5\u60F3\u5230\u7684\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="typeAnswer" style="font-size:21px;text-align:center" placeholder="\u5199\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u2026" autocomplete="off"><div class="grid2" style="margin-top:10px"><button id="typeSubmit" class="primary">\u63D0\u4EA4</button><button id="typeReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${typeRun.result === "good" ? "good" : typeRun.result === "bad" ? "bad" : ""}">${esc2(w.en)}</div><div class="meaning">${esc2(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc2(w.pos)}${w.def ? ` \xB7 ${esc2(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc2(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc2(s)}</span>`).join("")}</div><div class="typed"><b>\u4F60\u521A\u624D\u5199\u7684\u662F</b><div>${esc2(typeRun.input || "\uFF08\u76F4\u63A5\u770B\u4E86\u7B54\u6848\uFF09")}</div></div><div class="judges"><button id="typeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="typeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div><div class="move"><button id="typeReplay" class="soft">\u91CD\u542C</button><button id="typeNext" class="primary" ${typeRun.result ? "" : "disabled"}>\u4E0B\u4E00\u8BCD</button></div>${gapShortfall ? `<div class="statusline">\u961F\u5217\u5DF2\u5230\u5C3E\u90E8\uFF0C\u53EF\u7528\u95F4\u9694\u8BCD\u4E0D\u8DB3\uFF0C\u8FD8\u5DEE\u7EA6 ${gapShortfall} \u4E2A\uFF1B\u4ECD\u9700\u91CD\u65B0\u5224\u65AD\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u7B97\u901A\u8FC7\u3002</div>` : ""}<div class="statusline">\u4E0D\u81EA\u52A8\u5224\u4E2D\u6587\u540C\u4E49\u8BCD\u5BF9\u9519\uFF1B\u719F\u6089/\u4E0D\u719F\u6089\u4ECD\u7136\u4F5C\u7528\u4E8E\u540C\u4E00\u4E2A\u5355\u8BCD\u5386\u53F2\u3002</div>`}</div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="typeBack" class="back">\u2039</button><div class="studyprogress">${p.done} / ${p.total}${p.bad ? `\u3000\u5F85\u5DE9\u56FA ${p.bad}` : ""} \xB7 ${esc3(typeRun.label)}</div></div><div class="studybody"><button id="typeSpeak" class="speaker">\u25D6))</button>${!typeRun.answer ? `<div class="small">\u542C\u97F3\u540E\u5199\u51FA\u4F60\u76F4\u63A5\u60F3\u5230\u7684\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="typeAnswer" style="font-size:21px;text-align:center" placeholder="\u5199\u4E2D\u6587\u6838\u5FC3\u610F\u601D\u2026" autocomplete="off"><div class="grid2" style="margin-top:10px"><button id="typeSubmit" class="primary">\u63D0\u4EA4</button><button id="typeReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${typeRun.result === "good" ? "good" : typeRun.result === "bad" ? "bad" : ""}">${esc3(w.en)}</div><div class="meaning">${esc3(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div>${w.pos || w.def ? `<div class="meta">${esc3(w.pos)}${w.def ? ` \xB7 ${esc3(w.def)}` : ""}</div>` : ""}${w.examples?.length ? `<div class="example">${esc3(w.examples[w.examples.length - 1])}</div>` : ""}<div class="source-tags">${(w.sources || []).map((s) => `<span class="tag">${esc3(s)}</span>`).join("")}</div><div class="typed"><b>\u4F60\u521A\u624D\u5199\u7684\u662F</b><div>${esc3(typeRun.input || "\uFF08\u76F4\u63A5\u770B\u4E86\u7B54\u6848\uFF09")}</div></div><div class="judges"><button id="typeGood" class="goodbtn">1\u3000\u719F\u6089</button><button id="typeBad" class="badbtn">2\u3000\u4E0D\u719F\u6089</button></div><div class="move"><button id="typeReplay" class="soft">\u91CD\u542C</button><button id="typeNext" class="primary" ${typeRun.result ? "" : "disabled"}>\u4E0B\u4E00\u8BCD</button></div>${gapShortfall ? `<div class="statusline">\u961F\u5217\u5DF2\u5230\u5C3E\u90E8\uFF0C\u53EF\u7528\u95F4\u9694\u8BCD\u4E0D\u8DB3\uFF0C\u8FD8\u5DEE\u7EA6 ${gapShortfall} \u4E2A\uFF1B\u4ECD\u9700\u91CD\u65B0\u5224\u65AD\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u7B97\u901A\u8FC7\u3002</div>` : ""}<div class="statusline">\u4E0D\u81EA\u52A8\u5224\u4E2D\u6587\u540C\u4E49\u8BCD\u5BF9\u9519\uFF1B\u719F\u6089/\u4E0D\u719F\u6089\u4ECD\u7136\u4F5C\u7528\u4E8E\u540C\u4E00\u4E2A\u5355\u8BCD\u5386\u53F2\u3002</div>`}</div></main>`;
   mountStudyTimer(typeRun.activityId);
   document.getElementById("typeBack").onclick = () => {
     finishActivity(typeRun.activityId);
@@ -6670,7 +7098,7 @@ function renderTypeRun() {
 function judgeType(result) {
   const w = wordById(typeRun.session.current.wordId);
   if (!typeRun.currentEventId) {
-    const ev = recordAttempt(state, w, "type", result);
+    const ev = recordAttempt(state, w, "type", result, { studyBooks: (state.settings.typeBooks || []).filter((book) => (w.sources || []).includes(book)) });
     typeRun.currentEventId = ev.id;
     typeRun.session.current.eventId = ev.id;
   } else editAttempt(state, typeRun.currentEventId, result);
@@ -6700,7 +7128,7 @@ function finishType() {
     const r = reinforcementState(eventsOnDay(state, id3, currentDayKey(), "type"));
     return r.started && !r.passed;
   });
-  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>${esc2(typeRun.label)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.total}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="good">${p.done}</b><span>\u6700\u7EC8\u719F\u6089</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u4ECD\u4E0D\u719F</span></div></div><div class="small">\u76F4\u63A5\u770B\u7B54\u6848 ${typeRun.skipped} \u6B21</div><div class="row" style="justify-content:center;margin-top:18px">${bad.length ? `<button id="redoType" class="primary">\u518D\u7EC3\u4E0D\u719F \xB7 ${bad.length}</button>` : ""}<button id="finishType" class="soft">\u8FD4\u56DE\u624B\u6253</button></div></div></div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u672C\u8F6E\u5B8C\u6210</div><h2>${esc3(typeRun.label)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${p.total}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="good">${p.done}</b><span>\u6700\u7EC8\u719F\u6089</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u4ECD\u4E0D\u719F</span></div></div><div class="small">\u76F4\u63A5\u770B\u7B54\u6848 ${typeRun.skipped} \u6B21</div><div class="row" style="justify-content:center;margin-top:18px">${bad.length ? `<button id="redoType" class="primary">\u518D\u7EC3\u4E0D\u719F \xB7 ${bad.length}</button>` : ""}<button id="finishType" class="soft">\u8FD4\u56DE\u624B\u6253</button></div></div></div></main>`;
   const copy = [...bad];
   if (document.getElementById("redoType")) document.getElementById("redoType").onclick = () => {
     const label = "\u672C\u8F6E\u4E0D\u719F\u518D\u7EC3";
@@ -6728,16 +7156,16 @@ function sentenceStateInfo(entry) {
 function sentenceSourceBadge(entry) {
   const status = linkedSentenceSourceState(state, entry);
   const suffix = status === "source-deleted" ? " \xB7 \u6765\u6E90\u5DF2\u5220\u9664" : status === "source-changed" ? " \xB7 \u539F\u6587\u5DF2\u4FEE\u6539" : status === "legacy-link" ? " \xB7 \u65E7\u7248\u5173\u8054" : "";
-  return `${esc2(sentenceSourceLabel(entry))}${suffix ? `<span class="tag">${esc2(suffix.trim().replace(/^·\s*/, ""))}</span>` : ""}`;
+  return `${esc3(sentenceSourceLabel(entry))}${suffix ? `<span class="tag">${esc3(suffix.trim().replace(/^·\s*/, ""))}</span>` : ""}`;
 }
 function sentenceLibraryBookHtml(book) {
   const rank = { repeat: 0, unseen: 1, done: 2, ignored: 3 };
   const entries = [...book.entries || []].sort((a, b) => rank[sentenceStateInfo(a).status] - rank[sentenceStateInfo(b).status] || Number(b.lastPracticedAt || b.updatedAt || 0) - Number(a.lastPracticedAt || a.updatedAt || 0));
   const repeat = entries.filter((e) => sentenceStateInfo(e).status === "repeat").length;
-  return `<details class="sentence-book"><summary><b>${esc2(book.name)}</b><span class="small">${entries.length} \u53E5${repeat ? ` \xB7 ${repeat} \u53E5\u9700\u91CD\u7EC3` : ""}</span></summary><div class="row" style="justify-content:flex-end;padding:8px 0"><button class="danger" data-delete-sentence-book="${book.id}">\u5220\u9664\u53E5\u5B50\u672C</button></div><div>${entries.map((entry) => {
+  return `<details class="sentence-book"><summary><b>${esc3(book.name)}</b><span class="small">${entries.length} \u53E5${repeat ? ` \xB7 ${repeat} \u53E5\u9700\u91CD\u7EC3` : ""}</span></summary><div class="row" style="justify-content:flex-end;padding:8px 0"><button class="danger" data-delete-sentence-book="${book.id}">\u5220\u9664\u53E5\u5B50\u672C</button></div><div>${entries.map((entry) => {
     const st = sentenceStateInfo(entry);
     const problems = sentenceProblemTokens(entry).filter((token) => !isSimpleLexeme(state, token.normalized || token.surface));
-    return `<div class="sentence-entry"><div class="sentence-entry-meta"><span class="sentence-state ${st.whole.status}">\u6574\u53E5 ${st.whole.label}</span><span class="sentence-state ${st.split.status}">\u62C6\u8BCD ${st.split.label}</span><span class="small">${sentenceSourceBadge(entry)}${problems.length ? ` \xB7 \u9519\u8BCD ${problems.length}` : ""}</span></div><div class="sentence-entry-text">${esc2(entry.text)}</div><div class="sentence-mode-row"><button class="soft" data-whole-entry="${book.id}|${entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-split-entry="${book.id}|${entry.id}">\u62C6\u8BCD\u542C\u5199</button>${problems.length ? `<button class="soft" data-problem-entry="${book.id}|${entry.id}">\u53EA\u7EC3\u9519\u8BCD</button>` : ""}<button class="ghost" data-ignore-entry="${book.id}|${entry.id}">${st.status === "ignored" ? "\u6062\u590D" : "\u5FFD\u7565"}</button><button class="danger" data-delete-sentence-entry="${book.id}|${entry.id}">\u5220\u9664</button></div></div>`;
+    return `<div class="sentence-entry"><div class="sentence-entry-meta"><span class="sentence-state ${st.whole.status}">\u6574\u53E5 ${st.whole.label}</span><span class="sentence-state ${st.split.status}">\u62C6\u8BCD ${st.split.label}</span><span class="small">${sentenceSourceBadge(entry)}${problems.length ? ` \xB7 \u9519\u8BCD ${problems.length}` : ""}</span></div><div class="sentence-entry-text">${esc3(entry.text)}</div><div class="sentence-mode-row"><button class="soft" data-whole-entry="${book.id}|${entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-split-entry="${book.id}|${entry.id}">\u62C6\u8BCD\u542C\u5199</button>${problems.length ? `<button class="soft" data-problem-entry="${book.id}|${entry.id}">\u53EA\u7EC3\u9519\u8BCD</button>` : ""}<button class="ghost" data-ignore-entry="${book.id}|${entry.id}">${st.status === "ignored" ? "\u6062\u590D" : "\u5FFD\u7565"}</button><button class="danger" data-delete-sentence-entry="${book.id}|${entry.id}">\u5220\u9664</button></div></div>`;
   }).join("") || '<div class="empty">\u8FD8\u6CA1\u6709\u53E5\u5B50\u3002</div>'}</div></details>`;
 }
 function bindSentenceLibraryActions() {
@@ -6786,7 +7214,7 @@ function renderTextLegacy() {
   const sentenceBookNames = state.sentenceBooks.map((b) => b.name);
   const sentenceBookRows = state.sentenceBooks.map(sentenceLibraryBookHtml).join("");
   const staleSentenceLinks = staleLinkedSentenceCount(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><button id="backToTextLibrary" class="ghost">\u2039 \u6587\u672C\u5E93</button><h2>\u72EC\u7ACB\u53E5\u5B50\u5DE5\u5177</h2><p>\u6587\u7AE0 \u2192 \u7A33\u5B9A\u53E5\u5B50 \u2192 \u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u9519\u8BCD\u91CD\u542C\u3002\u53E5\u5B50\u672C\u8EAB\u4E0D\u8FDB\u5165 FSRS\uFF1B\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u9519\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u590D\u4E60\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div></section><section class="card"><h2 class="section-title">\u5FEB\u901F\u4FDD\u5B58\u4E00\u53E5\u5E76\u62C6\u8BCD</h2><div class="small">\u9002\u5408\u4E34\u65F6\u53E5\u5B50\u3002\u9ED8\u8BA4\u4FDD\u7559\u91CD\u590D\u8BCD\u4F4D\u7F6E\uFF1B\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u81EA\u52A8\u8DF3\u8FC7\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc2(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc2(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u62C6\u8BCD</label><button id="startQuickWhole" class="primary">\u4FDD\u5B58\u5E76\u6574\u53E5\u542C\u5199</button><button id="startSentenceDictation" class="soft">\u4FDD\u5B58\u5E76\u62C6\u8BCD\u542C\u5199</button><button id="saveQuickOnly" class="ghost">\u53EA\u4FDD\u5B58</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u9519\u8BCD\u5B9A\u4F4D\u4E0E\u91CD\u542C</h2><div class="small">\u53EF\u4EE5\u641C\u6587\u7AE0\u6807\u9898\u3001\u53E5\u5B50\u539F\u6587\u6216\u5355\u8BCD\uFF1B\u4ECE\u6587\u7AE0\u4EA7\u751F\u7684\u53E5\u5B50\u4F7F\u7528\u7A33\u5B9A\u53E5\u5B50 ID \u5173\u8054\uFF0C\u4E0D\u518D\u53EA\u9760\u201C\u7B2C\u51E0\u53E5\u201D\u3002</div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u53E5\u5B50\u5E93</label><select id="sentenceProblemBook"><option value="">\u5168\u90E8\u53E5\u5B50\u5E93</option>${state.sentenceBooks.map((book) => `<option value="${book.id}">${esc2(book.name)}</option>`).join("")}</select></div><div class="field"><label>\u68C0\u7D22</label><input id="sentenceProblemSearch" placeholder="\u6587\u7AE0\u6807\u9898 / \u53E5\u5B50 / \u9519\u8BCD"></div></div><label class="small" style="display:block;margin-top:10px"><input id="sentenceProblemUnique" type="checkbox" checked style="width:auto"> \u9519\u8BCD\u91CD\u542C\u65F6\u53BB\u91CD</label><div id="sentenceProblemList" style="margin-top:12px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u5E93</h2><div class="space"><div class="small">\u9ED8\u8BA4\u6309\u201C\u9700\u91CD\u7EC3 \u2192 \u672A\u7EC3 \u2192 \u5DF2\u901A\u8FC7 \u2192 \u5FFD\u7565\u201D\u6392\u5217\u3002\u6765\u6E90\u88AB\u5220\u9664\u6216\u539F\u6587\u5DF2\u4FEE\u6539\u7684\u65E7\u53E5\u4F1A\u660E\u786E\u6807\u51FA\u6765\u3002</div>${staleSentenceLinks ? `<button id="cleanupStaleSentences" class="ghost">\u6E05\u7406\u5931\u6548\u65E7\u53E5 \xB7 ${staleSentenceLinks}</button>` : ""}</div><div class="sentence-library">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc2(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc2(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc2(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6253\u5F00\u6587\u7AE0\u540E\uFF0C\u6BCF\u4E00\u53E5\u90FD\u6709\u201C\u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u672C\u53E5\u9519\u8BCD\u201D\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc2(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><button id="backToTextLibrary" class="ghost">\u2039 \u6587\u672C\u5E93</button><h2>\u72EC\u7ACB\u53E5\u5B50\u5DE5\u5177</h2><p>\u6587\u7AE0 \u2192 \u7A33\u5B9A\u53E5\u5B50 \u2192 \u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u9519\u8BCD\u91CD\u542C\u3002\u53E5\u5B50\u672C\u8EAB\u4E0D\u8FDB\u5165 FSRS\uFF1B\u5BFC\u5165\u666E\u901A\u8BCD\u4E66\u7684\u9519\u8BCD\u624D\u8FDB\u5165\u6B63\u5F0F\u590D\u4E60\u3002</p></div><button id="newText" class="primary">${textFormOpen || editing ? "\u6536\u8D77" : "\u65B0\u5EFA\u6587\u672C"}</button></div></section><section class="card"><h2 class="section-title">\u5FEB\u901F\u4FDD\u5B58\u4E00\u53E5\u5E76\u62C6\u8BCD</h2><div class="small">\u9002\u5408\u4E34\u65F6\u53E5\u5B50\u3002\u9ED8\u8BA4\u4FDD\u7559\u91CD\u590D\u8BCD\u4F4D\u7F6E\uFF1B\u6807\u8BB0\u7B80\u5355\u7684\u8BCD\u81EA\u52A8\u8DF3\u8FC7\u3002</div><div class="field" style="margin-top:10px"><label>\u4FDD\u5B58\u5230\u53E5\u5B50\u5E93</label><input id="sentenceBookName" list="sentenceBookNames" value="${esc3(sentenceBookNames[0] || "\u53E5\u5B50\u8BCD\u5E93")}" placeholder="\u4F8B\u5982\uFF1A\u525118\u53E5\u5B50"><datalist id="sentenceBookNames">${sentenceBookNames.map((x) => `<option value="${esc3(x)}">`).join("")}</datalist></div><textarea id="sentenceDictationText" style="min-height:105px;margin-top:10px" placeholder="The farmers are working in rural areas."></textarea><div class="row" style="margin-top:10px"><label class="small"><input id="sentenceUnique" type="checkbox" style="width:auto"> \u53BB\u91CD\u540E\u62C6\u8BCD</label><button id="startQuickWhole" class="primary">\u4FDD\u5B58\u5E76\u6574\u53E5\u542C\u5199</button><button id="startSentenceDictation" class="soft">\u4FDD\u5B58\u5E76\u62C6\u8BCD\u542C\u5199</button><button id="saveQuickOnly" class="ghost">\u53EA\u4FDD\u5B58</button></div><div id="sentencePreview" class="source-tags" style="justify-content:flex-start;margin-top:10px"></div></section><section class="card"><h2 class="section-title">\u53E5\u5B50\u9519\u8BCD\u5B9A\u4F4D\u4E0E\u91CD\u542C</h2><div class="small">\u53EF\u4EE5\u641C\u6587\u7AE0\u6807\u9898\u3001\u53E5\u5B50\u539F\u6587\u6216\u5355\u8BCD\uFF1B\u4ECE\u6587\u7AE0\u4EA7\u751F\u7684\u53E5\u5B50\u4F7F\u7528\u7A33\u5B9A\u53E5\u5B50 ID \u5173\u8054\uFF0C\u4E0D\u518D\u53EA\u9760\u201C\u7B2C\u51E0\u53E5\u201D\u3002</div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u53E5\u5B50\u5E93</label><select id="sentenceProblemBook"><option value="">\u5168\u90E8\u53E5\u5B50\u5E93</option>${state.sentenceBooks.map((book) => `<option value="${book.id}">${esc3(book.name)}</option>`).join("")}</select></div><div class="field"><label>\u68C0\u7D22</label><input id="sentenceProblemSearch" placeholder="\u6587\u7AE0\u6807\u9898 / \u53E5\u5B50 / \u9519\u8BCD"></div></div><label class="small" style="display:block;margin-top:10px"><input id="sentenceProblemUnique" type="checkbox" checked style="width:auto"> \u9519\u8BCD\u91CD\u542C\u65F6\u53BB\u91CD</label><div id="sentenceProblemList" style="margin-top:12px"></div></section>${state.sentenceBooks.length ? `<section class="card"><h2 class="section-title">\u6211\u7684\u53E5\u5B50\u5E93</h2><div class="space"><div class="small">\u9ED8\u8BA4\u6309\u201C\u9700\u91CD\u7EC3 \u2192 \u672A\u7EC3 \u2192 \u5DF2\u901A\u8FC7 \u2192 \u5FFD\u7565\u201D\u6392\u5217\u3002\u6765\u6E90\u88AB\u5220\u9664\u6216\u539F\u6587\u5DF2\u4FEE\u6539\u7684\u65E7\u53E5\u4F1A\u660E\u786E\u6807\u51FA\u6765\u3002</div>${staleSentenceLinks ? `<button id="cleanupStaleSentences" class="ghost">\u6E05\u7406\u5931\u6548\u65E7\u53E5 \xB7 ${staleSentenceLinks}</button>` : ""}</div><div class="sentence-library">${sentenceBookRows}</div></section>` : ""}${textFormOpen || editing ? `<section class="card"><h2 class="section-title">${editing ? "\u7F16\u8F91\u6587\u672C" : "\u65B0\u5EFA\u6587\u672C"}</h2><div class="grid2" style="margin-top:12px"><div class="field"><label>\u6807\u9898</label><input id="textTitle" value="${esc3(editing?.title || "")}" placeholder="Test 3 Part 4"></div><div class="field"><label>\u6240\u5C5E\u6587\u672C\u5E93</label><input id="textCollection" value="${esc3(editing?.collection || "")}" placeholder="\u525118"></div></div><textarea id="textBody" style="margin-top:10px" placeholder="\u7C98\u8D34 transcript / \u6587\u7AE0\u6B63\u6587\u2026">${esc3(editing?.body || "")}</textarea><div class="row" style="margin-top:10px"><button id="saveText" class="primary">\u4FDD\u5B58</button><button id="importTextFile" class="soft">\u5BFC\u5165 TXT</button></div></section>` : ""}<section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C</h2><div class="small">\u6253\u5F00\u6587\u7AE0\u540E\uFF0C\u6BCF\u4E00\u53E5\u90FD\u6709\u201C\u6574\u53E5\u542C\u5199 / \u62C6\u8BCD\u542C\u5199 / \u672C\u53E5\u9519\u8BCD\u201D\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="textSearch" placeholder="\u641C\u7D22\u6587\u672C"><select id="textFilter"><option value="">\u5168\u90E8\u6587\u672C\u5E93</option>${cols.map((c) => `<option>${esc3(c)}</option>`).join("")}</select></div><div id="textList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("backToTextLibrary").onclick = () => {
     textToolsOpen = false;
     textFormOpen = false;
@@ -6805,7 +7233,7 @@ function renderTextLegacy() {
   const sentenceBox = document.getElementById("sentenceDictationText"), unique3 = document.getElementById("sentenceUnique"), preview = document.getElementById("sentencePreview");
   const drawSentencePreview = () => {
     const tokens = tokenizeEnglish(sentenceBox.value, { unique: unique3.checked });
-    preview.innerHTML = tokens.slice(0, 30).map((x) => `<span class="tag">${esc2(x)}${isSimpleLexeme(state, x) ? " \xB7 \u7B80\u5355" : ""}</span>`).join("") + (tokens.length > 30 ? `<span class="tag">\u2026 \u5171 ${tokens.length} \u4E2A</span>` : "");
+    preview.innerHTML = tokens.slice(0, 30).map((x) => `<span class="tag">${esc3(x)}${isSimpleLexeme(state, x) ? " \xB7 \u7B80\u5355" : ""}</span>`).join("") + (tokens.length > 30 ? `<span class="tag">\u2026 \u5171 ${tokens.length} \u4E2A</span>` : "");
   };
   sentenceBox.oninput = drawSentencePreview;
   unique3.onchange = drawSentencePreview;
@@ -6839,7 +7267,7 @@ function problemSummary(problems) {
     const key = token.normalized || String(token.surface).toLowerCase();
     map.set(key, (map.get(key) || 0) + 1);
   }
-  return [...map.entries()].map(([word, count]) => `${esc2(word)}${count > 1 ? ` \xD7${count}` : ""}`).join(" \xB7 ");
+  return [...map.entries()].map(([word, count]) => `${esc3(word)}${count > 1 ? ` \xD7${count}` : ""}`).join(" \xB7 ");
 }
 function drawSentenceProblemList() {
   const box = document.getElementById("sentenceProblemList");
@@ -6847,7 +7275,7 @@ function drawSentenceProblemList() {
   const rows = activeProblemRows();
   const uniqueWords = new Set(rows.flatMap((row) => row.problems.map((token) => token.normalized || String(token.surface).toLowerCase())));
   const unique3 = document.getElementById("sentenceProblemUnique")?.checked !== false;
-  box.innerHTML = `<div class="space"><div><b>${rows.length} \u53E5 \xB7 ${uniqueWords.size} \u4E2A\u9519\u8BCD</b><div class="small">\u70B9\u67D0\u4E00\u53E5\u7CBE\u51C6\u91CD\u7EC3\uFF0C\u4E5F\u53EF\u4EE5\u628A\u5F53\u524D\u68C0\u7D22\u7ED3\u679C\u4E00\u8D77\u91CD\u542C\u3002</div></div><button id="retryFilteredProblems" class="primary" ${rows.length ? "" : "disabled"}>\u91CD\u542C\u5F53\u524D\u7B5B\u9009\u9519\u8BCD</button></div><div style="margin-top:10px">${rows.map((row) => `<article class="textitem"><div class="space"><div><h3>${esc2(sentenceSourceLabel(row.entry))}</h3><div class="small">${esc2(row.book.name)} \xB7 ${problemSummary(row.problems)}</div></div></div><p class="snippet">${esc2(row.entry.text)}</p><div class="toolbar"><button class="primary" data-whole-problem-entry="${row.book.id}|${row.entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-retry-entry="${row.book.id}|${row.entry.id}">\u53EA\u91CD\u542C\u8FD9\u53E5\u9519\u8BCD</button><button class="soft" data-retry-entry-all="${row.book.id}|${row.entry.id}">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button></div></article>`).join("")}</div>`;
+  box.innerHTML = `<div class="space"><div><b>${rows.length} \u53E5 \xB7 ${uniqueWords.size} \u4E2A\u9519\u8BCD</b><div class="small">\u70B9\u67D0\u4E00\u53E5\u7CBE\u51C6\u91CD\u7EC3\uFF0C\u4E5F\u53EF\u4EE5\u628A\u5F53\u524D\u68C0\u7D22\u7ED3\u679C\u4E00\u8D77\u91CD\u542C\u3002</div></div><button id="retryFilteredProblems" class="primary" ${rows.length ? "" : "disabled"}>\u91CD\u542C\u5F53\u524D\u7B5B\u9009\u9519\u8BCD</button></div><div style="margin-top:10px">${rows.map((row) => `<article class="textitem"><div class="space"><div><h3>${esc3(sentenceSourceLabel(row.entry))}</h3><div class="small">${esc3(row.book.name)} \xB7 ${problemSummary(row.problems)}</div></div></div><p class="snippet">${esc3(row.entry.text)}</p><div class="toolbar"><button class="primary" data-whole-problem-entry="${row.book.id}|${row.entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-retry-entry="${row.book.id}|${row.entry.id}">\u53EA\u91CD\u542C\u8FD9\u53E5\u9519\u8BCD</button><button class="soft" data-retry-entry-all="${row.book.id}|${row.entry.id}">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button></div></article>`).join("")}</div>`;
   document.getElementById("retryFilteredProblems").onclick = () => startSentenceProblemRows(rows, unique3, "\u7B5B\u9009\u51FA\u6765\u7684\u53E5\u5B50\u9519\u8BCD");
   document.querySelectorAll("[data-whole-problem-entry]").forEach((button) => button.onclick = () => {
     const [bookId, entryId] = button.dataset.wholeProblemEntry.split("|");
@@ -6962,7 +7390,7 @@ function applyWholeAlignment(entry, alignment) {
 }
 function wholeDiffHtml(alignment) {
   if (!alignment) return "";
-  return `<div class="sentence-diff">${alignment.operations.map((op) => op.type === "equal" ? `<span class="equal">${esc2(op.expected)}</span>` : op.type === "replace" ? `<span class="replace">${esc2(op.expected)} \u2192 ${esc2(op.actual)}</span>` : op.type === "missing" ? `<span class="missing">${esc2(op.expected)}\uFF08\u6F0F\uFF09</span>` : `<span class="extra">+ ${esc2(op.actual)}</span>`).join("")}</div>`;
+  return `<div class="sentence-diff">${alignment.operations.map((op) => op.type === "equal" ? `<span class="equal">${esc3(op.expected)}</span>` : op.type === "replace" ? `<span class="replace">${esc3(op.expected)} \u2192 ${esc3(op.actual)}</span>` : op.type === "missing" ? `<span class="missing">${esc3(op.expected)}\uFF08\u6F0F\uFF09</span>` : `<span class="extra">+ ${esc3(op.actual)}</span>`).join("")}</div>`;
 }
 function returnFromWholeSentenceRun(run) {
   finishActivity(run?.activityId);
@@ -6988,7 +7416,7 @@ function renderWholeSentenceRun() {
   }
   const st = sentenceStateInfo(entry), modeStatus = st.whole;
   const problems = sentenceProblemTokens(entry).filter((token) => !isSimpleLexeme(state, token.normalized || token.surface));
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="wholeBack" class="back">\u2039</button><div class="studyprogress">\u6574\u53E5\u542C\u5199 \xB7 ${esc2(sentenceSourceLabel(entry))}</div><button id="wholeIgnore" class="retire">${st.status === "ignored" ? "\u6062\u590D\u672C\u53E5" : "\u5FFD\u7565\u672C\u53E5"}</button></div><div class="studybody" style="max-width:820px"><span class="sentence-state ${modeStatus.status}">\u6574\u53E5 ${modeStatus.label}</span><button id="wholeSpeak" class="speaker">\u25D6))</button><button id="wholeSlow" class="soft" style="margin-top:8px">\u6162\u901F\u91CD\u542C \xB7 0.75\xD7</button>${!run.revealed ? `<div class="small">\u5148\u542C\u5B8C\u6574\u53E5\u5B50\uFF0C\u518D\u628A\u6574\u53E5\u5199\u4E0B\u6765\u3002\u6807\u70B9\u4E0D\u53C2\u4E0E\u5BF9\u9519\uFF1B\u6309\u5355\u8BCD\u987A\u5E8F\u505A\u5BF9\u9F50\u3002</div><textarea id="wholeSentenceAnswer" class="whole-answer" placeholder="\u8F93\u5165\u4F60\u542C\u5230\u7684\u5B8C\u6574\u82F1\u6587\u53E5\u5B50\u2026" autocomplete="off" autocapitalize="off">${esc2(run.input)}</textarea><div class="grid2" style="width:100%;max-width:720px;margin-top:10px"><button id="wholeSubmit" class="primary">\u63D0\u4EA4\u6574\u53E5</button><button id="wholeReveal" class="soft">\u770B\u539F\u53E5</button></div>` : `${run.peek ? `<div class="small">\u672C\u6B21\u76F4\u63A5\u770B\u4E86\u539F\u53E5\uFF0C\u8FD9\u53E5\u6807\u8BB0\u4E3A\u201C\u9700\u91CD\u7EC3\u201D\u3002</div><div class="sentence" style="max-width:720px">${esc2(entry.text)}</div>` : `<div class="small">${run.alignment?.correct ? "\u6574\u53E5\u6B63\u786E" : "\u6309\u5355\u8BCD\u5BF9\u9F50\u7ED3\u679C\u5982\u4E0B"}</div>${wholeDiffHtml(run.alignment)}<div class="typed" style="max-width:720px"><b>\u4F60\u5199\u7684\u662F</b><div>${esc2(run.input || "\uFF08\u7A7A\uFF09")}</div></div>`}<div class="sentence-mode-row" style="justify-content:center"><button id="wholeReplay" class="soft">\u91CD\u542C\u6574\u53E5</button><button id="wholeRedoSplit" class="soft">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button>${problems.length ? `<button id="wholeProblems" class="soft">\u53EA\u7EC3\u9519\u8BCD \xB7 ${problems.length}</button>` : ""}<button id="wholeRetry" class="primary">\u518D\u5199\u4E00\u6B21\u6574\u53E5</button><button id="wholeFinish" class="soft">${wholeQueue.length ? `\u4E0B\u4E00\u53E5 \xB7 ${wholeQueue.length}` : `\u8FD4\u56DE`}</button></div>`}</div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="wholeBack" class="back">\u2039</button><div class="studyprogress">\u6574\u53E5\u542C\u5199 \xB7 ${esc3(sentenceSourceLabel(entry))}</div><button id="wholeIgnore" class="retire">${st.status === "ignored" ? "\u6062\u590D\u672C\u53E5" : "\u5FFD\u7565\u672C\u53E5"}</button></div><div class="studybody" style="max-width:820px"><span class="sentence-state ${modeStatus.status}">\u6574\u53E5 ${modeStatus.label}</span><button id="wholeSpeak" class="speaker">\u25D6))</button><button id="wholeSlow" class="soft" style="margin-top:8px">\u6162\u901F\u91CD\u542C \xB7 0.75\xD7</button>${!run.revealed ? `<div class="small">\u5148\u542C\u5B8C\u6574\u53E5\u5B50\uFF0C\u518D\u628A\u6574\u53E5\u5199\u4E0B\u6765\u3002\u6807\u70B9\u4E0D\u53C2\u4E0E\u5BF9\u9519\uFF1B\u6309\u5355\u8BCD\u987A\u5E8F\u505A\u5BF9\u9F50\u3002</div><textarea id="wholeSentenceAnswer" class="whole-answer" placeholder="\u8F93\u5165\u4F60\u542C\u5230\u7684\u5B8C\u6574\u82F1\u6587\u53E5\u5B50\u2026" autocomplete="off" autocapitalize="off">${esc3(run.input)}</textarea><div class="grid2" style="width:100%;max-width:720px;margin-top:10px"><button id="wholeSubmit" class="primary">\u63D0\u4EA4\u6574\u53E5</button><button id="wholeReveal" class="soft">\u770B\u539F\u53E5</button></div>` : `${run.peek ? `<div class="small">\u672C\u6B21\u76F4\u63A5\u770B\u4E86\u539F\u53E5\uFF0C\u8FD9\u53E5\u6807\u8BB0\u4E3A\u201C\u9700\u91CD\u7EC3\u201D\u3002</div><div class="sentence" style="max-width:720px">${esc3(entry.text)}</div>` : `<div class="small">${run.alignment?.correct ? "\u6574\u53E5\u6B63\u786E" : "\u6309\u5355\u8BCD\u5BF9\u9F50\u7ED3\u679C\u5982\u4E0B"}</div>${wholeDiffHtml(run.alignment)}<div class="typed" style="max-width:720px"><b>\u4F60\u5199\u7684\u662F</b><div>${esc3(run.input || "\uFF08\u7A7A\uFF09")}</div></div>`}<div class="sentence-mode-row" style="justify-content:center"><button id="wholeReplay" class="soft">\u91CD\u542C\u6574\u53E5</button><button id="wholeRedoSplit" class="soft">\u91CD\u505A\u672C\u53E5\u62C6\u8BCD</button>${problems.length ? `<button id="wholeProblems" class="soft">\u53EA\u7EC3\u9519\u8BCD \xB7 ${problems.length}</button>` : ""}<button id="wholeRetry" class="primary">\u518D\u5199\u4E00\u6B21\u6574\u53E5</button><button id="wholeFinish" class="soft">${wholeQueue.length ? `\u4E0B\u4E00\u53E5 \xB7 ${wholeQueue.length}` : `\u8FD4\u56DE`}</button></div>`}</div></main>`;
   mountStudyTimer(run.activityId);
   document.getElementById("wholeBack").onclick = () => returnFromWholeSentenceRun(run);
   document.getElementById("wholeSpeak").onclick = () => speak(entry.text);
@@ -7162,7 +7590,7 @@ function renderSentenceRun() {
   const status = token.status, splitState = sentenceStateInfo(entry).split;
   const sameIndexes = entry.tokens.map((x, i) => ({ x, i })).filter(({ x }) => (x.normalized || String(x.surface).toLowerCase()) === (token.normalized || String(token.surface).toLowerCase())).map(({ i }) => i);
   const duplicateNote = sameIndexes.length > 1 ? ` \xB7 \u540C\u8BCD\u7B2C ${sameIndexes.indexOf(tokenIndex) + 1}/${sameIndexes.length} \u6B21` : "";
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="sentenceBack" class="back">\u2039</button><div class="studyprogress">${sentenceRun.cursor + 1} / ${sentenceRun.items.length} \xB7 ${esc2(sentenceRun.label || book.name)}</div></div><div class="studybody"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${splitState.status}">\u62C6\u8BCD ${splitState.label}</span><span class="small">${esc2(sentenceSourceLabel(entry))}${duplicateNote}${sentenceRun.skippedSimple ? ` \xB7 \u5DF2\u8DF3\u8FC7\u7B80\u5355\u8BCD ${sentenceRun.skippedSimple}` : ""}</span></div><button id="sentenceSpeak" class="speaker">\u25D6))</button>${!sentenceRun.revealed ? `<div class="small">\u542C\u5355\u8BCD\uFF0C\u5199\u51FA\u82F1\u6587\u62FC\u5199\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="sentenceAnswer" style="font-size:21px;text-align:center" placeholder="\u8F93\u5165\u82F1\u6587\u62FC\u5199\u2026" autocomplete="off" autocapitalize="off"><div class="grid2" style="margin-top:10px"><button id="sentenceSubmit" class="primary">\u63D0\u4EA4</button><button id="sentenceReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${sentenceRun.result === "good" ? "good" : "bad"}">${esc2(token.surface)}</div><div class="typed"><b>\u4F60\u5199\u7684\u662F</b><div>${esc2(sentenceRun.input || "\uFF08\u76F4\u63A5\u770B\u7B54\u6848\uFF09")}</div></div><div class="statusline">${sentenceRun.result === "good" ? "\u62FC\u5199\u6B63\u786E" : "\u5DF2\u663E\u793A\u6B63\u786E\u62FC\u5199"} \xB7 \u518D\u6807\u8BB0\u771F\u5B9E\u719F\u6089\u5EA6</div><div class="judges"><button id="sentenceFamiliar" class="${status === "familiar" ? "goodbtn" : "soft"}">\u719F\u6089</button><button id="sentenceUnfamiliar" class="${["unfamiliar", "unknown"].includes(status) ? "badbtn" : "soft"}">\u4E0D\u719F\u6089</button></div><div class="move"><button id="sentenceSimple" class="soft">\u6807\u8BB0\u7B80\u5355</button><button id="sentenceNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>`}</div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="sentenceBack" class="back">\u2039</button><div class="studyprogress">${sentenceRun.cursor + 1} / ${sentenceRun.items.length} \xB7 ${esc3(sentenceRun.label || book.name)}</div></div><div class="studybody"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${splitState.status}">\u62C6\u8BCD ${splitState.label}</span><span class="small">${esc3(sentenceSourceLabel(entry))}${duplicateNote}${sentenceRun.skippedSimple ? ` \xB7 \u5DF2\u8DF3\u8FC7\u7B80\u5355\u8BCD ${sentenceRun.skippedSimple}` : ""}</span></div><button id="sentenceSpeak" class="speaker">\u25D6))</button>${!sentenceRun.revealed ? `<div class="small">\u542C\u5355\u8BCD\uFF0C\u5199\u51FA\u82F1\u6587\u62FC\u5199\u3002</div><div style="width:100%;max-width:560px;margin-top:18px"><input id="sentenceAnswer" style="font-size:21px;text-align:center" placeholder="\u8F93\u5165\u82F1\u6587\u62FC\u5199\u2026" autocomplete="off" autocapitalize="off"><div class="grid2" style="margin-top:10px"><button id="sentenceSubmit" class="primary">\u63D0\u4EA4</button><button id="sentenceReveal" class="soft">\u770B\u7B54\u6848</button></div></div>` : `<div class="word ${sentenceRun.result === "good" ? "good" : "bad"}">${esc3(token.surface)}</div><div class="typed"><b>\u4F60\u5199\u7684\u662F</b><div>${esc3(sentenceRun.input || "\uFF08\u76F4\u63A5\u770B\u7B54\u6848\uFF09")}</div></div><div class="statusline">${sentenceRun.result === "good" ? "\u62FC\u5199\u6B63\u786E" : "\u5DF2\u663E\u793A\u6B63\u786E\u62FC\u5199"} \xB7 \u518D\u6807\u8BB0\u771F\u5B9E\u719F\u6089\u5EA6</div><div class="judges"><button id="sentenceFamiliar" class="${status === "familiar" ? "goodbtn" : "soft"}">\u719F\u6089</button><button id="sentenceUnfamiliar" class="${["unfamiliar", "unknown"].includes(status) ? "badbtn" : "soft"}">\u4E0D\u719F\u6089</button></div><div class="move"><button id="sentenceSimple" class="soft">\u6807\u8BB0\u7B80\u5355</button><button id="sentenceNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>`}</div></main>`;
   mountStudyTimer(sentenceRun.activityId);
   document.getElementById("sentenceBack").onclick = () => {
     persist();
@@ -7278,7 +7706,7 @@ function drawTextList() {
   if (!box) return;
   const q = document.getElementById("textSearch").value.trim().toLowerCase(), c = document.getElementById("textFilter").value;
   const list = [...state.texts].sort((a, b) => (b.lastOpened || b.updatedAt || 0) - (a.lastOpened || a.updatedAt || 0)).filter((t) => (!c || t.collection === c) && (!q || `${t.title} ${t.collection} ${t.body}`.toLowerCase().includes(q)));
-  box.innerHTML = list.length ? list.map((t) => `<article class="textitem"><div class="space"><div><h3>${esc2(t.title)}</h3><div class="small"><span class="tag">${esc2(t.collection || "\u672A\u5206\u7C7B")}</span> \xB7 ${splitSentences(t.body).length} \u53E5</div></div></div><p class="snippet">${esc2(t.body.replace(/\s+/g, " "))}</p><div class="toolbar"><button class="primary" data-open-text="${t.id}">\u7EE7\u7EED\u542C${t.sentence ? ` \xB7 \u7B2C ${t.sentence + 1} \u53E5` : ""}</button><button class="soft" data-edit-text="${t.id}">\u7F16\u8F91</button><button class="danger" data-delete-text="${t.id}">\u5220\u9664</button></div></article>`).join("") : '<div class="empty">\u8FD8\u6CA1\u6709\u6587\u672C\u3002</div>';
+  box.innerHTML = list.length ? list.map((t) => `<article class="textitem"><div class="space"><div><h3>${esc3(t.title)}</h3><div class="small"><span class="tag">${esc3(t.collection || "\u672A\u5206\u7C7B")}</span> \xB7 ${splitSentences(t.body).length} \u53E5</div></div></div><p class="snippet">${esc3(t.body.replace(/\s+/g, " "))}</p><div class="toolbar"><button class="primary" data-open-text="${t.id}">\u7EE7\u7EED\u542C${t.sentence ? ` \xB7 \u7B2C ${t.sentence + 1} \u53E5` : ""}</button><button class="soft" data-edit-text="${t.id}">\u7F16\u8F91</button><button class="danger" data-delete-text="${t.id}">\u5220\u9664</button></div></article>`).join("") : '<div class="empty">\u8FD8\u6CA1\u6709\u6587\u672C\u3002</div>';
   document.querySelectorAll("[data-open-text]").forEach((b) => b.onclick = () => {
     textReaderId = b.dataset.openText;
     const t = state.texts.find((x) => x.id === textReaderId);
@@ -7325,8 +7753,8 @@ function renderTextLibraryHome() {
   ensureSentenceBooks(state);
   ensureSimpleWords(state);
   const groups = textCollectionSummaries(state), storage = storageContext();
-  const emptyTextNotice = !groups.length ? `<div class="empty"><div>\u5F53\u524D\u8FD9\u5957\u672C\u5730\u6570\u636E\u91CC\u8FD8\u6CA1\u6709\u6587\u672C\u3002</div><div class="small" style="margin-top:8px">\u4F60\u73B0\u5728\u770B\u5230\u7684\u662F\u300C${esc2(storage.label)}\u300D\u3002iPhone \u4E0A\u6D4F\u89C8\u5668\u9875\u9762\u548C\u6DFB\u52A0\u5230\u4E3B\u5C4F\u5E55\u7684 App \u53EF\u80FD\u5404\u81EA\u4FDD\u5B58\u4E00\u4EFD\u672C\u5730\u6570\u636E\uFF1B\u5982\u679C\u8BB0\u5F55\u5728\u53E6\u4E00\u4E2A\u5165\u53E3\uFF0C\u8BF7\u5148\u5728\u90A3\u91CC\u70B9\u300C\u5907\u4EFD\u300D\uFF0C\u518D\u56DE\u8FD9\u91CC\u70B9\u300C\u6062\u590D\u300D\u3002</div><button id="restoreEmptyText" class="soft" style="margin-top:12px">\u6062\u590D\u5DF2\u6709\u5907\u4EFD</button></div>` : "";
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u5148\u6309\u6587\u672C\u5E93\u627E\u6587\u7AE0\uFF1B\u53E5\u5B50\u548C\u5355\u8BCD\u5B66\u4E60\u8BB0\u5F55\u53EA\u5728\u5BF9\u5E94\u6587\u7AE0\u91CC\u9762\u663E\u793A\u3002</p></div><button id="newText" class="primary">\u65B0\u5EFA\u6587\u672C</button></div></section><section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C\u5E93</h2><div class="small">${state.texts.length} \u7BC7\u6587\u672C \xB7 ${groups.length} \u4E2A\u5E93</div></div></div><div class="list" style="margin-top:12px">${groups.length ? groups.map((g) => `<button class="entry" data-text-collection="${esc2(g.name)}"><div><b>${esc2(g.name)}</b><div class="small" style="margin-top:6px">${g.textCount} \u7BC7 \xB7 \u5DF2\u542C ${g.practicedSentenceCount} \u53E5 \xB7 \u542C\u8FC7 ${g.wordCount} \u8BCD${g.weakCount ? ` \xB7 ${g.weakCount} \u4E2A\u4E0D\u719F\u6089` : ""}</div></div><span>\u8FDB\u5165\u6587\u672C\u5E93 \u203A</span></button>`).join("") : emptyTextNotice}</div></section><section class="card"><div class="space"><div><h2 class="section-title">\u72EC\u7ACB\u53E5\u5B50\u5DE5\u5177</h2><div class="small">\u4E34\u65F6\u53E5\u5B50\u3001\u5168\u5C40\u53E5\u5B50\u5E93\u548C\u9519\u8BCD\u68C0\u7D22\u653E\u5728\u8FD9\u91CC\uFF0C\u4E0D\u518D\u94FA\u5728\u6587\u672C\u4E3B\u9875\u3002</div></div><button id="openSentenceTools" class="soft">\u8FDB\u5165</button></div></section></div>`);
+  const emptyTextNotice = !groups.length ? `<div class="empty"><div>\u5F53\u524D\u8FD9\u5957\u672C\u5730\u6570\u636E\u91CC\u8FD8\u6CA1\u6709\u6587\u672C\u3002</div><div class="small" style="margin-top:8px">\u4F60\u73B0\u5728\u770B\u5230\u7684\u662F\u300C${esc3(storage.label)}\u300D\u3002iPhone \u4E0A\u6D4F\u89C8\u5668\u9875\u9762\u548C\u6DFB\u52A0\u5230\u4E3B\u5C4F\u5E55\u7684 App \u53EF\u80FD\u5404\u81EA\u4FDD\u5B58\u4E00\u4EFD\u672C\u5730\u6570\u636E\uFF1B\u5982\u679C\u8BB0\u5F55\u5728\u53E6\u4E00\u4E2A\u5165\u53E3\uFF0C\u8BF7\u5148\u5728\u90A3\u91CC\u70B9\u300C\u5907\u4EFD\u300D\uFF0C\u518D\u56DE\u8FD9\u91CC\u70B9\u300C\u6062\u590D\u300D\u3002</div><button id="restoreEmptyText" class="soft" style="margin-top:12px">\u6062\u590D\u5DF2\u6709\u5907\u4EFD</button></div>` : "";
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u6587\u672C\u5E93</h2><p>\u5148\u6309\u6587\u672C\u5E93\u627E\u6587\u7AE0\uFF1B\u53E5\u5B50\u548C\u5355\u8BCD\u5B66\u4E60\u8BB0\u5F55\u53EA\u5728\u5BF9\u5E94\u6587\u7AE0\u91CC\u9762\u663E\u793A\u3002</p></div><button id="newText" class="primary">\u65B0\u5EFA\u6587\u672C</button></div></section><section class="card"><div class="space"><div><h2 class="section-title">\u6211\u7684\u6587\u672C\u5E93</h2><div class="small">${state.texts.length} \u7BC7\u6587\u672C \xB7 ${groups.length} \u4E2A\u5E93</div></div></div><div class="list" style="margin-top:12px">${groups.length ? groups.map((g) => `<button class="entry" data-text-collection="${esc3(g.name)}"><div><b>${esc3(g.name)}</b><div class="small" style="margin-top:6px">${g.textCount} \u7BC7 \xB7 \u5DF2\u542C ${g.practicedSentenceCount} \u53E5 \xB7 \u542C\u8FC7 ${g.wordCount} \u8BCD${g.weakCount ? ` \xB7 ${g.weakCount} \u4E2A\u4E0D\u719F\u6089` : ""}</div></div><span>\u8FDB\u5165\u6587\u672C\u5E93 \u203A</span></button>`).join("") : emptyTextNotice}</div></section><section class="card"><div class="space"><div><h2 class="section-title">\u72EC\u7ACB\u53E5\u5B50\u5DE5\u5177</h2><div class="small">\u4E34\u65F6\u53E5\u5B50\u3001\u5168\u5C40\u53E5\u5B50\u5E93\u548C\u9519\u8BCD\u68C0\u7D22\u653E\u5728\u8FD9\u91CC\uFF0C\u4E0D\u518D\u94FA\u5728\u6587\u672C\u4E3B\u9875\u3002</div></div><button id="openSentenceTools" class="soft">\u8FDB\u5165</button></div></section></div>`);
   document.getElementById("newText").onclick = () => {
     textToolsOpen = true;
     textFormOpen = true;
@@ -7348,10 +7776,10 @@ function renderTextCollection() {
   const name = textLibraryCollection || "\u672A\u5206\u7C7B";
   const texts = [...state.texts].filter((t) => (t.collection || "\u672A\u5206\u7C7B") === name).sort((a, b) => (b.lastOpened || b.updatedAt || 0) - (a.lastOpened || a.updatedAt || 0));
   const collectionUnfamiliar = textCollectionUnfamiliarTokens(state, name);
-  shell(`<div class="stack"><section class="card"><div class="space"><div><button id="backTextLibraries" class="ghost">\u2039 \u6587\u672C\u5E93</button><h2 class="section-title">${esc2(name)}</h2><div class="small">${texts.length} \u7BC7\u6587\u672C \xB7 \u6574\u5E93\u4E0D\u719F\u6089 ${collectionUnfamiliar.length} \u8BCD</div></div><div class="toolbar"><button id="exportCollectionUnfamiliar" class="soft" ${collectionUnfamiliar.length ? "" : "disabled"}>\u5BFC\u51FA\u6574\u5E93\u4E0D\u719F\u6089 \xB7 ${collectionUnfamiliar.length}</button><button id="newTextInCollection" class="primary">\u65B0\u5EFA\u6587\u672C</button></div></div></section><section class="card"><div class="list">${texts.length ? texts.map((t) => {
+  shell(`<div class="stack"><section class="card"><div class="space"><div><button id="backTextLibraries" class="ghost">\u2039 \u6587\u672C\u5E93</button><h2 class="section-title">${esc3(name)}</h2><div class="small">${texts.length} \u7BC7\u6587\u672C \xB7 \u6574\u5E93\u4E0D\u719F\u6089 ${collectionUnfamiliar.length} \u8BCD</div></div><div class="toolbar"><button id="exportCollectionUnfamiliar" class="soft" ${collectionUnfamiliar.length ? "" : "disabled"}>\u5BFC\u51FA\u6574\u5E93\u4E0D\u719F\u6089 \xB7 ${collectionUnfamiliar.length}</button><button id="newTextInCollection" class="primary">\u65B0\u5EFA\u6587\u672C</button></div></div></section><section class="card"><div class="list">${texts.length ? texts.map((t) => {
     const practiced = linkedTextEntries(state, t.id, { practicedOnly: true });
     const words = textPracticeWords(state, t.id);
-    return `<article class="textitem"><div class="space"><div><h3>${esc2(t.title)}</h3><div class="small">${splitSentences(t.body).length} \u53E5 \xB7 \u5DF2\u542C ${practiced.length} \u53E5 \xB7 \u542C\u8FC7 ${words.length} \u8BCD</div></div></div><p class="snippet">${esc2(t.body.replace(/\s+/g, " "))}</p><div class="toolbar"><button class="primary" data-open-text="${t.id}">\u7EE7\u7EED\u542C${t.sentence ? ` \xB7 \u7B2C ${t.sentence + 1} \u53E5` : ""}</button><button class="soft" data-text-history="${t.id}">\u5B66\u4E60\u8BB0\u5F55</button><button class="ghost" data-edit-text="${t.id}">\u7F16\u8F91</button></div></article>`;
+    return `<article class="textitem"><div class="space"><div><h3>${esc3(t.title)}</h3><div class="small">${splitSentences(t.body).length} \u53E5 \xB7 \u5DF2\u542C ${practiced.length} \u53E5 \xB7 \u542C\u8FC7 ${words.length} \u8BCD</div></div></div><p class="snippet">${esc3(t.body.replace(/\s+/g, " "))}</p><div class="toolbar"><button class="primary" data-open-text="${t.id}">\u7EE7\u7EED\u542C${t.sentence ? ` \xB7 \u7B2C ${t.sentence + 1} \u53E5` : ""}</button><button class="soft" data-text-history="${t.id}">\u5B66\u4E60\u8BB0\u5F55</button><button class="ghost" data-edit-text="${t.id}">\u7F16\u8F91</button></div></article>`;
   }).join("") : '<div class="empty">\u8FD9\u4E2A\u6587\u672C\u5E93\u8FD8\u6CA1\u6709\u6587\u7AE0\u3002</div>'}</div></section></div>`);
   document.getElementById("backTextLibraries").onclick = () => {
     textLibraryCollection = null;
@@ -7402,11 +7830,11 @@ function renderTextLibraryDetail() {
   const words = textPracticeWords(state, t.id);
   const unfamiliar = textUnfamiliarTokens(state, t.id);
   const legacyCandidates = textLegacyUnfamiliarCandidates(state, t.id);
-  const legacySection = legacyCandidates.length ? `<section class="card"><details id="legacyCandidatePanel" ${textLegacyPanelOpen ? "open" : ""}><summary><b>\u6574\u7406\u65E7\u7248\u4E0D\u719F\u5019\u9009 \xB7 ${legacyCandidates.length}</b></summary><div class="small" style="margin:10px 0 12px">\u65E7\u7248\u672C\u66FE\u628A\u62FC\u5199\u7ED3\u679C\u548C\u719F\u6089\u5EA6\u6DF7\u5728\u4E00\u8D77\uFF0C\u6240\u4EE5\u8FD9\u4E9B\u53EA\u80FD\u6062\u590D\u6210\u201C\u5019\u9009\u201D\u3002\u5728\u8FD9\u91CC\u786E\u8BA4\u4E00\u6B21\u300C\u719F\u6089 / \u4E0D\u719F\u6089 / \u7B80\u5355\u300D\u540E\uFF0C\u5B83\u5C31\u4F1A\u9000\u51FA\u5019\u9009\uFF0C\u5E76\u8FDB\u5165\u73B0\u5728\u7684\u6B63\u5F0F\u72B6\u6001\u3002</div><div class="list">${legacyCandidates.map((w) => `<div class="listitem compact-word"><div class="space"><div><div class="word-main"><b>${esc2(w.surface)}</b><span class="tag">\u5F85\u786E\u8BA4</span></div>${w.sentence ? `<div class="small">${esc2(w.sentence)}</div>` : ""}</div><div class="toolbar"><button class="soft" data-legacy-status="familiar" data-legacy-word="${esc2(w.normalized)}">\u719F\u6089</button><button class="soft" data-legacy-status="unfamiliar" data-legacy-word="${esc2(w.normalized)}">\u4E0D\u719F\u6089</button><button class="ghost" data-legacy-simple="${esc2(w.normalized)}">\u6807\u8BB0\u7B80\u5355</button></div></div></div>`).join("")}</div></details></section>` : "";
-  const wordRows = words.length ? words.map((w) => `<div class="listitem compact-word"><div class="space"><div><div class="word-main"><b>${esc2(w.surface)}</b><span class="tag">${textHistoryStatusLabel(w.status)}</span></div><div class="small">\u51FA\u73B0 ${w.occurrences.length} \u6B21</div></div>${w.simple ? `<button class="soft" data-restore-simple="${esc2(w.lexeme)}">\u6062\u590D</button>` : `<div class="toolbar"><button class="${w.status === "familiar" ? "goodbtn" : "soft"}" data-text-word-status="familiar" data-text-word="${esc2(w.lexeme)}">\u719F\u6089</button><button class="${w.status === "unfamiliar" ? "badbtn" : "soft"}" data-text-word-status="unfamiliar" data-text-word="${esc2(w.lexeme)}">\u4E0D\u719F\u6089</button><button class="ghost" data-mark-simple="${esc2(w.lexeme)}">\u6807\u8BB0\u7B80\u5355</button></div>`}</div></div>`).join("") : '<div class="empty">\u8FD9\u7BC7\u6587\u672C\u8FD8\u6CA1\u6709\u62C6\u8BCD\u8BB0\u5F55\u3002</div>';
-  shell(`<div class="stack"><section class="card"><button id="backTextCollection" class="ghost">\u2039 ${esc2(t.collection || "\u672A\u5206\u7C7B")}</button><h2 class="section-title" style="margin-top:8px">${esc2(t.title)}</h2><div class="small">\u5B66\u4E60\u8BB0\u5F55\u53EA\u663E\u793A\u8FD9\u7BC7\u6587\u672C\u4EA7\u751F\u5E76\u5B9E\u9645\u7EC3\u8FC7\u7684\u53E5\u5B50\u548C\u5355\u8BCD\uFF1B\u719F\u6089\u5EA6\u53EF\u4EE5\u5728\u8FD9\u91CC\u76F4\u63A5\u4FEE\u6539\u3002</div><div class="grid3" style="margin-top:14px"><div class="statbox"><b>${sentences.length}</b><span>\u542C\u8FC7\u7684\u53E5\u5B50</span></div><div class="statbox"><b>${words.length}</b><span>\u542C\u8FC7\u7684\u5355\u8BCD</span></div><div class="statbox"><b>${words.filter((w) => w.simple).length}</b><span>\u6807\u8BB0\u7B80\u5355</span></div></div><div class="toolbar" style="margin-top:12px"><button id="continueText" class="primary">\u7EE7\u7EED\u542C\u6587\u672C</button><button id="exportTextUnfamiliar" class="soft" ${unfamiliar.length ? "" : "disabled"}>\u5BFC\u51FA\u5F53\u524D\u4E0D\u719F\u6089 \xB7 ${unfamiliar.length}</button>${legacyCandidates.length ? `<button id="exportLegacyUnfamiliar" class="soft">\u5BFC\u51FA\u65E7\u7248\u5019\u9009 \xB7 ${legacyCandidates.length}</button>` : ""}</div></section>${legacySection}<section class="card"><h2 class="section-title">\u542C\u8FC7\u7684\u53E5\u5B50</h2><div class="list" style="margin-top:12px">${sentences.length ? sentences.map(({ book, entry }) => {
+  const legacySection = legacyCandidates.length ? `<section class="card"><details id="legacyCandidatePanel" ${textLegacyPanelOpen ? "open" : ""}><summary><b>\u6574\u7406\u65E7\u7248\u4E0D\u719F\u5019\u9009 \xB7 ${legacyCandidates.length}</b></summary><div class="small" style="margin:10px 0 12px">\u65E7\u7248\u672C\u66FE\u628A\u62FC\u5199\u7ED3\u679C\u548C\u719F\u6089\u5EA6\u6DF7\u5728\u4E00\u8D77\uFF0C\u6240\u4EE5\u8FD9\u4E9B\u53EA\u80FD\u6062\u590D\u6210\u201C\u5019\u9009\u201D\u3002\u5728\u8FD9\u91CC\u786E\u8BA4\u4E00\u6B21\u300C\u719F\u6089 / \u4E0D\u719F\u6089 / \u7B80\u5355\u300D\u540E\uFF0C\u5B83\u5C31\u4F1A\u9000\u51FA\u5019\u9009\uFF0C\u5E76\u8FDB\u5165\u73B0\u5728\u7684\u6B63\u5F0F\u72B6\u6001\u3002</div><div class="list">${legacyCandidates.map((w) => `<div class="listitem compact-word"><div class="space"><div><div class="word-main"><b>${esc3(w.surface)}</b><span class="tag">\u5F85\u786E\u8BA4</span></div>${w.sentence ? `<div class="small">${esc3(w.sentence)}</div>` : ""}</div><div class="toolbar"><button class="soft" data-legacy-status="familiar" data-legacy-word="${esc3(w.normalized)}">\u719F\u6089</button><button class="soft" data-legacy-status="unfamiliar" data-legacy-word="${esc3(w.normalized)}">\u4E0D\u719F\u6089</button><button class="ghost" data-legacy-simple="${esc3(w.normalized)}">\u6807\u8BB0\u7B80\u5355</button></div></div></div>`).join("")}</div></details></section>` : "";
+  const wordRows = words.length ? words.map((w) => `<div class="listitem compact-word"><div class="space"><div><div class="word-main"><b>${esc3(w.surface)}</b><span class="tag">${textHistoryStatusLabel(w.status)}</span></div><div class="small">\u51FA\u73B0 ${w.occurrences.length} \u6B21</div></div>${w.simple ? `<button class="soft" data-restore-simple="${esc3(w.lexeme)}">\u6062\u590D</button>` : `<div class="toolbar"><button class="${w.status === "familiar" ? "goodbtn" : "soft"}" data-text-word-status="familiar" data-text-word="${esc3(w.lexeme)}">\u719F\u6089</button><button class="${w.status === "unfamiliar" ? "badbtn" : "soft"}" data-text-word-status="unfamiliar" data-text-word="${esc3(w.lexeme)}">\u4E0D\u719F\u6089</button><button class="ghost" data-mark-simple="${esc3(w.lexeme)}">\u6807\u8BB0\u7B80\u5355</button></div>`}</div></div>`).join("") : '<div class="empty">\u8FD9\u7BC7\u6587\u672C\u8FD8\u6CA1\u6709\u62C6\u8BCD\u8BB0\u5F55\u3002</div>';
+  shell(`<div class="stack"><section class="card"><button id="backTextCollection" class="ghost">\u2039 ${esc3(t.collection || "\u672A\u5206\u7C7B")}</button><h2 class="section-title" style="margin-top:8px">${esc3(t.title)}</h2><div class="small">\u5B66\u4E60\u8BB0\u5F55\u53EA\u663E\u793A\u8FD9\u7BC7\u6587\u672C\u4EA7\u751F\u5E76\u5B9E\u9645\u7EC3\u8FC7\u7684\u53E5\u5B50\u548C\u5355\u8BCD\uFF1B\u719F\u6089\u5EA6\u53EF\u4EE5\u5728\u8FD9\u91CC\u76F4\u63A5\u4FEE\u6539\u3002</div><div class="grid3" style="margin-top:14px"><div class="statbox"><b>${sentences.length}</b><span>\u542C\u8FC7\u7684\u53E5\u5B50</span></div><div class="statbox"><b>${words.length}</b><span>\u542C\u8FC7\u7684\u5355\u8BCD</span></div><div class="statbox"><b>${words.filter((w) => w.simple).length}</b><span>\u6807\u8BB0\u7B80\u5355</span></div></div><div class="toolbar" style="margin-top:12px"><button id="continueText" class="primary">\u7EE7\u7EED\u542C\u6587\u672C</button><button id="exportTextUnfamiliar" class="soft" ${unfamiliar.length ? "" : "disabled"}>\u5BFC\u51FA\u5F53\u524D\u4E0D\u719F\u6089 \xB7 ${unfamiliar.length}</button>${legacyCandidates.length ? `<button id="exportLegacyUnfamiliar" class="soft">\u5BFC\u51FA\u65E7\u7248\u5019\u9009 \xB7 ${legacyCandidates.length}</button>` : ""}</div></section>${legacySection}<section class="card"><h2 class="section-title">\u542C\u8FC7\u7684\u53E5\u5B50</h2><div class="list" style="margin-top:12px">${sentences.length ? sentences.map(({ book, entry }) => {
     const st = sentenceStateInfo(entry);
-    return `<div class="sentence-entry"><div class="sentence-entry-meta"><span class="sentence-state ${st.whole.status}">\u6574\u53E5 ${st.whole.label}</span><span class="sentence-state ${st.split.status}">\u62C6\u8BCD ${st.split.label}</span><span class="small">\u7B2C ${Number(entry.sentenceIndex || 0) + 1} \u53E5</span></div><div class="sentence-entry-text">${esc2(entry.text)}</div><div class="sentence-mode-row"><button class="soft" data-history-whole="${book.id}|${entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-history-split="${book.id}|${entry.id}">\u62C6\u8BCD\u542C\u5199</button></div></div>`;
+    return `<div class="sentence-entry"><div class="sentence-entry-meta"><span class="sentence-state ${st.whole.status}">\u6574\u53E5 ${st.whole.label}</span><span class="sentence-state ${st.split.status}">\u62C6\u8BCD ${st.split.label}</span><span class="small">\u7B2C ${Number(entry.sentenceIndex || 0) + 1} \u53E5</span></div><div class="sentence-entry-text">${esc3(entry.text)}</div><div class="sentence-mode-row"><button class="soft" data-history-whole="${book.id}|${entry.id}">\u6574\u53E5\u542C\u5199</button><button class="soft" data-history-split="${book.id}|${entry.id}">\u62C6\u8BCD\u542C\u5199</button></div></div>`;
   }).join("") : '<div class="empty">\u8FD9\u7BC7\u6587\u672C\u8FD8\u6CA1\u6709\u7EC3\u8FC7\u53E5\u5B50\u3002</div>'}</div></section><section class="card"><h2 class="section-title">\u542C\u8FC7\u7684\u5355\u8BCD</h2><div class="small">\u8FD9\u91CC\u6539\u300C\u719F\u6089 / \u4E0D\u719F\u6089\u300D\u53EA\u6539\u8FD9\u7BC7\u6587\u672C\u5DF2\u7ECF\u7EC3\u8FC7\u7684\u8BB0\u5F55\uFF0C\u4E0D\u4F1A\u5236\u9020\u65B0\u7684\u62FC\u5199\u6210\u7EE9\uFF1B\u201C\u7B80\u5355\u201D\u4ECD\u662F\u5168\u5C40\u8BCD\u72B6\u6001\u3002</div><div class="list" style="margin-top:12px">${wordRows}</div></section></div>`);
   const rerenderKeepingScroll = () => {
     const y = window.scrollY || 0;
@@ -7508,7 +7936,7 @@ function renderTextReader() {
   const linkedRows = findSentenceProblemEntries(state).filter((row) => row.entry.sourceTextId === t.id && (row.entry.sourceSentenceId && row.entry.sourceSentenceId === sentenceRecord.id || !row.entry.sourceSentenceId && Number(row.entry.sentenceIndex) === Number(idx))).map((row) => ({ ...row, problems: row.problems.filter((token) => !isSimpleLexeme(state, token.normalized || token.surface)) })).filter((row) => row.problems.length);
   const linkedProblemCount = new Set(linkedRows.flatMap((row) => row.problems.map((token) => token.normalized || String(token.surface).toLowerCase()))).size;
   const sentenceState = linkedEntries.length ? sentenceStateInfo(linkedEntries[0].entry) : { status: "unseen", label: "\u672A\u7EC3", whole: { status: "unseen", label: "\u672A\u7EC3" }, split: { status: "unseen", label: "\u672A\u7EC3" } };
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="textBack" class="back">\u2039</button><div class="studyprogress">${esc2(t.title)} \xB7 \u7B2C ${idx + 1}/${ss.length} \u53E5<br><span class="small">${esc2(t.collection || "\u672A\u5206\u7C7B")}</span></div><button id="textEdit" class="retire">\u7F16\u8F91</button></div><div class="reader"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${sentenceState.whole.status}">\u6574\u53E5 ${sentenceState.whole.label}</span><span class="sentence-state ${sentenceState.split.status}">\u62C6\u8BCD ${sentenceState.split.label}</span>${linkedProblemCount ? `<span class="small">\u9519\u8BCD ${linkedProblemCount}</span>` : ""}</div><div class="reader-actions"><button id="playFull" class="soft">\u5168\u6587\u6717\u8BFB</button><button id="toggleText" class="soft">${t.hidden ? "\u663E\u793A\u539F\u6587" : "\u9690\u85CF\u539F\u6587"}</button><button id="toggleLoop" class="soft">\u5355\u53E5\u5FAA\u73AF ${t.loop ? "\u5F00" : "\u5173"}</button><button id="dictateWholeSentence" class="primary">\u6574\u53E5\u542C\u5199</button><button id="dictateWholeSequence" class="soft">\u8FDE\u7EED\u6574\u53E5 \xB7 \u6700\u591A10\u53E5</button><button id="dictateSentence" class="soft">\u62C6\u8BCD\u542C\u5199</button>${linkedProblemCount ? `<button id="dictateSentenceProblems" class="soft">\u672C\u53E5\u9519\u8BCD \xB7 ${linkedProblemCount}</button>` : ""}</div><div class="sentence ${t.hidden ? "blur" : ""}">${esc2(sentence)}</div><div class="sentence-nav"><button id="prevSentence" class="soft" ${idx === 0 ? "disabled" : ""}>\u4E0A\u4E00\u53E5</button><button id="playSentence" class="primary">\u91CD\u542C\u672C\u53E5</button><button id="nextSentence" class="soft" ${idx === ss.length - 1 ? "disabled" : ""}>\u4E0B\u4E00\u53E5</button></div><section class="card" style="margin-top:14px"><h3 style="margin-top:0">\u5168\u6587</h3><div id="fullText" class="fulltext ${t.hidden ? "blur" : ""}">${esc2(t.body)}</div></section><section class="card" style="margin-top:14px"><h3 style="margin-top:0">\u4ECE\u672C\u6587\u52A0\u5165\u5355\u8BCD</h3><div class="small">\u6765\u6E90\u4F1A\u4FDD\u5B58\u4E3A\u300C${esc2(source)}\u300D\uFF0C\u4F8B\u53E5\u9ED8\u8BA4\u4FDD\u5B58\u5F53\u524D\u53E5\u3002</div><div class="grid2" style="margin-top:10px"><input id="textWord" placeholder="\u82F1\u6587\u5355\u8BCD"><input id="textZh" placeholder="\u4E2D\u6587\u6838\u5FC3\u4E49\uFF0C\u53EF\u7559\u7A7A"></div><div class="row" style="margin-top:10px"><button id="useSelection" class="soft">\u4F7F\u7528\u9009\u4E2D\u7684\u8BCD</button><button id="addFromText" class="primary">\u52A0\u5165\u8BCD\u5E93</button></div></section></div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="textBack" class="back">\u2039</button><div class="studyprogress">${esc3(t.title)} \xB7 \u7B2C ${idx + 1}/${ss.length} \u53E5<br><span class="small">${esc3(t.collection || "\u672A\u5206\u7C7B")}</span></div><button id="textEdit" class="retire">\u7F16\u8F91</button></div><div class="reader"><div class="sentence-entry-meta" style="justify-content:center"><span class="sentence-state ${sentenceState.whole.status}">\u6574\u53E5 ${sentenceState.whole.label}</span><span class="sentence-state ${sentenceState.split.status}">\u62C6\u8BCD ${sentenceState.split.label}</span>${linkedProblemCount ? `<span class="small">\u9519\u8BCD ${linkedProblemCount}</span>` : ""}</div><div class="reader-actions"><button id="playFull" class="soft">\u5168\u6587\u6717\u8BFB</button><button id="toggleText" class="soft">${t.hidden ? "\u663E\u793A\u539F\u6587" : "\u9690\u85CF\u539F\u6587"}</button><button id="toggleLoop" class="soft">\u5355\u53E5\u5FAA\u73AF ${t.loop ? "\u5F00" : "\u5173"}</button><button id="dictateWholeSentence" class="primary">\u6574\u53E5\u542C\u5199</button><button id="dictateWholeSequence" class="soft">\u8FDE\u7EED\u6574\u53E5 \xB7 \u6700\u591A10\u53E5</button><button id="dictateSentence" class="soft">\u62C6\u8BCD\u542C\u5199</button>${linkedProblemCount ? `<button id="dictateSentenceProblems" class="soft">\u672C\u53E5\u9519\u8BCD \xB7 ${linkedProblemCount}</button>` : ""}</div><div class="sentence ${t.hidden ? "blur" : ""}">${esc3(sentence)}</div><div class="sentence-nav"><button id="prevSentence" class="soft" ${idx === 0 ? "disabled" : ""}>\u4E0A\u4E00\u53E5</button><button id="playSentence" class="primary">\u91CD\u542C\u672C\u53E5</button><button id="nextSentence" class="soft" ${idx === ss.length - 1 ? "disabled" : ""}>\u4E0B\u4E00\u53E5</button></div><section class="card" style="margin-top:14px"><h3 style="margin-top:0">\u5168\u6587</h3><div id="fullText" class="fulltext ${t.hidden ? "blur" : ""}">${esc3(t.body)}</div></section><section class="card" style="margin-top:14px"><h3 style="margin-top:0">\u4ECE\u672C\u6587\u52A0\u5165\u5355\u8BCD</h3><div class="small">\u6765\u6E90\u4F1A\u4FDD\u5B58\u4E3A\u300C${esc3(source)}\u300D\uFF0C\u4F8B\u53E5\u9ED8\u8BA4\u4FDD\u5B58\u5F53\u524D\u53E5\u3002</div><div class="grid2" style="margin-top:10px"><input id="textWord" placeholder="\u82F1\u6587\u5355\u8BCD"><input id="textZh" placeholder="\u4E2D\u6587\u6838\u5FC3\u4E49\uFF0C\u53EF\u7559\u7A7A"></div><div class="row" style="margin-top:10px"><button id="useSelection" class="soft">\u4F7F\u7528\u9009\u4E2D\u7684\u8BCD</button><button id="addFromText" class="primary">\u52A0\u5165\u8BCD\u5E93</button></div></section></div></main>`;
   document.getElementById("textBack").onclick = () => {
     speechSynthesis.cancel();
     textReaderId = null;
@@ -7618,7 +8046,7 @@ function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = ""
 function pendingMeaningHtml() {
   const words = state.words.filter((w) => w.needsMeaning && !w.zh);
   if (!words.length) return "";
-  return `<section class="card"><div class="space"><div><h2 class="section-title">\u5F85\u8865\u91CA\u4E49</h2><div class="small">\u53E5\u5B50\u9519\u8BCD\u5148\u65E0\u6253\u65AD\u5BFC\u5165\uFF0C\u8FD9\u91CC\u4E00\u6B21\u6279\u91CF\u8865\u3002\u5171 ${words.length} \u4E2A\u3002</div></div></div><div class="error-compact" style="margin-top:10px">${words.slice(0, 80).map((w) => `<div class="error-row"><span class="en">${esc2(w.en)}</span><input data-pending-meaning="${w.id}" placeholder="\u4E2D\u6587\u6838\u5FC3\u4E49" value=""></div>`).join("")}</div><div class="row" style="margin-top:10px"><button id="savePendingMeanings" class="primary">\u4FDD\u5B58\u5DF2\u586B\u5199\u91CA\u4E49</button></div></section>`;
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u5F85\u8865\u91CA\u4E49</h2><div class="small">\u53E5\u5B50\u9519\u8BCD\u5148\u65E0\u6253\u65AD\u5BFC\u5165\uFF0C\u8FD9\u91CC\u4E00\u6B21\u6279\u91CF\u8865\u3002\u5171 ${words.length} \u4E2A\u3002</div></div></div><div class="error-compact" style="margin-top:10px">${words.slice(0, 80).map((w) => `<div class="error-row"><span class="en">${esc3(w.en)}</span><input data-pending-meaning="${w.id}" placeholder="\u4E2D\u6587\u6838\u5FC3\u4E49" value=""></div>`).join("")}</div><div class="row" style="margin-top:10px"><button id="savePendingMeanings" class="primary">\u4FDD\u5B58\u5DF2\u586B\u5199\u91CA\u4E49</button></div></section>`;
 }
 function bindPendingMeanings() {
   const b = document.getElementById("savePendingMeanings");
@@ -7643,7 +8071,7 @@ function bindPendingMeanings() {
 function wordEditorHtml() {
   const w = wordById(wordEditId);
   if (!w) return "";
-  return `<section class="card"><div class="space"><div><h2 class="section-title">\u7F16\u8F91\u5355\u8BCD</h2><div class="small">\u82F1\u6587\u4E3B\u952E\u4FDD\u6301\u4E0D\u53D8\uFF1B\u53EF\u4EE5\u6539\u91CA\u4E49\u3001\u8BCD\u6027\u3001\u82F1\u6587\u5B9A\u4E49\u3001\u4F8B\u53E5\u548C\u6240\u5C5E\u8BCD\u4E66\u3002</div></div><button id="cancelWordEdit" class="ghost">\u53D6\u6D88</button></div><div class="grid2" style="margin-top:12px"><div class="field"><label>\u82F1\u6587</label><input value="${esc2(w.en)}" disabled></div><div class="field"><label>\u4E2D\u6587</label><input id="editWordZh" value="${esc2(w.zh || "")}"></div><div class="field"><label>\u8BCD\u6027</label><input id="editWordPos" value="${esc2(w.pos || "")}"></div><div class="field"><label>\u82F1\u6587\u91CA\u4E49</label><input id="editWordDef" value="${esc2(w.def || "")}"></div></div><div class="field" style="margin-top:10px"><label>\u6240\u5C5E\u8BCD\u4E66\uFF08\u9017\u53F7\u5206\u9694\uFF09</label><input id="editWordSources" value="${esc2((w.sources || []).join(", "))}"></div><div class="field" style="margin-top:10px"><label>\u4F8B\u53E5\uFF08\u6BCF\u884C\u4E00\u6761\uFF09</label><textarea id="editWordExamples" style="min-height:90px">${esc2((w.examples || []).join("\n"))}</textarea></div><div class="row" style="margin-top:10px"><button id="saveWordEdit" class="primary">\u4FDD\u5B58\u4FEE\u6539</button><button id="deleteWordEdit" class="danger">\u5F7B\u5E95\u5220\u9664</button></div></section>`;
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u7F16\u8F91\u5355\u8BCD</h2><div class="small">\u82F1\u6587\u4E3B\u952E\u4FDD\u6301\u4E0D\u53D8\uFF1B\u53EF\u4EE5\u6539\u91CA\u4E49\u3001\u8BCD\u6027\u3001\u82F1\u6587\u5B9A\u4E49\u3001\u4F8B\u53E5\u548C\u6240\u5C5E\u8BCD\u4E66\u3002</div></div><button id="cancelWordEdit" class="ghost">\u53D6\u6D88</button></div><div class="grid2" style="margin-top:12px"><div class="field"><label>\u82F1\u6587</label><input value="${esc3(w.en)}" disabled></div><div class="field"><label>\u4E2D\u6587</label><input id="editWordZh" value="${esc3(w.zh || "")}"></div><div class="field"><label>\u8BCD\u6027</label><input id="editWordPos" value="${esc3(w.pos || "")}"></div><div class="field"><label>\u82F1\u6587\u91CA\u4E49</label><input id="editWordDef" value="${esc3(w.def || "")}"></div></div><div class="field" style="margin-top:10px"><label>\u6240\u5C5E\u8BCD\u4E66\uFF08\u9017\u53F7\u5206\u9694\uFF09</label><input id="editWordSources" value="${esc3((w.sources || []).join(", "))}"></div><div class="field" style="margin-top:10px"><label>\u4F8B\u53E5\uFF08\u6BCF\u884C\u4E00\u6761\uFF09</label><textarea id="editWordExamples" style="min-height:90px">${esc3((w.examples || []).join("\n"))}</textarea></div><div class="row" style="margin-top:10px"><button id="saveWordEdit" class="primary">\u4FDD\u5B58\u4FEE\u6539</button><button id="deleteWordEdit" class="danger">\u5F7B\u5E95\u5220\u9664</button></div></section>`;
 }
 function bindWordEditor() {
   const w = wordById(wordEditId);
@@ -7670,18 +8098,18 @@ function bindWordEditor() {
 }
 function importFieldSelect(field, label) {
   if (!importDraft) return "";
-  const options = ['<option value="-1">\u4E0D\u5BFC\u5165</option>'];
+  const options2 = ['<option value="-1">\u4E0D\u5BFC\u5165</option>'];
   for (let i = 0; i < importDraft.width; i++) {
     const head = importDraft.header?.[i] || `\u7B2C ${i + 1} \u5217`;
-    options.push(`<option value="${i}" ${Number(importDraft.map[field]) === i ? "selected" : ""}>${esc2(head)}</option>`);
+    options2.push(`<option value="${i}" ${Number(importDraft.map[field]) === i ? "selected" : ""}>${esc3(head)}</option>`);
   }
-  return `<label class="small">${label}<select data-import-field="${field}">${options.join("")}</select></label>`;
+  return `<label class="small">${label}<select data-import-field="${field}">${options2.join("")}</select></label>`;
 }
 function importPreviewHtml() {
   if (!importDraft) return "";
   const rows = recordsFromDraft(importDraft, importDraft.map);
   const valid = rows.filter((r) => r.valid);
-  return `<section class="card"><div class="space"><div><h2 class="section-title">\u786E\u8BA4\u5BFC\u5165 \xB7 ${esc2(importDraft.fileName)}</h2><div class="small">${importDraft.delimiter === "	" ? "TSV" : "CSV"} \xB7 ${valid.length} \u884C\u53EF\u5BFC\u5165\u3002\u5148\u786E\u8BA4\u5217\u6620\u5C04\u4E0E\u6E05\u6D17\u7ED3\u679C\uFF0C\u518D\u5199\u5165\u8BCD\u5E93\u3002</div></div><button id="cancelImportDraft" class="ghost">\u53D6\u6D88</button></div>${importCleaningHtml(rows, esc2)}<div class="filtergrid" style="margin-top:12px">${importFieldSelect("en", "\u82F1\u6587")}${importFieldSelect("zh", "\u4E2D\u6587")}${importFieldSelect("pos", "\u8BCD\u6027")}${importFieldSelect("def", "\u82F1\u6587\u91CA\u4E49")}${importFieldSelect("source", "\u8BCD\u4E66/\u6765\u6E90")}${importFieldSelect("example", "\u4F8B\u53E5")}</div><label class="small" style="display:block;margin-top:10px"><input id="importOverwrite" type="checkbox" style="width:auto"> \u5DF2\u5B58\u5728\u5355\u8BCD\uFF1A\u7528\u672C\u6B21\u975E\u7A7A\u5B57\u6BB5\u8986\u76D6\u65E7\u91CA\u4E49/\u8BCD\u6027/\u5B9A\u4E49</label><div class="error-compact" style="margin-top:10px">${valid.slice(0, 10).map((r) => `<div class="error-row"><span class="en">${esc2(r.en)}</span><span class="zh">${esc2(r.zh || "\u2014")}</span><span class="small">${esc2(r.source || "")}</span></div>`).join("") || '<div class="empty">\u6CA1\u6709\u53EF\u5BFC\u5165\u884C</div>'}</div><div class="row" style="margin-top:12px"><button id="confirmImportDraft" class="primary" ${valid.length ? "" : "disabled"}>\u786E\u8BA4\u5BFC\u5165 \xB7 ${valid.length}</button></div></section>`;
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u786E\u8BA4\u5BFC\u5165 \xB7 ${esc3(importDraft.fileName)}</h2><div class="small">${importDraft.delimiter === "	" ? "TSV" : "CSV"} \xB7 ${valid.length} \u884C\u53EF\u5BFC\u5165\u3002\u5148\u786E\u8BA4\u5217\u6620\u5C04\u4E0E\u6E05\u6D17\u7ED3\u679C\uFF0C\u518D\u5199\u5165\u8BCD\u5E93\u3002</div></div><button id="cancelImportDraft" class="ghost">\u53D6\u6D88</button></div>${importCleaningHtml(rows, esc3)}<div class="filtergrid" style="margin-top:12px">${importFieldSelect("en", "\u82F1\u6587")}${importFieldSelect("zh", "\u4E2D\u6587")}${importFieldSelect("pos", "\u8BCD\u6027")}${importFieldSelect("def", "\u82F1\u6587\u91CA\u4E49")}${importFieldSelect("source", "\u8BCD\u4E66/\u6765\u6E90")}${importFieldSelect("example", "\u4F8B\u53E5")}</div><label class="small" style="display:block;margin-top:10px"><input id="importOverwrite" type="checkbox" style="width:auto"> \u5DF2\u5B58\u5728\u5355\u8BCD\uFF1A\u7528\u672C\u6B21\u975E\u7A7A\u5B57\u6BB5\u8986\u76D6\u65E7\u91CA\u4E49/\u8BCD\u6027/\u5B9A\u4E49</label><div class="error-compact" style="margin-top:10px">${valid.slice(0, 10).map((r) => `<div class="error-row"><span class="en">${esc3(r.en)}</span><span class="zh">${esc3(r.zh || "\u2014")}</span><span class="small">${esc3(r.source || "")}</span></div>`).join("") || '<div class="empty">\u6CA1\u6709\u53EF\u5BFC\u5165\u884C</div>'}</div><div class="row" style="margin-top:12px"><button id="confirmImportDraft" class="primary" ${valid.length ? "" : "disabled"}>\u786E\u8BA4\u5BFC\u5165 \xB7 ${valid.length}</button></div></section>`;
 }
 function bindImportPreview() {
   if (!importDraft) return;
@@ -7736,13 +8164,25 @@ function startFreeListenBatch(ids, label = "\u672C\u8F6E\u53E5\u5B50\u9519\u8BCD
   renderFreeListen();
   speak(wordById(ids[0]).en);
 }
+function recordFreeJudgment(result) {
+  if (!freeListen || freeListen.revealed) return;
+  const word = freeListenCurrent();
+  if (!word) return;
+  recordVocabularyPractice(state, word, "free", result, {
+    date: currentDayKey(),
+    sessionId: freeListen.activityId,
+    studyBooks: freeListen.batch ? [] : [freeListen.book]
+  });
+  touchActivity(freeListen.activityId);
+  persist();
+}
 function freeListenCurrent() {
   return wordById(freeListen?.ids?.[freeListen.index]);
 }
 function renderFreeListen() {
   const w = freeListenCurrent();
   if (!freeListen || !w) return finishFreeListen();
-  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="freeBack" class="back">\u2039</button><div class="studyprogress">\u81EA\u7531\u542C \xB7 ${esc2(freeListen.book)} \xB7 ${freeListen.index + 1}/${freeListen.ids.length}</div><div></div></div><div class="studybody"><div class="small">\u672C\u6A21\u5F0F\u4E0D\u5199\u5165 FSRS\u3001\u4E0D\u5360\u4ECA\u65E5\u8BA1\u5212\uFF1B\u9000\u51FA\u540E\u53EF\u4EE5\u4ECE\u672C\u4E66\u4E0A\u6B21\u4F4D\u7F6E\u7EE7\u7EED\u3002</div><button id="freeSpeak" class="speaker">\u25D6))</button>${freeListen.revealed ? `<div class="word ${freeListen.result === "good" ? "good" : "bad"}">${esc2(w.en)}</div><div class="meaning">${esc2(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div><div class="move"><button id="freePrev" class="soft" ${freeListen.index === 0 ? "disabled" : ""}>\u4E0A\u4E00\u8BCD</button><button id="freeReplay" class="soft">\u91CD\u542C</button><button id="freeNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>` : `<div class="small">\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div><div class="judges"><button id="freeGood" class="goodbtn">\u719F\u6089</button><button id="freeBad" class="badbtn">\u4E0D\u719F\u6089</button></div>`}</div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studytop"><button id="freeBack" class="back">\u2039</button><div class="studyprogress">\u81EA\u7531\u542C \xB7 ${esc3(freeListen.book)} \xB7 ${freeListen.index + 1}/${freeListen.ids.length}</div><div></div></div><div class="studybody"><div class="small">\u672C\u6A21\u5F0F\u4E0D\u5199\u5165 FSRS\u3001\u4E0D\u5360\u4ECA\u65E5\u8BA1\u5212\uFF1B\u9000\u51FA\u540E\u53EF\u4EE5\u4ECE\u672C\u4E66\u4E0A\u6B21\u4F4D\u7F6E\u7EE7\u7EED\u3002</div><button id="freeSpeak" class="speaker">\u25D6))</button>${freeListen.revealed ? `<div class="word ${freeListen.result === "good" ? "good" : "bad"}">${esc3(w.en)}</div><div class="meaning">${esc3(w.zh || "\u6682\u65E0\u4E2D\u6587\u91CA\u4E49")}</div><div class="move"><button id="freePrev" class="soft" ${freeListen.index === 0 ? "disabled" : ""}>\u4E0A\u4E00\u8BCD</button><button id="freeReplay" class="soft">\u91CD\u542C</button><button id="freeNext" class="primary">\u4E0B\u4E00\u8BCD</button></div>` : `<div class="small">\u610F\u601D\u80FD\u4E0D\u80FD\u76F4\u63A5\u51FA\u6765\uFF1F</div><div class="judges"><button id="freeGood" class="goodbtn">\u719F\u6089</button><button id="freeBad" class="badbtn">\u4E0D\u719F\u6089</button></div>`}</div></main>`;
   mountStudyTimer(freeListen.activityId);
   document.getElementById("freeBack").onclick = () => {
     finishActivity(freeListen.activityId);
@@ -7754,11 +8194,13 @@ function renderFreeListen() {
   document.getElementById("freeSpeak").onclick = () => speak(w.en);
   if (!freeListen.revealed) {
     document.getElementById("freeGood").onclick = () => {
+      recordFreeJudgment("good");
       freeListen.result = "good";
       freeListen.revealed = true;
       renderFreeListen();
     };
     document.getElementById("freeBad").onclick = () => {
+      recordFreeJudgment("bad");
       freeListen.result = "bad";
       freeListen.revealed = true;
       if (!freeListen.bad.includes(w.id)) freeListen.bad.push(w.id);
@@ -7823,7 +8265,7 @@ function finishFreeListen() {
   const bad = [...run.bad];
   if (!run.batch) freeProgressMap()[run.book] = { scope: run.scope, limit: run.limit, index: 0, updatedAt: Date.now(), completedAt: Date.now() };
   persist();
-  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u81EA\u7531\u542C\u5B8C\u6210 \xB7 \u4E0D\u5F71\u54CD FSRS</div><h2>${esc2(run.book)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${run.ids.length}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u672C\u8F6E\u4E0D\u719F</span></div><div class="statbox"><b>${run.ids.length - bad.length}</b><span>\u5176\u4F59\u719F\u6089</span></div></div><div class="row" style="justify-content:center">${bad.length ? `<button id="freeToType" class="primary">\u624B\u6253\u8FD9\u6279 \xB7 ${bad.length}</button><button id="freeToToday" class="soft">\u52A0\u5165\u4ECA\u65E5\u8BA1\u5212</button>` : ""}<button id="freeFinish" class="ghost">\u8FD4\u56DE\u8BCD\u5E93</button></div></div></div></main>`;
+  root.innerHTML = `<main class="immersive"><div class="studybody"><div class="finish"><div class="small">\u81EA\u7531\u542C\u5B8C\u6210 \xB7 \u4E0D\u5F71\u54CD FSRS</div><h2>${esc3(run.book)}</h2><div class="grid3" style="margin:18px 0"><div class="statbox"><b>${run.ids.length}</b><span>\u672C\u8F6E\u8BCD\u6570</span></div><div class="statbox"><b class="bad">${bad.length}</b><span>\u672C\u8F6E\u4E0D\u719F</span></div><div class="statbox"><b>${run.ids.length - bad.length}</b><span>\u5176\u4F59\u719F\u6089</span></div></div><div class="row" style="justify-content:center">${bad.length ? `<button id="freeToType" class="primary">\u624B\u6253\u8FD9\u6279 \xB7 ${bad.length}</button><button id="freeToToday" class="soft">\u52A0\u5165\u4ECA\u65E5\u8BA1\u5212</button>` : ""}<button id="freeFinish" class="ghost">\u8FD4\u56DE\u8BCD\u5E93</button></div></div></div></main>`;
   if (document.getElementById("freeToType")) document.getElementById("freeToType").onclick = () => {
     freeListen = null;
     view = "type";
@@ -7838,7 +8280,7 @@ function finishFreeListen() {
 }
 function freeListenSetupHtml(books) {
   const progress = freeProgressMap();
-  return `<section class="card"><div class="space"><div><h2 class="section-title">\u81EA\u7531\u542C\u8BCD\u4E66</h2><div class="small">\u5BFC\u5165\u4E00\u6574\u672C\u540E\u53EF\u4EE5\u76F4\u63A5\u4ECE\u5934\u6328\u4E2A\u542C\uFF0C\u4E0D\u5360\u4ECA\u65E5\u65B0\u8BCD/\u590D\u4E60\uFF0C\u4E5F\u4E0D\u4F1A\u4FEE\u6539 FSRS\u3002</div></div></div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u8BCD\u4E66</label><select id="freeListenSelect"><option value="">\u8BF7\u9009\u62E9</option>${books.map((b) => `<option value="${esc2(b)}">${esc2(b)}</option>`).join("")}</select></div><div class="field"><label>\u8303\u56F4</label><select id="freeListenScope"><option value="all">\u6574\u672C</option><option value="unheard">\u53EA\u542C\u4ECE\u672A\u6B63\u5F0F\u542C\u8FC7</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="freeListenLimit"><option value="50">50</option><option value="100">100</option><option value="0">\u5168\u90E8</option></select></div><label class="small" style="align-self:end"><input id="freeListenResume" type="checkbox" checked style="width:auto"> \u6709\u8BB0\u5F55\u65F6\u4ECE\u4E0A\u6B21\u4F4D\u7F6E\u7EE7\u7EED</label></div><div id="freeListenHint" class="small" style="margin-top:9px"></div><div class="row" style="margin-top:10px"><button id="startFreeListen" class="primary">\u5F00\u59CB\u81EA\u7531\u542C</button></div></section>`;
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u81EA\u7531\u542C\u8BCD\u4E66</h2><div class="small">\u5BFC\u5165\u4E00\u6574\u672C\u540E\u53EF\u4EE5\u76F4\u63A5\u4ECE\u5934\u6328\u4E2A\u542C\uFF0C\u4E0D\u5360\u4ECA\u65E5\u65B0\u8BCD/\u590D\u4E60\uFF0C\u4E5F\u4E0D\u4F1A\u4FEE\u6539 FSRS\u3002</div></div></div><div class="filtergrid" style="margin-top:12px"><div class="field"><label>\u8BCD\u4E66</label><select id="freeListenSelect"><option value="">\u8BF7\u9009\u62E9</option>${books.map((b) => `<option value="${esc3(b)}">${esc3(b)}</option>`).join("")}</select></div><div class="field"><label>\u8303\u56F4</label><select id="freeListenScope"><option value="all">\u6574\u672C</option><option value="unheard">\u53EA\u542C\u4ECE\u672A\u6B63\u5F0F\u542C\u8FC7</option></select></div><div class="field"><label>\u672C\u8F6E\u6570\u91CF</label><select id="freeListenLimit"><option value="50">50</option><option value="100">100</option><option value="0">\u5168\u90E8</option></select></div><label class="small" style="align-self:end"><input id="freeListenResume" type="checkbox" checked style="width:auto"> \u6709\u8BB0\u5F55\u65F6\u4ECE\u4E0A\u6B21\u4F4D\u7F6E\u7EE7\u7EED</label></div><div id="freeListenHint" class="small" style="margin-top:9px"></div><div class="row" style="margin-top:10px"><button id="startFreeListen" class="primary">\u5F00\u59CB\u81EA\u7531\u542C</button></div></section>`;
 }
 function bindFreeListenSetup() {
   const select = document.getElementById("freeListenSelect"), hint = document.getElementById("freeListenHint");
@@ -7856,7 +8298,7 @@ function wordbookManageHtml(books) {
     const words = state.words.filter((w) => (w.sources || []).includes(book));
     const exclusive = words.filter((w) => (w.sources || []).length === 1).length;
     const shared = words.length - exclusive;
-    return `<div class="error-row"><span><b>${esc2(book)}</b><div class="small">${words.length} \u8BCD \xB7 \u72EC\u5360 ${exclusive} \xB7 \u5171\u4EAB ${shared}</div></span><span></span><button class="danger" data-delete-book="${esc2(book)}">\u5220\u9664\u8BCD\u4E66</button></div>`;
+    return `<div class="error-row"><span><b>${esc3(book)}</b><div class="small">${words.length} \u8BCD \xB7 \u72EC\u5360 ${exclusive} \xB7 \u5171\u4EAB ${shared}</div></span><span></span><button class="danger" data-delete-book="${esc3(book)}">\u5220\u9664\u8BCD\u4E66</button></div>`;
   }).join("") || '<div class="empty">\u8FD8\u6CA1\u6709\u8BCD\u4E66\u3002</div>'}</div></section>`;
 }
 function bindWordbookManage() {
@@ -7882,7 +8324,7 @@ function bindWordbookManage() {
 }
 function renderLibrary() {
   const books = allBooks(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${wordTextRepairHtml(state, esc2)}${wordbookManageHtml(books)}${freeListenSetupHtml(books)}${errorBookSectionHtml()}${pendingMeaningHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc2(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${wordTextRepairHtml(state, esc3)}${wordbookManageHtml(books)}${freeListenSetupHtml(books)}${errorBookSectionHtml()}${pendingMeaningHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc3(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("importWords").onclick = () => importInput.click();
   document.getElementById("backupWords").onclick = backup;
   document.getElementById("restoreWords").onclick = () => restoreInput.click();
@@ -7917,7 +8359,7 @@ function drawWordList() {
   if (!box) return;
   const q = document.getElementById("wordSearch").value.trim().toLowerCase(), book = document.getElementById("wordBook").value;
   const list = state.words.filter((w) => (!book || w.sources.includes(book)) && (!q || `${w.en} ${w.zh}`.toLowerCase().includes(q))).slice(0, 200);
-  box.innerHTML = list.length ? list.map((w) => `<div class="listitem compact-word"><div class="space"><div style="min-width:0"><div class="word-main"><b>${esc2(w.en)}</b>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : ""}<span class="word-meaning">${esc2(w.zh || "")}</span></div><div class="source-tags" style="justify-content:flex-start">${w.sources.map((s) => `<span class="tag">${esc2(s)}</span>`).join("")}</div></div><div class="row"><button class="ghost" data-edit-word="${w.id}">\u7F16\u8F91</button><button class="soft" data-retire="${w.id}">${w.retired ? "\u6062\u590D" : "\u7B80\u5355"}</button><button class="danger" data-delete-word="${w.id}">\u5220\u9664</button></div></div></div>`).join("") : '<div class="empty">\u6CA1\u6709\u5339\u914D\u7684\u8BCD\u3002</div>';
+  box.innerHTML = list.length ? list.map((w) => `<div class="listitem compact-word"><div class="space"><div style="min-width:0"><div class="word-main"><b>${esc3(w.en)}</b>${w.retired ? '<span class="tag">\u7B80\u5355</span>' : ""}<span class="word-meaning">${esc3(w.zh || "")}</span></div><div class="source-tags" style="justify-content:flex-start">${w.sources.map((s) => `<span class="tag">${esc3(s)}</span>`).join("")}</div></div><div class="row"><button class="ghost" data-edit-word="${w.id}">\u7F16\u8F91</button><button class="soft" data-retire="${w.id}">${w.retired ? "\u6062\u590D" : "\u7B80\u5355"}</button><button class="danger" data-delete-word="${w.id}">\u5220\u9664</button></div></div></div>`).join("") : '<div class="empty">\u6CA1\u6709\u5339\u914D\u7684\u8BCD\u3002</div>';
   document.querySelectorAll("[data-retire]").forEach((b) => b.onclick = () => {
     const w = wordById(b.dataset.retire);
     markSimpleLexeme(state, w.en, !w.retired);
@@ -7944,7 +8386,7 @@ function backup() {
   download(`listenwrite-backup-${currentDayKey()}.json`, exportState(state));
 }
 function getDataChartUI() {
-  if (!dataChartUI) dataChartUI = createDataChartUI({ getState: () => state, root, shell, persist, toast, esc: esc2, speak, startActivity, touchActivity, finishActivity, activityMinutes: activityMinutes2, mountStudyTimer, currentDayKey });
+  if (!dataChartUI) dataChartUI = createDataChartUI({ getState: () => state, root, shell, persist, toast, esc: esc3, speak, startActivity, touchActivity, finishActivity, activityMinutes: activityMinutes2, mountStudyTimer, currentDayKey });
   return dataChartUI;
 }
 function dataChartDayDetailHtml() {
@@ -7968,9 +8410,9 @@ function renderRecentStudy() {
     const body = rows.map(({ word, events }) => {
       const st = recentListeningStatus(word, events), first = events[0], last = events.at(-1);
       const attempts = events.map((event, i) => `<div class="bookrow"><span>${i === 0 ? "\u9996\u8F6E" : `\u7B2C ${i + 1} \u6B21`} \xB7 ${recentAttemptTime(event.ts)}</span><span class="${event.result === "good" ? "good" : "bad"}">${event.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F\u6089"}</span><span class="row"><button class="ghost" data-recent-event="${event.id}" data-result="good" ${event.result === "good" ? "disabled" : ""}>\u6539\u719F\u6089</button><button class="ghost" data-recent-event="${event.id}" data-result="bad" ${event.result === "bad" ? "disabled" : ""}>\u6539\u4E0D\u719F</button></span></div>`).join("");
-      return `<div class="listitem"><div class="space"><div><div class="word-main"><b>${esc2(word.en)}</b><span class="word-meaning">${esc2(word.zh || "")}</span></div><div class="small">\u9996\u8F6E ${first?.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F"} \xB7 \u6700\u8FD1 ${last?.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F"} \xB7 \u5171 ${events.length} \u6B21\u5224\u65AD</div></div><span class="${st.cls}">${esc2(st.label)}</span></div><details class="details" style="margin-top:8px"><summary>\u4FEE\u6539\u8FD9\u4E00\u5929\u7684\u5224\u65AD\u8BB0\u5F55</summary><div style="margin-top:8px">${attempts}</div></details></div>`;
+      return `<div class="listitem"><div class="space"><div><div class="word-main"><b>${esc3(word.en)}</b><span class="word-meaning">${esc3(word.zh || "")}</span></div><div class="small">\u9996\u8F6E ${first?.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F"} \xB7 \u6700\u8FD1 ${last?.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F"} \xB7 \u5171 ${events.length} \u6B21\u5224\u65AD</div></div><span class="${st.cls}">${esc3(st.label)}</span></div><details class="details" style="margin-top:8px"><summary>\u4FEE\u6539\u8FD9\u4E00\u5929\u7684\u5224\u65AD\u8BB0\u5F55</summary><div style="margin-top:8px">${attempts}</div></details></div>`;
     }).join("");
-    return `<section class="card"><div class="space"><div><h2 class="section-title">${esc2(title)} \xB7 ${date}</h2><div class="small">${rows.length} \u4E2A\u6B63\u5F0F\u542C\u8BCD\u5355\u8BCD \xB7 \u624B\u6253\u4E0D\u6DF7\u5165\u8FD9\u91CC</div></div></div><div class="list" style="margin-top:10px">${body || '<div class="empty">\u8FD9\u4E00\u5929\u8FD8\u6CA1\u6709\u6B63\u5F0F\u542C\u8BCD\u8BB0\u5F55\u3002</div>'}</div></section>`;
+    return `<section class="card"><div class="space"><div><h2 class="section-title">${esc3(title)} \xB7 ${date}</h2><div class="small">${rows.length} \u4E2A\u6B63\u5F0F\u542C\u8BCD\u5355\u8BCD \xB7 \u624B\u6253\u4E0D\u6DF7\u5165\u8FD9\u91CC</div></div></div><div class="list" style="margin-top:10px">${body || '<div class="empty">\u8FD9\u4E00\u5929\u8FD8\u6CA1\u6709\u6B63\u5F0F\u542C\u8BCD\u8BB0\u5F55\u3002</div>'}</div></section>`;
   }).join("");
   shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8FD1 3 \u5929\u5B66\u4E60\u8BB0\u5F55</h2><p>\u6309\u5B66\u4E60\u65E5\u770B\u6B63\u5F0F\u542C\u8BCD\u72B6\u6001\u3002\u8BEF\u70B9\u540E\u53EF\u4EE5\u76F4\u63A5\u6539\u67D0\u4E00\u6B21\u201C\u719F\u6089 / \u4E0D\u719F\u6089\u201D\uFF1B\u9996\u8F6E\u88AB\u4FEE\u6539\u65F6\u4F1A\u91CD\u5EFA\u8BE5\u8BCD FSRS\uFF0C\u7EDF\u8BA1\u548C\u5F53\u5929\u5F3A\u5316\u72B6\u6001\u4E5F\u4F1A\u968F\u4E4B\u91CD\u7B97\u3002</p></div><button id="recentBack" class="soft">\u8FD4\u56DE\u9996\u9875</button></div></section>${sections}</div>`);
   document.getElementById("recentBack").onclick = () => go("home");
@@ -8047,7 +8489,7 @@ function dayDetailHtml() {
     return { w, a, first, bad, l, t };
   }).filter((x) => x.w).sort((a, b) => b.bad - a.bad || a.w.en.localeCompare(b.w.en));
   const cold = ev.filter((e) => e.cold), good = cold.filter((e) => e.result === "good").length;
-  return `<section class="card"><div class="space"><div><h2 class="section-title">${statDay} \u8BE6\u60C5</h2><div class="small">\u9996\u8F6E\u719F\u6089 ${pct(good, cold.length)} \xB7 ${rows.length} \u4E2A\u8BCD \xB7 ${ev.length} \u6B21\u5224\u65AD</div></div>${rows.some((x) => x.bad) ? '<button id="practiceDayBad" class="soft">\u624B\u6253\u5F53\u5929\u4E0D\u719F</button>' : ""}</div><div style="margin-top:10px">${rows.length ? rows.map((x) => `<div class="bookrow"><b>${esc2(x.w.en)}</b><span class="${x.first?.result === "good" ? "good" : "bad"}">\u9996\u8F6E${x.first?.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F"}</span><span>\u4E0D\u719F ${x.bad}</span><span class="mobilehide">\u542C ${x.l}</span><span class="mobilehide">\u5199 ${x.t}</span></div>`).join("") : '<div class="empty">\u8FD9\u4E00\u5929\u6CA1\u6709\u8BB0\u5F55\u3002</div>'}</div></section>`;
+  return `<section class="card"><div class="space"><div><h2 class="section-title">${statDay} \u8BE6\u60C5</h2><div class="small">\u9996\u8F6E\u719F\u6089 ${pct(good, cold.length)} \xB7 ${rows.length} \u4E2A\u8BCD \xB7 ${ev.length} \u6B21\u5224\u65AD</div></div>${rows.some((x) => x.bad) ? '<button id="practiceDayBad" class="soft">\u624B\u6253\u5F53\u5929\u4E0D\u719F</button>' : ""}</div><div style="margin-top:10px">${rows.length ? rows.map((x) => `<div class="bookrow"><b>${esc3(x.w.en)}</b><span class="${x.first?.result === "good" ? "good" : "bad"}">\u9996\u8F6E${x.first?.result === "good" ? "\u719F\u6089" : "\u4E0D\u719F"}</span><span>\u4E0D\u719F ${x.bad}</span><span class="mobilehide">\u542C ${x.l}</span><span class="mobilehide">\u5199 ${x.t}</span></div>`).join("") : '<div class="empty">\u8FD9\u4E00\u5929\u6CA1\u6709\u8BB0\u5F55\u3002</div>'}</div></section>`;
 }
 function hardWordsHtml(E) {
   const map = /* @__PURE__ */ new Map();
@@ -8066,7 +8508,7 @@ function hardWordsHtml(E) {
     const r = retrievability(w.card, Date.now(), state.settings.retention);
     return { w, g, score: g.coldBad * 5 + g.bad + (w.card?.reps ? (1 - r) * 2 : 0) };
   }).filter((x) => x && x.g.bad).sort((a, b) => b.score - a.score).slice(0, 12);
-  return `<section class="card"><div class="space"><div><h2 class="section-title">\u56F0\u96BE\u8BCD</h2><div class="small">\u8DE8\u5929\u9996\u8F6E\u5931\u8D25\u6743\u91CD\u6700\u9AD8\uFF0C\u518D\u53C2\u8003\u91CD\u590D\u5931\u8D25\u548C\u53EF\u63D0\u53D6\u7387\u3002</div></div>${hard.length ? '<button id="practiceHard" class="soft">\u624B\u6253\u8FD9\u6279</button>' : ""}</div>${hard.length ? hard.map((x) => `<div class="harditem"><div class="space"><div><div class="title">${esc2(x.w.en)}</div><div class="small">\u9996\u8F6E\u4E0D\u719F ${x.g.coldBad} \xB7 \u603B\u4E0D\u719F ${x.g.bad} \xB7 FSRS\u53EF\u63D0\u53D6\u7387 ${Math.round(retrievability(x.w.card, Date.now(), state.settings.retention) * 100)}%</div></div><div>${esc2(x.w.zh)}</div></div><div class="history">${x.g.events.slice(-8).map((e) => `<span class="pill ${e.result}">${e.date.slice(5)} ${e.mode === "type" ? "\u5199" : "\u542C"} ${e.result === "good" ? "\u719F" : "\u4E0D\u719F"}</span>`).join("")}</div></div>`).join("") : '<div class="empty">\u8FD9\u4E2A\u533A\u95F4\u6CA1\u6709\u4E0D\u719F\u8BB0\u5F55\u3002</div>'}</section>`;
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u56F0\u96BE\u8BCD</h2><div class="small">\u8DE8\u5929\u9996\u8F6E\u5931\u8D25\u6743\u91CD\u6700\u9AD8\uFF0C\u518D\u53C2\u8003\u91CD\u590D\u5931\u8D25\u548C\u53EF\u63D0\u53D6\u7387\u3002</div></div>${hard.length ? '<button id="practiceHard" class="soft">\u624B\u6253\u8FD9\u6279</button>' : ""}</div>${hard.length ? hard.map((x) => `<div class="harditem"><div class="space"><div><div class="title">${esc3(x.w.en)}</div><div class="small">\u9996\u8F6E\u4E0D\u719F ${x.g.coldBad} \xB7 \u603B\u4E0D\u719F ${x.g.bad} \xB7 FSRS\u53EF\u63D0\u53D6\u7387 ${Math.round(retrievability(x.w.card, Date.now(), state.settings.retention) * 100)}%</div></div><div>${esc3(x.w.zh)}</div></div><div class="history">${x.g.events.slice(-8).map((e) => `<span class="pill ${e.result}">${e.date.slice(5)} ${e.mode === "type" ? "\u5199" : "\u542C"} ${e.result === "good" ? "\u719F" : "\u4E0D\u719F"}</span>`).join("")}</div></div>`).join("") : '<div class="empty">\u8FD9\u4E2A\u533A\u95F4\u6CA1\u6709\u4E0D\u719F\u8BB0\u5F55\u3002</div>'}</section>`;
 }
 function bindStatsActions() {
   const d = state.events.filter((e) => e.date === statDay && e.result === "bad").map((e) => e.wordId);
@@ -8080,8 +8522,27 @@ function bindStatsActions() {
     startType(scored, "\u56F0\u96BE\u8BCD");
   };
 }
+function getMistakesUI() {
+  if (!mistakesUI) mistakesUI = createMistakesUI({
+    root,
+    state: () => state,
+    today: currentDayKey,
+    shell,
+    persist,
+    speak,
+    toast,
+    download,
+    startActivity,
+    touchActivity,
+    finishActivity,
+    mountTimer: mountStudyTimer,
+    stopSpeech: () => window.speechSynthesis?.cancel()
+  });
+  return mistakesUI;
+}
 function render() {
   try {
+    if (mistakesUI?.isActive()) return mistakesUI.render();
     if (freeListen) return renderFreeListen();
     if (listen) return renderListen();
     if (typeRun) return renderTypeRun();
@@ -8094,10 +8555,11 @@ function render() {
     else if (view === "datachart") getDataChartUI().render();
     else if (view === "library") renderLibrary();
     else if (view === "recent") renderRecentStudy();
+    else if (view === "mistakes") getMistakesUI().render();
     else renderStats();
   } catch (err) {
     console.error(err);
-    root.innerHTML = `<div class="app-error card"><h2>\u9875\u9762\u6E32\u67D3\u5931\u8D25</h2><p>\u6570\u636E\u6CA1\u6709\u88AB\u6E05\u7A7A\u3002\u5237\u65B0\u540E\u4ECD\u6709\u95EE\u9898\u53EF\u4EE5\u628A\u8FD9\u6BB5\u53D1\u7ED9\u6211\u3002</p><pre>${esc2(err?.stack || err)}</pre></div>`;
+    root.innerHTML = `<div class="app-error card"><h2>\u9875\u9762\u6E32\u67D3\u5931\u8D25</h2><p>\u6570\u636E\u6CA1\u6709\u88AB\u6E05\u7A7A\u3002\u5237\u65B0\u540E\u4ECD\u6709\u95EE\u9898\u53EF\u4EE5\u628A\u8FD9\u6BB5\u53D1\u7ED9\u6211\u3002</p><pre>${esc3(err?.stack || err)}</pre></div>`;
   }
 }
 restoreInput.onchange = async () => {
@@ -8112,6 +8574,8 @@ restoreInput.onchange = async () => {
     reconcileDataChartContent(state.dataChart, DATA_CHART_SEED);
     persist();
     dataChartUI = null;
+    mistakesUI?.reset();
+    mistakesUI = null;
     toast("\u5907\u4EFD\u5DF2\u6062\u590D");
     view = "home";
     render();
@@ -8139,6 +8603,10 @@ textInput.onchange = async () => {
   textInput.value = "";
 };
 window.addEventListener("keydown", (e) => {
+  if (mistakesUI?.isActive()) {
+    mistakesUI.handleKeydown(e);
+    return;
+  }
   if (listen) {
     if (e.key === "1") judgeListen("good");
     else if (e.key === "2") judgeListen("bad");

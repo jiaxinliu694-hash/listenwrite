@@ -1,3 +1,4 @@
+import { normalizePracticeEvents } from './mistakes.js';
 import { repairWordTextState, hasWordTextRepairs } from './wordtext.js';
 import { emptyCard, rebuildCard } from './scheduler.js';
 import { calendarDayKey } from './studyday.js';
@@ -96,7 +97,7 @@ export function storageContext(env = {}) {
 export function hasUserData(state) {
   if (!state || typeof state !== 'object') return false;
   if ((state.texts || []).length) return true;
-  if ((state.events || []).length) return true;
+  if ((state.events || []).length || (state.vocabPracticeEvents || []).length) return true;
   if ((state.activities || []).length) return true;
   if ((state.simpleWords || []).length || (state.errorBooks || []).length) return true;
   if (Object.keys(state.dailyPlans || {}).length) return true;
@@ -126,7 +127,7 @@ export function hasUserData(state) {
 export function defaultState() {
   return {
     version: STATE_VERSION,
-    words: [], events: [], texts: [], sentenceBooks: [], sentenceSession: null,
+    words: [], events: [], vocabPracticeEvents: [], texts: [], sentenceBooks: [], sentenceSession: null,
     simpleWords: [], errorBooks: [], dailyPlans: {}, activities: [],
     dataChart: normalizeDataChartState(null),
     settings: {
@@ -167,6 +168,10 @@ function normalizeEvent(event, index, preserveDate) {
     date: preserveDate && event.date ? event.date : calendarDayKey(ts), ts,
     mode: event.mode === 'type' ? 'type' : 'listen',
     result: event.result || event.res || 'bad', originalResult: event.originalResult || event.result || event.res || 'bad',
+    ...(Array.isArray(event.booksSnapshot) ? { booksSnapshot: [...new Set(event.booksSnapshot.filter(value => typeof value === 'string'))] } : {}),
+    ...(Array.isArray(event.studyBooks) ? { studyBooks: [...new Set(event.studyBooks.filter(value => typeof value === 'string'))] } : {}),
+    ...(typeof event.enSnapshot === 'string' ? { enSnapshot: event.enSnapshot } : {}),
+    ...(typeof event.zhSnapshot === 'string' ? { zhSnapshot: event.zhSnapshot } : {}),
     cold: false, attempt: 1, source: event.source || null, sentence: event.sentence || null, editedAt: event.editedAt || null,
   };
 }
@@ -250,6 +255,7 @@ export function normalizeState(input) {
   const preserveDates = inputVersion >= 4;
   state.words = (input?.words || []).map(normalizeWord).filter((w) => w.en);
   state.events = reindexEvents((input?.events || []).map((e, i) => normalizeEvent(e, i, preserveDates)).filter((e) => e.wordId));
+  state.vocabPracticeEvents = normalizePracticeEvents(input?.vocabPracticeEvents);
   state.texts = normalizeTexts(input?.texts);
   state.sentenceBooks = normalizeSentenceBooks(input?.sentenceBooks);
   state.sentenceSession = normalizeSentenceSession(input?.sentenceSession);

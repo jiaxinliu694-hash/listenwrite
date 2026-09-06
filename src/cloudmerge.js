@@ -2,7 +2,7 @@ function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
 function clone(value) { return value == null ? value : structuredClone(value); }
 
 const SET_ARRAY_PATHS = new Set(['simpleWords', 'errorBooks']);
-const ID_ARRAY_PATHS = new Set(['words', 'texts', 'activities', 'events']);
+const ID_ARRAY_PATHS = new Set(['words', 'texts', 'activities', 'events', 'vocabPracticeEvents']);
 
 // FSRS cards and event indexes are projections of the event log. Merging them
 // field-by-field can produce a card that represents neither device. Keep one
