@@ -35,11 +35,227 @@ setItem(
 );
 DATA_CHART_SEED.contentVersion = "2026-08-15-v2";
 
+// src/device-entry.js
+var DEVICE_ENTRY_KEY = "listenwrite-issued-device-entry-v1";
+var HEX = /^[0-9a-f]{64}$/;
+var UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+var SESSION_REQUIRED = "\u8FD9\u53F0\u8BBE\u5907\u6CA1\u6709\u53EF\u7528\u7684\u539F\u8FDE\u63A5\u3002\u8BF7\u5728\u4ECD\u663E\u793A\u4E91\u5DF2\u8FDE\u63A5\u7684\u90A3\u53F0\u8BBE\u5907\u751F\u6210\u5165\u53E3\uFF1B\u4E0D\u7528\u5728\u65B0\u8BBE\u5907\u8F93\u5165\u5BC6\u7801\u3002";
+function createDeviceEntry({
+  url,
+  key,
+  appUrl,
+  email,
+  ensureSession: ensureSession2,
+  refreshSession: refreshSession2,
+  peekSession,
+  storage = () => globalThis.localStorage,
+  cryptoImpl = () => globalThis.crypto,
+  fetchImpl = (...args) => globalThis.fetch(...args)
+}) {
+  let memory = null, generation = 0, inFlight = null;
+  const validSession = (value) => Boolean(value?.access_token && UUID.test(value.user?.id || "") && String(value.user?.email || "").toLowerCase() === email.toLowerCase());
+  const read = () => {
+    try {
+      const value = memory || JSON.parse(storage()?.getItem(DEVICE_ENTRY_KEY) || "null");
+      return HEX.test(value?.key || "") && HEX.test(value?.keyHash || "") && UUID.test(value?.userId || "") ? value : null;
+    } catch {
+      return null;
+    }
+  };
+  const save = (value) => {
+    memory = value;
+    try {
+      if (value) storage()?.setItem(DEVICE_ENTRY_KEY, JSON.stringify(value));
+      else storage()?.removeItem(DEVICE_ENTRY_KEY);
+    } catch {
+    }
+  };
+  function assertContext(uid2, version2) {
+    const current = peekSession();
+    if (generation !== version2 || !validSession(current) || current.user.id !== uid2) {
+      throw new Error("\u8BBE\u5907\u8FDE\u63A5\u5DF2\u53D8\u5316\uFF0C\u672A\u63A5\u6536\u65E7\u8BF7\u6C42\u7684\u7ED3\u679C\u3002");
+    }
+  }
+  async function ownerSession() {
+    const current = await ensureSession2();
+    if (!validSession(current)) throw new Error(SESSION_REQUIRED);
+    return current;
+  }
+  function entryLink(value) {
+    return `${appUrl}#lw_sync=${value.key}`;
+  }
+  function link() {
+    const value = read(), current = peekSession();
+    return value?.registered && validSession(current) && value.userId === current.user.id ? entryLink(value) : null;
+  }
+  function forget() {
+    generation += 1;
+    save(null);
+  }
+  async function makeRecord(uid2) {
+    const crypto = cryptoImpl();
+    if (!crypto?.getRandomValues || !crypto?.subtle?.digest) throw new Error("\u5F53\u524D\u6D4F\u89C8\u5668\u65E0\u6CD5\u5B89\u5168\u751F\u6210\u5165\u53E3\uFF0C\u8BF7\u5728 HTTPS \u9875\u9762\u4F7F\u7528\u65B0\u7248\u6D4F\u89C8\u5668\u3002");
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+    return { key: token, keyHash: Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join(""), userId: uid2, registered: false };
+  }
+  async function post(route, digest, initial, version2, retried = false) {
+    assertContext(initial.user.id, version2);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2e4);
+    timer?.unref?.();
+    let response, data;
+    try {
+      response = await fetchImpl(`${url}/rest/v1/rpc/${route}`, {
+        method: "POST",
+        headers: { apikey: key, Authorization: `Bearer ${initial.access_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ p_key_hash: digest }),
+        signal: controller.signal,
+        cache: "no-store",
+        referrerPolicy: "no-referrer"
+      });
+      data = await response.json().catch(() => null);
+    } catch {
+      throw new Error("\u7F51\u7EDC\u6682\u65F6\u4E0D\u53EF\u7528\uFF0C\u672A\u6E05\u9664\u539F\u8FDE\u63A5\uFF1B\u6062\u590D\u540E\u518D\u6B21\u70B9\u8FDE\u63A5\u65B0\u8BBE\u5907\u5373\u53EF\uFF0C\u4E0D\u4F1A\u91CD\u590D\u751F\u6210\u5165\u53E3\u3002");
+    } finally {
+      clearTimeout(timer);
+    }
+    assertContext(initial.user.id, version2);
+    if (response.status === 401 && !retried) {
+      const refreshed = await refreshSession2();
+      if (!validSession(refreshed) || refreshed.user.id !== initial.user.id) throw new Error(SESSION_REQUIRED);
+      return post(route, digest, refreshed, version2, true);
+    }
+    if (!response.ok) {
+      if (response.status === 401 || data?.code === "42501") throw new Error("\u539F\u8FDE\u63A5\u6216\u5165\u53E3\u4E0D\u53EF\u7528\u3002\u53EA\u80FD\u7531\u672C\u4EBA\u4ECD\u8FDE\u63A5\u7740\u7684\u8BBE\u5907\u751F\u6210\uFF1B\u672C\u673A\u8BB0\u5F55\u672A\u6539\u52A8\u3002");
+      if (data?.code === "54000") throw new Error("\u5DF2\u6709\u8F83\u591A\u6709\u6548\u5165\u53E3\uFF0C\u8BF7\u5148\u505C\u7528\u4E0D\u518D\u9700\u8981\u7684\u5165\u53E3\u3002");
+      throw new Error("\u5165\u53E3\u6682\u672A\u751F\u6210\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\uFF1B\u65E0\u9700\u53D1\u9001\u90AE\u4EF6\uFF0C\u539F\u8BCD\u5E93\u672A\u6539\u52A8\u3002");
+    }
+    if (!data || data.user_id !== initial.user.id || data.key_hash !== digest) throw new Error("\u670D\u52A1\u5668\u786E\u8BA4\u4E0D\u5B8C\u6574\uFF0C\u6682\u4E0D\u663E\u793A\u5165\u53E3\uFF0C\u8BF7\u91CD\u8BD5\u3002");
+    return data;
+  }
+  function issue() {
+    if (inFlight) return inFlight;
+    const version2 = generation;
+    const task = (async () => {
+      const current = await ownerSession();
+      assertContext(current.user.id, version2);
+      let value = read();
+      if (!value || value.userId !== current.user.id) value = await makeRecord(current.user.id);
+      assertContext(current.user.id, version2);
+      save(value);
+      const result = await post("listenwrite_register_device_entry", value.keyHash, current, version2);
+      if (result.registered !== true) throw new Error("\u670D\u52A1\u5668\u672A\u786E\u8BA4\u5165\u53E3\uFF0C\u7A0D\u540E\u91CD\u8BD5\u5373\u53EF\u3002");
+      assertContext(current.user.id, version2);
+      value = { ...value, registered: true };
+      save(value);
+      return entryLink(value);
+    })();
+    inFlight = task;
+    task.finally(() => {
+      if (inFlight === task) inFlight = null;
+    }).catch(() => {
+    });
+    return task;
+  }
+  async function revoke() {
+    if (inFlight) throw new Error("\u5165\u53E3\u64CD\u4F5C\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u7A0D\u540E\u3002");
+    const version2 = generation, current = await ownerSession(), value = read();
+    if (!value || value.userId !== current.user.id) throw new Error("\u6B64\u8BBE\u5907\u6CA1\u6709\u751F\u6210\u8FC7\u53EF\u505C\u7528\u7684\u5165\u53E3\u3002");
+    const task = post("listenwrite_revoke_device_entry", value.keyHash, current, version2);
+    inFlight = task;
+    try {
+      const result = await task;
+      if (result.revoked !== true) throw new Error("\u670D\u52A1\u5668\u672A\u786E\u8BA4\u505C\u7528\uFF0C\u539F\u5165\u53E3\u4ECD\u4FDD\u7559\u3002");
+      assertContext(current.user.id, version2);
+      forget();
+      return true;
+    } finally {
+      if (inFlight === task) inFlight = null;
+    }
+  }
+  return { issue, link, revoke, forget };
+}
+
+// src/device-entry-ui.js
+function deviceEntryHtml() {
+  return `<section id="lwDeviceEntryPanel" style="margin-top:16px"><h3>\u8FDE\u63A5\u65B0\u8BBE\u5907</h3><p class="small">\u4F7F\u7528\u8FD9\u53F0\u8BBE\u5907\u5DF2\u6709\u7684\u8FDE\u63A5\uFF0C\u7ED9 Edge \u6216\u53E6\u4E00\u53F0\u8BBE\u5907\u751F\u6210\u76F4\u8FBE\u94FE\u63A5\uFF0C\u4E0D\u7528\u5BC6\u7801\u6216\u90AE\u4EF6\u3002\u62FF\u5230\u5B8C\u6574\u94FE\u63A5\u7684\u4EBA\u80FD\u67E5\u770B\u548C\u4FEE\u6539\u8BCD\u5E93\uFF0C\u53EA\u53D1\u7ED9\u81EA\u5DF1\u7684\u8BBE\u5907\u3002</p><div class="lw-cloud-actions"><button id="lwDeviceEntryCreate" class="primary">\u8FDE\u63A5\u65B0\u8BBE\u5907\uFF08\u751F\u6210\u76F4\u8FBE\u94FE\u63A5\uFF09</button></div><div id="lwDeviceEntryResult" hidden><label class="lw-cloud-field">\u5728\u53E6\u4E00\u53F0\u8BBE\u5907\u6253\u5F00\u5B8C\u6574\u7F51\u5740<input id="lwDeviceEntryUrl" type="text" readonly autocomplete="off" spellcheck="false" aria-label="\u79C1\u4EBA\u76F4\u8FBE\u94FE\u63A5"></label><div class="lw-cloud-actions"><button id="lwDeviceEntryCopy">\u590D\u5236\u76F4\u8FBE\u94FE\u63A5</button></div><details style="margin-top:12px"><summary>\u5165\u53E3\u7BA1\u7406</summary><p class="small">\u505C\u7528\u4F1A\u65AD\u5F00\u6240\u6709\u4F7F\u7528\u8FD9\u6761\u94FE\u63A5\u7684\u8BBE\u5907\uFF0C\u4F46\u4E0D\u5220\u9664\u4EFB\u4F55\u5B66\u4E60\u8BB0\u5F55\u3002\u968F\u540E\u53EF\u91CD\u65B0\u751F\u6210\u3002</p><button id="lwDeviceEntryRevoke">\u505C\u7528\u8FD9\u6761\u94FE\u63A5</button></details></div><p id="lwDeviceEntryStatus" role="status" class="small" style="margin-top:10px"></p></section>`;
+}
+function bindDeviceEntry({ entries, setBusy = () => {
+}, documentImpl = globalThis.document, navigatorImpl = globalThis.navigator }) {
+  const panel = documentImpl.getElementById("lwDeviceEntryPanel");
+  if (!panel) return;
+  const button = documentImpl.getElementById("lwDeviceEntryCreate");
+  const output = documentImpl.getElementById("lwDeviceEntryResult");
+  const input = documentImpl.getElementById("lwDeviceEntryUrl");
+  const status = documentImpl.getElementById("lwDeviceEntryStatus");
+  const copy = documentImpl.getElementById("lwDeviceEntryCopy");
+  const revoke = documentImpl.getElementById("lwDeviceEntryRevoke");
+  let working = false;
+  function show(value) {
+    input.value = value || "";
+    output.hidden = !value;
+    panel.dataset.cloudEditing = value ? "true" : "false";
+  }
+  function busy(value) {
+    working = value;
+    setBusy(value);
+    button.disabled = value;
+    revoke.disabled = value;
+  }
+  async function copyLink() {
+    if (!input.value) return;
+    try {
+      if (!navigatorImpl?.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigatorImpl.clipboard.writeText(input.value);
+      status.textContent = "\u94FE\u63A5\u5DF2\u590D\u5236\uFF0C\u5728 Edge \u5730\u5740\u680F\u6253\u5F00\u5373\u53EF\u3002\u4E0D\u8981\u53D1\u5230\u516C\u5F00\u7FA4\u6216\u516C\u5F00\u4ED3\u5E93\u3002";
+    } catch {
+      input.focus();
+      input.select();
+      status.textContent = "\u5165\u53E3\u5DF2\u751F\u6210\u3002\u6D4F\u89C8\u5668\u4E0D\u5141\u8BB8\u81EA\u52A8\u590D\u5236\uFF0C\u8BF7\u957F\u6309\u5DF2\u9009\u4E2D\u7684\u7F51\u5740\u590D\u5236\uFF0C\u5728 Edge \u6253\u5F00\u3002";
+    }
+  }
+  show(entries.link());
+  button.onclick = async () => {
+    if (working) return;
+    busy(true);
+    panel.dataset.cloudEditing = "true";
+    status.textContent = "\u6B63\u5728\u4F7F\u7528\u672C\u673A\u5DF2\u6709\u8FDE\u63A5\u751F\u6210\u5165\u53E3\u2026";
+    try {
+      const value = await entries.issue();
+      if (!panel.isConnected) return;
+      show(value);
+      await copyLink();
+    } catch (error) {
+      status.textContent = error?.message || "\u751F\u6210\u672A\u5B8C\u6210\uFF0C\u672C\u673A\u8BB0\u5F55\u672A\u6539\u52A8\u3002";
+    } finally {
+      busy(false);
+      panel.dataset.cloudEditing = input.value ? "true" : "false";
+    }
+  };
+  copy.onclick = copyLink;
+  revoke.onclick = async () => {
+    if (working) return;
+    busy(true);
+    status.textContent = "\u6B63\u5728\u505C\u7528\u8FD9\u6761\u5165\u53E3\u2026";
+    try {
+      await entries.revoke();
+      show(null);
+      status.textContent = "\u8FD9\u6761\u94FE\u63A5\u5DF2\u505C\u7528\uFF0C\u5B66\u4E60\u8BB0\u5F55\u672A\u5220\u9664\u3002\u53EF\u91CD\u65B0\u70B9\u8FDE\u63A5\u65B0\u8BBE\u5907\u751F\u6210\u65B0\u94FE\u63A5\u3002";
+    } catch (error) {
+      status.textContent = error?.message || "\u505C\u7528\u672A\u5B8C\u6210\uFF0C\u5165\u53E3\u4ECD\u4FDD\u7559\u3002";
+    } finally {
+      busy(false);
+    }
+  };
+}
+
 // src/cloud-direct.js
 var DIRECT_KEY = "listenwrite-direct-sync-v1";
 var DIRECT_PENDING_KEY = "listenwrite-direct-sync-pending-v1";
 var TOKEN = /^[a-f0-9]{64}$/;
-var UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+var UUID2 = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 var ROUTES = Object.freeze({ listenwrite_pull_state: "listenwrite_direct_pull", listenwrite_push_state: "listenwrite_direct_push" });
 function createDirectCloud({
   url,
@@ -68,7 +284,7 @@ function createDirectCloud({
   };
   const saved = () => {
     const value = memory || read(DIRECT_KEY);
-    return TOKEN.test(value?.key || "") && UUID.test(value?.userId || "") ? value : null;
+    return TOKEN.test(value?.key || "") && UUID2.test(value?.userId || "") ? value : null;
   };
   const candidate = () => {
     const value = pending || read(DIRECT_PENDING_KEY);
@@ -136,7 +352,7 @@ function createDirectCloud({
     connection = (async () => {
       const result = await post("listenwrite_direct_connect", { p_sync_key: item.key });
       if (version2 !== generation || candidate()?.key !== item.key) return peek();
-      if (result?.connected !== true || !UUID.test(result.user_id || "")) {
+      if (result?.connected !== true || !UUID2.test(result.user_id || "")) {
         throw new Error("\u4E91\u7AEF\u8FDE\u63A5\u54CD\u5E94\u4E0D\u5B8C\u6574\uFF0C\u672A\u66FF\u6362\u5F53\u524D\u5165\u53E3\u3002");
       }
       memory = { key: item.key, userId: result.user_id };
@@ -4461,6 +4677,15 @@ var auth = createCloudAuth({
   clearSession
 });
 var direct = createDirectCloud({ url: SUPABASE_URL, key: SUPABASE_KEY, appUrl: APP_URL, email: OWNER_EMAIL });
+var deviceEntries = createDeviceEntry({
+  url: SUPABASE_URL,
+  key: SUPABASE_KEY,
+  appUrl: APP_URL,
+  email: OWNER_EMAIL,
+  ensureSession: () => auth.ensure(),
+  refreshSession: () => auth.refresh(),
+  peekSession: () => normalizeSession2(readStored(SESSION_KEY))
+});
 var lastCloudCheck = 0;
 function nowSec() {
   return Math.floor(Date.now() / 1e3);
@@ -4876,6 +5101,7 @@ async function overwriteCloudWithLocalState() {
   });
 }
 async function cloudSignOut() {
+  deviceEntries.forget();
   const accessToken = session?.access_token;
   direct.clear();
   auth.invalidatePending();
@@ -4978,9 +5204,9 @@ function openCloudModal() {
   const email = directMode ? "\u4E2A\u4EBA\u8BCD\u5E93\uFF08\u65E0\u9700\u5BC6\u7801\u6216\u90AE\u4EF6\uFF09" : session?.user?.email || OWNER_EMAIL;
   const conflictHtml = conflict ? `<div class="lw-cloud-status lw-cloud-warning"><b>\u68C0\u6D4B\u5230\u4E24\u7AEF\u90FD\u6709\u4FEE\u6539</b><br>${esc(syncMessage)}</div>` : "";
   const passwordSettings = `<details style="margin-top:16px"><summary>\u8BBE\u7F6E\u6216\u4FEE\u6539\u540C\u6B65\u5BC6\u7801</summary><p class="small">\u5728\u5DF2\u767B\u5F55\u7684\u8BBE\u5907\u4E0A\u8BBE\u7F6E\u4E00\u6B21\uFF0C\u5176\u4ED6\u8BBE\u5907\u5C31\u80FD\u7528\u8FD9\u4E2A\u5BC6\u7801\u8FDE\u63A5\uFF0C\u4E0D\u5FC5\u6536\u767B\u5F55\u90AE\u4EF6\u3002\u4E0D\u662F\u4FEE\u6539 Gmail \u5BC6\u7801\u3002</p><form id="lwCloudSetPasswordForm"><label class="lw-cloud-field">\u65B0\u540C\u6B65\u5BC6\u7801<input id="lwCloudNewPassword" type="password" autocomplete="new-password" minlength="8" required></label><label class="lw-cloud-field">\u786E\u8BA4\u65B0\u5BC6\u7801<input id="lwCloudConfirmPassword" type="password" autocomplete="new-password" minlength="8" required></label><div class="lw-cloud-actions"><button type="submit" class="primary">\u4FDD\u5B58\u540C\u6B65\u5BC6\u7801</button></div></form></details>`;
-  const loggedIn = `<div class="lw-cloud-status" id="lwCloudStatus" role="status">${esc(syncMessage)}</div>${conflictHtml}<div class="small">\u5DF2\u8FDE\u63A5\uFF1A${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">\u7ACB\u5373\u540C\u6B65</button>${conflict ? '<button id="lwCloudMerge" class="primary">\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55</button><button id="lwCloudBackup">\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD</button>' : ""}<button id="lwCloudPull">\u4F7F\u7528\u4E91\u7AEF</button><button id="lwCloudPush">\u4E0A\u4F20\u672C\u673A</button><button id="lwCloudLogout">\u53EA\u9000\u51FA\u672C\u8BBE\u5907</button></div><p style="margin-top:12px">\u6709\u51B2\u7A81\u65F6\u4F18\u5148\u5408\u5E76\u3002\u201C\u4F7F\u7528\u4E91\u7AEF / \u4E0A\u4F20\u672C\u673A\u201D\u662F\u6574\u4EFD\u66FF\u6362\u3002</p>${directMode ? `<div class="lw-cloud-actions"><button id="lwDirectCopy">\u590D\u5236\u4E2A\u4EBA\u5165\u53E3</button></div><p class="small">\u5176\u4ED6\u8BBE\u5907\u6253\u5F00\u4E2A\u4EBA\u5165\u53E3\u5373\u53EF\u81EA\u52A8\u540C\u6B65\u3002\u5165\u53E3\u5305\u542B\u8BBF\u95EE\u6743\u9650\uFF0C\u8BF7\u52FF\u8F6C\u53D1\u7ED9\u522B\u4EBA\u3002</p>` : passwordSettings}`;
+  const loggedIn = `<div class="lw-cloud-status" id="lwCloudStatus" role="status">${esc(syncMessage)}</div>${conflictHtml}<div class="small">\u5DF2\u8FDE\u63A5\uFF1A${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">\u7ACB\u5373\u540C\u6B65</button>${conflict ? '<button id="lwCloudMerge" class="primary">\u5408\u5E76\u53CC\u65B9\u8BB0\u5F55</button><button id="lwCloudBackup">\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD</button>' : ""}<button id="lwCloudPull">\u4F7F\u7528\u4E91\u7AEF</button><button id="lwCloudPush">\u4E0A\u4F20\u672C\u673A</button><button id="lwCloudLogout">\u53EA\u9000\u51FA\u672C\u8BBE\u5907</button></div><p style="margin-top:12px">\u6709\u51B2\u7A81\u65F6\u4F18\u5148\u5408\u5E76\u3002\u201C\u4F7F\u7528\u4E91\u7AEF / \u4E0A\u4F20\u672C\u673A\u201D\u662F\u6574\u4EFD\u66FF\u6362\u3002</p>${directMode ? `<div class="lw-cloud-actions"><button id="lwDirectCopy">\u590D\u5236\u4E2A\u4EBA\u5165\u53E3</button></div><p class="small">\u5176\u4ED6\u8BBE\u5907\u6253\u5F00\u4E2A\u4EBA\u5165\u53E3\u5373\u53EF\u81EA\u52A8\u540C\u6B65\u3002\u5165\u53E3\u5305\u542B\u8BBF\u95EE\u6743\u9650\uFF0C\u8BF7\u52FF\u8F6C\u53D1\u7ED9\u522B\u4EBA\u3002</p>` : deviceEntryHtml() + passwordSettings}`;
   const loggedOut = `<p>\u79C1\u4EBA\u4E91\u7AEF\u8D26\u53F7\uFF1A<b>${esc(OWNER_EMAIL)}</b></p><div class="lw-cloud-status" id="lwCloudStatus" role="status">${esc(syncMessage)}</div><form id="lwCloudPasswordForm"><input type="text" name="username" autocomplete="username" value="${esc(OWNER_EMAIL)}" readonly hidden><label class="lw-cloud-field">\u540C\u6B65\u5BC6\u7801<input id="lwCloudPassword" name="password" type="password" autocomplete="current-password" required placeholder="\u542C\u8BCD\u8D26\u53F7\u5BC6\u7801\uFF0C\u4E0D\u662F Gmail \u5BC6\u7801"></label><div class="lw-cloud-actions"><button id="lwCloudPasswordLogin" type="submit" class="primary">\u7528\u5BC6\u7801\u8FDE\u63A5</button><button id="lwCloudLocalOnly" type="button">\u7EE7\u7EED\u672C\u673A\u5B66\u4E60</button></div></form><p style="margin-top:12px">\u8FDE\u63A5\u540E\u81EA\u52A8\u7EED\u671F\uFF1B\u6682\u65F6\u65AD\u7F51\u4E0D\u4F1A\u6E05\u9664\u767B\u5F55\u72B6\u6001\u3002\u6CA1\u6709\u6216\u5FD8\u8BB0\u540C\u6B65\u5BC6\u7801\uFF0C\u53EF\u5728\u5DF2\u7ECF\u767B\u5F55\u7684\u8BBE\u5907\u4E2D\u8BBE\u7F6E\u3002</p><details><summary>\u5907\u7528\uFF1A\u90AE\u4EF6\u767B\u5F55</summary><p class="small">\u90AE\u4EF6\u53EF\u80FD\u88AB\u9650\u6D41\uFF1B\u5BC6\u7801\u8FDE\u63A5\u4E0D\u9700\u8981\u53D1\u9001\u90AE\u4EF6\u3002\u53EA\u5728\u6CA1\u6709\u53EF\u7528\u5BC6\u7801\u6216\u5DF2\u767B\u5F55\u8BBE\u5907\u65F6\u4F7F\u7528\u3002</p><div class="lw-cloud-actions"><button id="lwCloudMagicLogin">\u53D1\u9001\u5907\u7528\u767B\u5F55\u90AE\u4EF6</button></div></details>`;
-  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true" aria-label="\u4E91\u540C\u6B65"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>\u4E91\u540C\u6B65</h2><p>\u5B66\u4E60\u4E0E\u9519\u8BCD\u590D\u4E60\u53EF\u76F4\u63A5\u4F7F\u7528\u672C\u673A\u6570\u636E\u3002\u4E91\u540C\u6B65\u53EA\u7528\u4E8E\u8BBE\u5907\u95F4\u4EA4\u6362\u8BB0\u5F55\uFF0C\u8FDE\u63A5\u4E0D\u4F1A\u76F4\u63A5\u8986\u76D6\u672C\u673A\u5185\u5BB9\u3002</p></div><button id="lwCloudClose" aria-label="\u5173\u95ED" style="border:0;background:transparent;font-size:24px">\xD7</button></div>${session || directMode ? loggedIn : `<p>\u4ECE\u4E2A\u4EBA\u5165\u53E3\u6253\u5F00\uFF0C\u5373\u53EF\u81EA\u52A8\u8FDE\u63A5\u540C\u4E00\u4EFD\u8BCD\u5E93\uFF0C\u4E0D\u9700\u8981\u5BC6\u7801\u6216\u90AE\u4EF6\u3002</p><details id="lwLegacyLogin"><summary>\u5176\u4ED6\u8FDE\u63A5\u65B9\u5F0F\uFF08\u65E7\u7248\u517C\u5BB9\uFF09</summary>${loggedOut}</details>`}</div>`;
+  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true" aria-label="\u4E91\u540C\u6B65"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>\u4E91\u540C\u6B65</h2><p>\u5B66\u4E60\u4E0E\u9519\u8BCD\u590D\u4E60\u53EF\u76F4\u63A5\u4F7F\u7528\u672C\u673A\u6570\u636E\u3002\u4E91\u540C\u6B65\u53EA\u7528\u4E8E\u8BBE\u5907\u95F4\u4EA4\u6362\u8BB0\u5F55\uFF0C\u8FDE\u63A5\u4E0D\u4F1A\u76F4\u63A5\u8986\u76D6\u672C\u673A\u5185\u5BB9\u3002</p></div><button id="lwCloudClose" aria-label="\u5173\u95ED" style="border:0;background:transparent;font-size:24px">\xD7</button></div>${session || directMode ? loggedIn : `<p>\u5728\u4ECD\u80FD\u540C\u6B65\u7684\u624B\u673A\u6216\u7535\u8111\u4E0A\u70B9\u300C\u4E91\u540C\u6B65 \u2192 \u8FDE\u63A5\u65B0\u8BBE\u5907\u300D\uFF0C\u7136\u540E\u5728\u672C\u673A\u6253\u5F00\u751F\u6210\u7684\u76F4\u8FBE\u94FE\u63A5\uFF0C\u4E0D\u9700\u8981\u5BC6\u7801\u6216\u90AE\u4EF6\u3002</p><details id="lwLegacyLogin"><summary>\u5176\u4ED6\u8FDE\u63A5\u65B9\u5F0F\uFF08\u65E7\u7248\u517C\u5BB9\uFF09</summary>${loggedOut}</details>`}</div>`;
   mask.addEventListener("click", (event) => {
     if (event.target === mask && !authUiBusy) closeCloudModal();
   });
@@ -5004,9 +5230,28 @@ function openCloudModal() {
         await navigator.clipboard.writeText(value);
         setStatus("synced", "\u4E2A\u4EBA\u5165\u53E3\u5DF2\u590D\u5236\uFF1B\u5728\u81EA\u5DF1\u7684\u53E6\u4E00\u53F0\u8BBE\u5907\u6253\u5F00\u5373\u53EF\u3002");
       } catch {
-        setStatus("ready", "\u6D4F\u89C8\u5668\u4E0D\u5141\u8BB8\u590D\u5236\uFF0C\u8BF7\u4F7F\u7528\u804A\u5929\u91CC\u63D0\u4F9B\u7684\u4E2A\u4EBA\u5165\u53E3\u3002");
+        const panel = document.getElementById("lwCloudMask");
+        let field = document.getElementById("lwDirectCopyFallback");
+        if (!field && panel) {
+          field = document.createElement("input");
+          field.id = "lwDirectCopyFallback";
+          field.readOnly = true;
+          field.type = "text";
+          field.setAttribute("aria-label", "\u79C1\u4EBA\u76F4\u8FBE\u94FE\u63A5");
+          panel.querySelector(".lw-cloud-panel").appendChild(field);
+        }
+        if (field) {
+          field.value = value;
+          field.focus();
+          field.select();
+          panel.dataset.cloudEditing = "true";
+        }
+        setStatus("ready", "\u6D4F\u89C8\u5668\u4E0D\u5141\u8BB8\u81EA\u52A8\u590D\u5236\uFF0C\u8BF7\u957F\u6309\u4E0B\u9762\u7684\u7F51\u5740\u590D\u5236\u5230\u81EA\u5DF1\u7684\u53E6\u4E00\u53F0\u8BBE\u5907\u3002");
       }
     };
+    bindDeviceEntry({ entries: deviceEntries, setBusy: (value) => {
+      authUiBusy = value;
+    } });
     const passwordForm = document.getElementById("lwCloudSetPasswordForm");
     if (passwordForm) passwordForm.onsubmit = async (event) => {
       event.preventDefault();

@@ -1,3 +1,5 @@
+import { createDeviceEntry } from './device-entry.js';
+import { deviceEntryHtml, bindDeviceEntry } from './device-entry-ui.js';
 import { createDirectCloud, DIRECT_KEY, DIRECT_PENDING_KEY } from './cloud-direct.js';
 import { createCloudAuth, authError } from './cloud-auth.js';
 import {
@@ -40,6 +42,11 @@ const auth = createCloudAuth({
   saveSession, clearSession,
 });
 const direct = createDirectCloud({ url: SUPABASE_URL, key: SUPABASE_KEY, appUrl: APP_URL, email: OWNER_EMAIL });
+const deviceEntries = createDeviceEntry({
+  url: SUPABASE_URL, key: SUPABASE_KEY, appUrl: APP_URL, email: OWNER_EMAIL,
+  ensureSession: () => auth.ensure(), refreshSession: () => auth.refresh(),
+  peekSession: () => normalizeSession(readStored(SESSION_KEY)),
+});
 let lastCloudCheck = 0;
 
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -442,6 +449,7 @@ async function overwriteCloudWithLocalState() {
 
 
 async function cloudSignOut() {
+  deviceEntries.forget();
   const accessToken = session?.access_token;
   direct.clear();
   auth.invalidatePending();
@@ -529,9 +537,9 @@ function openCloudModal() {
   const email = directMode ? '个人词库（无需密码或邮件）' : session?.user?.email || OWNER_EMAIL;
   const conflictHtml = conflict ? `<div class="lw-cloud-status lw-cloud-warning"><b>检测到两端都有修改</b><br>${esc(syncMessage)}</div>` : '';
   const passwordSettings = `<details style="margin-top:16px"><summary>设置或修改同步密码</summary><p class="small">在已登录的设备上设置一次，其他设备就能用这个密码连接，不必收登录邮件。不是修改 Gmail 密码。</p><form id="lwCloudSetPasswordForm"><label class="lw-cloud-field">新同步密码<input id="lwCloudNewPassword" type="password" autocomplete="new-password" minlength="8" required></label><label class="lw-cloud-field">确认新密码<input id="lwCloudConfirmPassword" type="password" autocomplete="new-password" minlength="8" required></label><div class="lw-cloud-actions"><button type="submit" class="primary">保存同步密码</button></div></form></details>`;
-  const loggedIn = `<div class="lw-cloud-status" id="lwCloudStatus" role="status">${esc(syncMessage)}</div>${conflictHtml}<div class="small">已连接：${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">立即同步</button>${conflict ? '<button id="lwCloudMerge" class="primary">合并双方记录</button><button id="lwCloudBackup">下载云端备份</button>' : ''}<button id="lwCloudPull">使用云端</button><button id="lwCloudPush">上传本机</button><button id="lwCloudLogout">只退出本设备</button></div><p style="margin-top:12px">有冲突时优先合并。“使用云端 / 上传本机”是整份替换。</p>${directMode ? `<div class="lw-cloud-actions"><button id="lwDirectCopy">复制个人入口</button></div><p class="small">其他设备打开个人入口即可自动同步。入口包含访问权限，请勿转发给别人。</p>` : passwordSettings}`;
+  const loggedIn = `<div class="lw-cloud-status" id="lwCloudStatus" role="status">${esc(syncMessage)}</div>${conflictHtml}<div class="small">已连接：${esc(email)}</div><div class="lw-cloud-actions"><button id="lwCloudNow" class="primary">立即同步</button>${conflict ? '<button id="lwCloudMerge" class="primary">合并双方记录</button><button id="lwCloudBackup">下载云端备份</button>' : ''}<button id="lwCloudPull">使用云端</button><button id="lwCloudPush">上传本机</button><button id="lwCloudLogout">只退出本设备</button></div><p style="margin-top:12px">有冲突时优先合并。“使用云端 / 上传本机”是整份替换。</p>${directMode ? `<div class="lw-cloud-actions"><button id="lwDirectCopy">复制个人入口</button></div><p class="small">其他设备打开个人入口即可自动同步。入口包含访问权限，请勿转发给别人。</p>` : deviceEntryHtml() + passwordSettings}`;
   const loggedOut = `<p>私人云端账号：<b>${esc(OWNER_EMAIL)}</b></p><div class="lw-cloud-status" id="lwCloudStatus" role="status">${esc(syncMessage)}</div><form id="lwCloudPasswordForm"><input type="text" name="username" autocomplete="username" value="${esc(OWNER_EMAIL)}" readonly hidden><label class="lw-cloud-field">同步密码<input id="lwCloudPassword" name="password" type="password" autocomplete="current-password" required placeholder="听词账号密码，不是 Gmail 密码"></label><div class="lw-cloud-actions"><button id="lwCloudPasswordLogin" type="submit" class="primary">用密码连接</button><button id="lwCloudLocalOnly" type="button">继续本机学习</button></div></form><p style="margin-top:12px">连接后自动续期；暂时断网不会清除登录状态。没有或忘记同步密码，可在已经登录的设备中设置。</p><details><summary>备用：邮件登录</summary><p class="small">邮件可能被限流；密码连接不需要发送邮件。只在没有可用密码或已登录设备时使用。</p><div class="lw-cloud-actions"><button id="lwCloudMagicLogin">发送备用登录邮件</button></div></details>`;
-  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true" aria-label="云同步"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>云同步</h2><p>学习与错词复习可直接使用本机数据。云同步只用于设备间交换记录，连接不会直接覆盖本机内容。</p></div><button id="lwCloudClose" aria-label="关闭" style="border:0;background:transparent;font-size:24px">×</button></div>${session || directMode ? loggedIn : `<p>从个人入口打开，即可自动连接同一份词库，不需要密码或邮件。</p><details id="lwLegacyLogin"><summary>其他连接方式（旧版兼容）</summary>${loggedOut}</details>`}</div>`;
+  mask.innerHTML = `<div class="lw-cloud-panel" role="dialog" aria-modal="true" aria-label="云同步"><div style="display:flex;justify-content:space-between;gap:12px;align-items:start"><div><h2>云同步</h2><p>学习与错词复习可直接使用本机数据。云同步只用于设备间交换记录，连接不会直接覆盖本机内容。</p></div><button id="lwCloudClose" aria-label="关闭" style="border:0;background:transparent;font-size:24px">×</button></div>${session || directMode ? loggedIn : `<p>在仍能同步的手机或电脑上点「云同步 → 连接新设备」，然后在本机打开生成的直达链接，不需要密码或邮件。</p><details id="lwLegacyLogin"><summary>其他连接方式（旧版兼容）</summary>${loggedOut}</details>`}</div>`;
   mask.addEventListener('click', event => { if (event.target === mask && !authUiBusy) closeCloudModal(); });
   document.body.appendChild(mask);
   document.getElementById('lwCloudClose').onclick = closeCloudModal;
@@ -549,8 +557,19 @@ function openCloudModal() {
       try {
         await navigator.clipboard.writeText(value);
         setStatus('synced', '个人入口已复制；在自己的另一台设备打开即可。');
-      } catch { setStatus('ready', '浏览器不允许复制，请使用聊天里提供的个人入口。'); }
+      } catch {
+        const panel = document.getElementById('lwCloudMask');
+        let field = document.getElementById('lwDirectCopyFallback');
+        if (!field && panel) {
+          field = document.createElement('input'); field.id = 'lwDirectCopyFallback';
+          field.readOnly = true; field.type = 'text'; field.setAttribute('aria-label', '私人直达链接');
+          panel.querySelector('.lw-cloud-panel').appendChild(field);
+        }
+        if (field) { field.value = value; field.focus(); field.select(); panel.dataset.cloudEditing = 'true'; }
+        setStatus('ready', '浏览器不允许自动复制，请长按下面的网址复制到自己的另一台设备。');
+      }
     };
+    bindDeviceEntry({ entries: deviceEntries, setBusy: value => { authUiBusy = value; } });
     const passwordForm = document.getElementById('lwCloudSetPasswordForm');
     if (passwordForm) passwordForm.onsubmit = async event => {
       event.preventDefault();
