@@ -138,7 +138,13 @@ export function groupMistakeRows(rows, by = 'date') {
   const groups = new Map();
   for (const row of rows) for (const key of by === 'book' ? row.books : [row.date]) {
     if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(row);
+    // Membership can change between two failures on the same day. A book's
+    // error count includes only failures actually attributed to that book.
+    const failures = by === 'book'
+      ? row.failures.filter(event => eventBooks(event, row.word).includes(key)) : row.failures;
+    if (!failures.length) continue;
+    groups.get(key).push(failures.length === row.failures.length ? row
+      : describeRow({ date: row.date, wordId: row.wordId, failures }, row.word, row.latestEvents));
   }
   return [...groups].map(([key, items]) => ({ key, rows: items, ...mistakeSummary(items) }))
     .sort((a, b) => by === 'date' ? b.key.localeCompare(a.key) : b.words - a.words || a.key.localeCompare(b.key));
