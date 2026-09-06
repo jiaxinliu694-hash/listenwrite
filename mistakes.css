@@ -1,0 +1,16 @@
+/* Additional view; share the existing paper/ink palette and touch targets. */
+.nav{grid-template-columns:repeat(7,minmax(0,1fr))}
+.mistake-row{padding:16px 0;border-bottom:1px solid var(--line);display:grid;gap:7px;overflow-wrap:anywhere}
+.mistake-row:last-child{border-bottom:0}
+.mistake-word{display:flex;align-items:flex-start;gap:12px;cursor:pointer;min-height:44px}
+.mistake-word input[type=checkbox]{width:22px;height:22px;flex:0 0 22px;margin-top:4px}
+.mistake-word b{font-size:20px;line-height:1.5}
+.mistake-meaning{display:block;font-size:15px;line-height:1.6}
+.mistake-selection{position:sticky;top:8px;z-index:5;background:var(--paper)}
+.mistake-groups{margin-top:10px;max-height:280px;overflow:auto}
+.mistake-groups button{text-align:left;white-space:normal;overflow-wrap:anywhere;min-height:44px}
+.mistake-answer{display:grid;gap:12px;width:100%;max-width:520px}
+.mistake-answer label{line-height:1.5}
+#mistakeSearchForm .row{flex-wrap:nowrap}
+#mistakeSearchForm input{min-width:0}
+@media(max-width:620px){.nav button{font-size:12px;min-height:42px}.mistake-selection{position:static}.mistake-day>.space{flex-wrap:wrap}.mistake-word b{font-size:18px}.mistake-row .small{font-size:13px}}

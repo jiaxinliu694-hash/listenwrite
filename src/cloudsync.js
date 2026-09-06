@@ -165,7 +165,7 @@ function setStatus(status, message) {
 
 function busyWithStudy() {
   if (typeof document === 'undefined') return false;
-  if (document.querySelector('.immersive')) return true;
+  if (document.querySelector('.immersive, [data-cloud-editing="true"]')) return true;
   const active = document.activeElement;
   return Boolean(active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName) && !active.closest('#lwCloudMask'));
 }

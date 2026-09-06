@@ -24,6 +24,7 @@ export function deleteWordEverywhere(state, wordId) {
   const lexeme = normalizeLexeme(word.en);
   state.words = state.words.filter((w) => w.id !== wordId);
   state.events = (state.events || []).filter((event) => event.wordId !== wordId);
+  if (Array.isArray(state.vocabPracticeEvents)) state.vocabPracticeEvents = state.vocabPracticeEvents.filter(event => event.wordId !== wordId);
   state.simpleWords = (state.simpleWords || []).filter((value) => normalizeLexeme(value) !== lexeme);
   for (const plan of Object.values(state.dailyPlans || {})) {
     plan.newIds = removeId(plan.newIds, wordId);

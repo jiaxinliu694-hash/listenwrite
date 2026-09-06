@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import { IDBFactory } from 'fake-indexeddb';
+import { recordAttempt } from '../src/engine.js';
+import { recordVocabularyPractice, buildMistakeIndex } from '../src/mistakes.js';
+import { deleteWordEverywhere } from '../src/wordadmin.js';
+
+test('v45 backups and cloud normalization retain practice logs and snapshots without turning free attempts into FSRS events', async () => {
+  const dom=new JSDOM('',{url:'https://example.test/'});globalThis.localStorage=dom.window.localStorage;globalThis.indexedDB=new IDBFactory();
+  const storage=await import('../src/storage.js'); const state=storage.defaultState();
+  const w={id:'w1',en:'leader',zh:'领导者',sources:['Original'],examples:[]};state.words=[w];
+  recordAttempt(state,w,'listen','bad',{date:'2026-09-01',ts:Date.parse('2026-09-01T04:00:00Z'),studyBooks:['Original']});
+  const originalCard=structuredClone(w.card), originalEvents=structuredClone(state.events);
+  recordVocabularyPractice(state,w,'free','bad',{date:'2026-09-02',ts:Date.parse('2026-09-02T04:00:00Z')});
+  w.sources=['New name'];await storage.saveState(state);await storage.flushStateWrites();
+  const saved=await storage.readPersistedState();
+  const normalized=storage.normalizeState(JSON.parse(storage.exportState(saved)));
+  assert.equal(normalized.vocabPracticeEvents.length,1);assert.deepEqual(normalized.events,originalEvents);
+  assert.deepEqual(normalized.words[0].card,originalCard);
+  assert.equal(buildMistakeIndex(normalized).rows[0].books[0],'Original');
+  const cloud=storage.canonicalizeCloudState(normalized);
+  assert.equal(cloud.events.length,1);assert.equal(cloud.vocabPracticeEvents.length,1);
+  assert.deepEqual(cloud.words[0].card,originalCard);
+  await storage.applySyncedState(cloud);
+  assert.equal((await storage.readPersistedState()).vocabPracticeEvents.length,1);
+  assert.ok(storage.hasUserData({vocabPracticeEvents:cloud.vocabPracticeEvents}));
+  deleteWordEverywhere(normalized,'w1');assert.equal(normalized.vocabPracticeEvents.length,0);
+  dom.window.close();
+});
