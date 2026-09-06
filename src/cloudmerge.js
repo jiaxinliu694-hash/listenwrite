@@ -4,6 +4,20 @@ function clone(value) { return value == null ? value : structuredClone(value); }
 const SET_ARRAY_PATHS = new Set(['simpleWords', 'errorBooks']);
 const ID_ARRAY_PATHS = new Set(['words', 'texts', 'activities', 'events']);
 
+// FSRS cards and event indexes are projections of the event log. Merging them
+// field-by-field can produce a card that represents neither device. Keep one
+// temporary value during the structural merge; storage canonicalization then
+// reindexes events and rebuilds every affected card before persistence/upload.
+function isDerivedPath(path) {
+  return /^words\{[^}]+\}\.card(?:\.|$)/.test(path)
+    || /^events\{[^}]+\}\.(?:cold|attempt)$/.test(path);
+}
+function derivedValue(base, local, cloud) {
+  if (local !== undefined) return clone(local);
+  if (cloud !== undefined) return clone(cloud);
+  return clone(base);
+}
+
 function itemKey(path, item, index) {
   if (ID_ARRAY_PATHS.has(path) && item && typeof item === 'object' && item.id != null) return `id:${item.id}`;
   if (path === 'sentenceBooks' && item && typeof item === 'object' && item.id != null) return `id:${item.id}`;
@@ -11,7 +25,6 @@ function itemKey(path, item, index) {
   if (path === 'dataChart.attempts' && item && typeof item === 'object' && item.id != null) return `id:${item.id}`;
   return `index:${index}`;
 }
-
 function mergeSetArray(base = [], local = [], cloud = []) {
   const b = new Set(base), l = new Set(local), c = new Set(cloud);
   const all = new Set([...b, ...l, ...c]);
@@ -24,7 +37,6 @@ function mergeSetArray(base = [], local = [], cloud = []) {
   }
   return out;
 }
-
 function mergeArray(base = [], local = [], cloud = [], path, conflicts) {
   if (SET_ARRAY_PATHS.has(path)) return mergeSetArray(base, local, cloud);
   const allObjectIds = [...base, ...local, ...cloud].every((item) => item == null || typeof item !== 'object' || item.id != null);
@@ -39,7 +51,6 @@ function mergeArray(base = [], local = [], cloud = [], path, conflicts) {
     conflicts.push(path);
     return clone(local);
   }
-
   const map = (arr) => new Map(arr.map((item, index) => [itemKey(path, item, index), item]));
   const bm = map(base), lm = map(local), cm = map(cloud);
   const keys = [...new Set([...bm.keys(), ...lm.keys(), ...cm.keys()])];
@@ -70,7 +81,6 @@ function mergeArray(base = [], local = [], cloud = [], path, conflicts) {
   }
   return out;
 }
-
 function mergeObject(base = {}, local = {}, cloud = {}, path, conflicts) {
   const out = {};
   const keys = [...new Set([...Object.keys(base || {}), ...Object.keys(local || {}), ...Object.keys(cloud || {})])];
@@ -81,8 +91,8 @@ function mergeObject(base = {}, local = {}, cloud = {}, path, conflicts) {
   }
   return out;
 }
-
 function mergeValue(base, local, cloud, path, conflicts) {
+  if (isDerivedPath(path)) return derivedValue(base, local, cloud);
   if (same(local, cloud)) return clone(local);
   if (same(local, base)) return clone(cloud);
   if (same(cloud, base)) return clone(local);
@@ -97,7 +107,6 @@ function mergeValue(base, local, cloud, path, conflicts) {
   conflicts.push(path);
   return clone(local);
 }
-
 export function mergeCloudStates(base, local, cloud) {
   const conflicts = [];
   const state = mergeValue(base || {}, local || {}, cloud || {}, '', conflicts);

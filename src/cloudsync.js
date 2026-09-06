@@ -1,6 +1,8 @@
 import {
   readPersistedState,
-  applyRemoteState,
+  applySyncedState,
+  canonicalizeCloudState,
+  flushStateWrites,
   hasUserData,
   readCloudSyncBase,
   saveCloudSyncBase,
@@ -168,126 +170,280 @@ function busyWithStudy() {
   return Boolean(active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName) && !active.closest('#lwCloudMask'));
 }
 
+async function localStateForSync() {
+  await flushStateWrites();
+  return canonicalizeCloudState(await readPersistedState());
+}
+function cloudRowForSync(row) {
+  return row?.state ? { ...row, state: canonicalizeCloudState(row.state) } : row;
+}
 async function rememberSyncedState(state, revision, updatedAt) {
-  await saveCloudSyncBase(state);
-  saveMeta({ userId: session.user.id, revision: Number(revision) || 0, lastSyncedHash: stateFingerprint(state), cloudUpdatedAt: Number(updatedAt) || 0 });
+  const canonical = canonicalizeCloudState(state);
+  await saveCloudSyncBase(canonical);
+  saveMeta({
+    userId: session?.user?.id || null,
+    revision: Number(revision) || 0,
+    lastSyncedHash: stateFingerprint(canonical),
+    cloudUpdatedAt: Number(updatedAt) || 0,
+  });
+  return canonical;
 }
-
-async function applyCloudState(row, { force = false } = {}) {
-  if (!row?.state) throw new Error('云端还没有学习记录');
-  if (!force && busyWithStudy()) {
-    pendingRemote = row;
-    setStatus('pending', '云端有新记录；当前学习结束后会应用，不会打断本轮');
-    return false;
-  }
-  await rememberSyncedState(row.state, row.revision, row.state_updated_at);
-  await applyRemoteState(row.state);
-  setStatus('synced', '已应用云端记录');
-  location.reload();
-  return true;
+async function commitAppliedState(state, revision, updatedAt) {
+  const applied = await applySyncedState(state);
+  saveMeta({
+    userId: session?.user?.id || null,
+    revision: Number(revision) || 0,
+    lastSyncedHash: stateFingerprint(applied),
+    cloudUpdatedAt: Number(updatedAt) || 0,
+  });
+  pendingRemote = null;
+  conflict = null;
+  return applied;
 }
-
-async function acceptPush(local, result) {
-  await rememberSyncedState(local, Number(result?.revision) || 1, Number(result?.cloud_updated_at) || Date.now());
-  conflict = null; setStatus('synced', '已同步到云端');
+function deferCloudState(cloud, message = '云端有新记录；本轮结束后会重新读取两端并合并，不会直接覆盖本轮学习') {
+  pendingRemote = cloudRowForSync(cloud);
+  setStatus('pending', message);
+  return false;
 }
-
-async function pushLocal(local, expectedRevision = null) {
-  const result = await pushCloud(local, expectedRevision);
-  if (result?.status === 'conflict') {
-    await prepareConflict(local, { state: result.cloud_state, state_updated_at: result.cloud_updated_at, revision: result.revision });
-    return false;
-  }
-  await acceptPush(local, result);
-  return true;
-}
-
-async function prepareConflict(local, cloud) {
-  const base = await readCloudSyncBase();
-  const merged = base ? mergeCloudStates(base, local, cloud?.state || {}) : null;
-  conflict = { local, cloud, base, merged };
-  await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud, base, mergedConflicts: merged?.conflicts || [] });
-  setStatus('conflict', merged ? `检测到双端修改；可安全合并学习记录${merged.conflicts.length ? `（另有 ${merged.conflicts.length} 处内容冲突）` : ''}` : '本机和云端都有记录，请选择保留哪一份');
-}
-
-async function mergeConflict() {
-  if (!conflict?.cloud?.state) return;
-  const base = conflict.base || await readCloudSyncBase();
-  if (!base) throw new Error('缺少共同同步基线，不能自动合并；请先下载云端备份再选择一边');
-  const merged = mergeCloudStates(base, conflict.local, conflict.cloud.state);
-  const result = await pushCloud(merged.state, Number(conflict.cloud.revision) || null);
-  if (result?.status === 'conflict') {
-    await prepareConflict(await readPersistedState(), { state: result.cloud_state, state_updated_at: result.cloud_updated_at, revision: result.revision });
-    return;
-  }
-  await rememberSyncedState(merged.state, result?.revision, result?.cloud_updated_at);
-  await applyRemoteState(merged.state);
-  setStatus('synced', merged.conflicts.length ? `已合并；${merged.conflicts.length} 处同时编辑以本机内容为准，云端原稿已留冲突备份` : '双方学习记录已合并');
-  location.reload();
-}
-
-export async function reconcileCloud({ force = false } = {}) {
-  if (syncBusy) return;
-  const current = await ensureSession().catch(() => null);
-  if (!current) return setStatus('offline', '未登录云同步');
-  if (pendingRemote && !busyWithStudy()) return applyCloudState(pendingRemote, { force: true });
-  syncBusy = true; setStatus('syncing', '正在检查云端…');
-  try {
-    const local = await readPersistedState();
-    const localHash = stateFingerprint(local);
-    const localHasData = hasUserData(local);
-    const meta = metaForUser();
-    const shouldCheckCloud = force || Date.now() - lastCloudCheck >= CLOUD_POLL_MS || !meta.revision;
-    if (!shouldCheckCloud) {
-      if (meta.lastSyncedHash && localHash !== meta.lastSyncedHash) await pushLocal(local, Number(meta.revision) || null);
-      else setStatus('synced', '已同步');
-      return;
-    }
-
-    const cloud = await pullCloud();
-    lastCloudCheck = Date.now();
-    if (!cloud) {
-      if (localHasData) await pushLocal(local, null);
-      else setStatus('ready', '已登录；本机和云端都还没有学习记录');
-      return;
-    }
-
-    if (!localHasData) { await applyCloudState(cloud); return; }
-
-    const cloudRevision = Number(cloud.revision) || 0;
-    const sameUserMeta = (readStored(META_KEY) || {}).userId === current.user.id;
-    if (!sameUserMeta || !meta.revision || !meta.lastSyncedHash) {
-      if (localHash === stateFingerprint(cloud.state)) { await rememberSyncedState(local, cloudRevision, cloud.state_updated_at); setStatus('synced', '已同步'); }
-      else await prepareConflict(local, cloud);
-      return;
-    }
-
-    const localChanged = localHash !== meta.lastSyncedHash;
-    const cloudChanged = cloudRevision > Number(meta.revision || 0);
-    if (!localChanged && cloudChanged) { await applyCloudState(cloud); return; }
-    if (localChanged && !cloudChanged) { await pushLocal(local, cloudRevision); return; }
-    if (!localChanged && !cloudChanged) { setStatus('synced', '已同步'); return; }
-
-    const base = await readCloudSyncBase();
-    if (base) {
-      const merged = mergeCloudStates(base, local, cloud.state);
-      if (!merged.conflicts.length && !busyWithStudy()) {
-        const result = await pushCloud(merged.state, cloudRevision);
-        if (result?.status !== 'conflict') {
-          await rememberSyncedState(merged.state, result?.revision, result?.cloud_updated_at);
-          await applyRemoteState(merged.state);
-          setStatus('synced', '已自动合并双方学习记录');
-          location.reload();
-          return;
-        }
+async function applyCloudState(row, { force = false, expectedLocalHash = null } = {}) {
+  const cloud = cloudRowForSync(row);
+  if (!cloud?.state) throw new Error('云端还没有学习记录');
+  if (!force) {
+    if (busyWithStudy()) return deferCloudState(cloud);
+    if (expectedLocalHash) {
+      const latestLocal = await localStateForSync();
+      if (stateFingerprint(latestLocal) !== expectedLocalHash) {
+        return deferCloudState(cloud, '同步读取期间本机又有新修改；已保留，下一次同步会重新合并');
       }
     }
-    await prepareConflict(local, cloud);
-  } catch (error) {
-    console.error('Listenwrite cloud sync failed', error);
-    setStatus('error', error?.message || '云同步失败');
-  } finally { syncBusy = false; renderCloudModalIfOpen(); }
+  }
+  await commitAppliedState(cloud.state, cloud.revision, cloud.state_updated_at);
+  setStatus('synced', '已应用云端记录');
+  if (typeof location !== 'undefined') location.reload();
+  return true;
 }
+async function commitMergedStateIfCurrent(state, result, expectedLocalHash, message) {
+  const cloud = cloudRowForSync({
+    state,
+    revision: Number(result?.revision) || 0,
+    state_updated_at: Number(result?.cloud_updated_at) || Date.now(),
+  });
+  if (busyWithStudy()) return deferCloudState(cloud);
+  const latestLocal = await localStateForSync();
+  if (stateFingerprint(latestLocal) !== expectedLocalHash) {
+    return deferCloudState(cloud, '合并上传期间本机又有新修改；已保留，下一次同步会在新云端版本上继续合并');
+  }
+  await commitAppliedState(cloud.state, cloud.revision, cloud.state_updated_at);
+  setStatus('synced', message);
+  if (typeof location !== 'undefined') location.reload();
+  return true;
+}
+async function acceptPush(local, result) {
+  await rememberSyncedState(local, Number(result?.revision) || 1, Number(result?.cloud_updated_at) || Date.now());
+  pendingRemote = null;
+  conflict = null;
+  setStatus('synced', '已同步到云端');
+}
+async function pushLocal(local, expectedRevision = null) {
+  const canonical = canonicalizeCloudState(local);
+  const result = await pushCloud(canonical, expectedRevision);
+  if (result?.status === 'conflict') {
+    await prepareConflict(canonical, {
+      state: result.cloud_state,
+      state_updated_at: result.cloud_updated_at,
+      revision: result.revision,
+    });
+    return false;
+  }
+  await acceptPush(canonical, result);
+  return true;
+}
+async function prepareConflict(local, cloud) {
+  const localState = canonicalizeCloudState(local);
+  const cloudRow = cloudRowForSync(cloud);
+  const rawBase = await readCloudSyncBase();
+  const base = rawBase ? canonicalizeCloudState(rawBase) : null;
+  const rawMerged = base && cloudRow?.state ? mergeCloudStates(base, localState, cloudRow.state) : null;
+  const merged = rawMerged ? { ...rawMerged, state: canonicalizeCloudState(rawMerged.state) } : null;
+  conflict = { local: localState, cloud: cloudRow, base, merged };
+  await saveCloudConflictBackup({
+    createdAt: Date.now(),
+    local: localState,
+    cloud: cloudRow,
+    base,
+    mergedState: merged?.state || null,
+    mergedConflicts: merged?.conflicts || [],
+  });
+  setStatus('conflict', merged
+    ? `检测到双端修改；可安全合并学习记录${merged.conflicts.length ? `（另有 ${merged.conflicts.length} 处内容冲突）` : ''}`
+    : '本机和云端都有记录，请选择保留哪一份');
+}
+async function withSyncLock(task) {
+  if (syncBusy) {
+    setStatus('syncing', '已有同步任务正在执行');
+    return false;
+  }
+  syncBusy = true;
+  try {
+    return await task();
+  } finally {
+    syncBusy = false;
+    renderCloudModalIfOpen();
+  }
+}
+async function mergeConflict() {
+  return withSyncLock(async () => {
+    setStatus('syncing', '正在读取两端最新记录并合并…');
+    const local = await localStateForSync();
+    const cloud = cloudRowForSync(await pullCloud());
+    if (!cloud?.state) throw new Error('云端还没有学习记录');
+    const rawBase = conflict?.base || await readCloudSyncBase();
+    const base = rawBase ? canonicalizeCloudState(rawBase) : null;
+    if (!base) throw new Error('缺少共同同步基线，不能自动合并；请先下载云端备份再选择一边');
+
+    const merged = mergeCloudStates(base, local, cloud.state);
+    const mergedState = canonicalizeCloudState(merged.state);
+    const result = await pushCloud(mergedState, Number(cloud.revision) || null);
+    if (result?.status === 'conflict') {
+      await prepareConflict(local, {
+        state: result.cloud_state,
+        state_updated_at: result.cloud_updated_at,
+        revision: result.revision,
+      });
+      return false;
+    }
+    return commitMergedStateIfCurrent(
+      mergedState,
+      result,
+      stateFingerprint(local),
+      merged.conflicts.length
+        ? `已合并；${merged.conflicts.length} 处同时编辑以本机内容为准，云端原稿已留冲突备份`
+        : '双方学习记录已合并',
+    );
+  });
+}
+export async function reconcileCloud({ force = false } = {}) {
+  return withSyncLock(async () => {
+    try {
+      const current = await ensureSession().catch(() => null);
+      if (!current) {
+        setStatus('offline', '未登录云同步');
+        return false;
+      }
+
+      // A cached row is only a signal that the cloud changed. It may be stale,
+      // and local answers may have been recorded after it was cached. Consume
+      // the signal, flush local writes, then pull the newest cloud revision.
+      if (pendingRemote && !busyWithStudy()) {
+        pendingRemote = null;
+        force = true;
+        lastCloudCheck = 0;
+      }
+
+      setStatus('syncing', '正在检查云端…');
+      const local = await localStateForSync();
+      const localHash = stateFingerprint(local);
+      const localHasData = hasUserData(local);
+      const meta = metaForUser();
+      const shouldCheckCloud = force || Date.now() - lastCloudCheck >= CLOUD_POLL_MS || !meta.revision;
+      if (!shouldCheckCloud) {
+        if (meta.lastSyncedHash && localHash !== meta.lastSyncedHash) await pushLocal(local, Number(meta.revision) || null);
+        else setStatus('synced', '已同步');
+        return true;
+      }
+
+      const cloud = cloudRowForSync(await pullCloud());
+      lastCloudCheck = Date.now();
+      if (!cloud) {
+        if (localHasData) await pushLocal(local, null);
+        else setStatus('ready', '已登录；本机和云端都还没有学习记录');
+        return true;
+      }
+
+      if (!localHasData) {
+        await applyCloudState(cloud, { expectedLocalHash: localHash });
+        return true;
+      }
+      const cloudRevision = Number(cloud.revision) || 0;
+      const cloudHash = stateFingerprint(cloud.state);
+      const sameUserMeta = (readStored(META_KEY) || {}).userId === current.user.id;
+      if (!sameUserMeta || !meta.revision || !meta.lastSyncedHash) {
+        if (localHash === cloudHash) {
+          await rememberSyncedState(local, cloudRevision, cloud.state_updated_at);
+          setStatus('synced', '已同步');
+        } else {
+          await prepareConflict(local, cloud);
+        }
+        return true;
+      }
+
+      const localChanged = localHash !== meta.lastSyncedHash;
+      const cloudChanged = cloudRevision > Number(meta.revision || 0);
+      if (!localChanged && cloudChanged) {
+        await applyCloudState(cloud, { expectedLocalHash: localHash });
+        return true;
+      }
+      if (localChanged && !cloudChanged) {
+        await pushLocal(local, cloudRevision);
+        return true;
+      }
+      if (!localChanged && !cloudChanged) {
+        setStatus('synced', '已同步');
+        return true;
+      }
+
+      const rawBase = await readCloudSyncBase();
+      const base = rawBase ? canonicalizeCloudState(rawBase) : null;
+      if (base) {
+        const merged = mergeCloudStates(base, local, cloud.state);
+        const mergedState = canonicalizeCloudState(merged.state);
+        if (!merged.conflicts.length && !busyWithStudy()) {
+          const result = await pushCloud(mergedState, cloudRevision);
+          if (result?.status === 'conflict') {
+            await prepareConflict(local, {
+              state: result.cloud_state,
+              state_updated_at: result.cloud_updated_at,
+              revision: result.revision,
+            });
+            return false;
+          }
+          return commitMergedStateIfCurrent(
+            mergedState,
+            result,
+            localHash,
+            '已自动合并双方学习记录',
+          );
+        }
+      }
+      await prepareConflict(local, cloud);
+      return true;
+    } catch (error) {
+      console.error('Listenwrite cloud sync failed', error);
+      setStatus('error', error?.message || '云同步失败');
+      return false;
+    }
+  });
+}
+async function useLatestCloudState() {
+  return withSyncLock(async () => {
+    setStatus('syncing', '正在读取最新云端记录…');
+    const local = await localStateForSync();
+    const cloud = cloudRowForSync(await pullCloud());
+    if (!cloud?.state) throw new Error('云端还没有学习记录');
+    await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud });
+    return applyCloudState(cloud, { force: true });
+  });
+}
+async function overwriteCloudWithLocalState() {
+  return withSyncLock(async () => {
+    setStatus('syncing', '正在上传最新本机记录…');
+    const local = await localStateForSync();
+    const cloud = cloudRowForSync(await pullCloud());
+    if (cloud?.state) await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud });
+    return pushLocal(local, cloud ? Number(cloud.revision) || null : null);
+  });
+}
+
 
 async function cloudSignOut() {
   try {
@@ -350,8 +506,8 @@ function openCloudModal() {
     document.getElementById('lwCloudNow').onclick = () => reconcileCloud({ force: true });
     if (document.getElementById('lwCloudMerge')) document.getElementById('lwCloudMerge').onclick = () => mergeConflict().catch(e => setStatus('error', e.message));
     if (document.getElementById('lwCloudBackup')) document.getElementById('lwCloudBackup').onclick = () => downloadJson(`listenwrite-cloud-conflict-${Date.now()}.json`, conflict.cloud.state);
-    document.getElementById('lwCloudPull').onclick = async () => { try { const cloud = conflict?.cloud || pendingRemote || await pullCloud(); if (!cloud?.state) throw new Error('云端还没有学习记录'); await saveCloudConflictBackup({ createdAt:Date.now(), local:await readPersistedState(), cloud }); await applyCloudState(cloud, { force: true }); } catch(e) { setStatus('error', e.message); } };
-    document.getElementById('lwCloudPush').onclick = async () => { try { const local = conflict?.local || await readPersistedState(); const cloud = conflict?.cloud || await pullCloud(); if (cloud?.state) await saveCloudConflictBackup({ createdAt:Date.now(), local, cloud }); await pushLocal(local, cloud ? Number(cloud.revision)||null : null); } catch(e) { setStatus('error', e.message); } };
+    document.getElementById('lwCloudPull').onclick = () => useLatestCloudState().catch(e => setStatus('error', e.message));
+    document.getElementById('lwCloudPush').onclick = () => overwriteCloudWithLocalState().catch(e => setStatus('error', e.message));
     document.getElementById('lwCloudLogout').onclick = cloudSignOut;
   } else {
   document.getElementById('lwCloudMagicLogin').onclick = async () => {

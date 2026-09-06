@@ -21,6 +21,16 @@ export function planForDate(state, date = activeStudyDayKey(state)) {
 function sameBooks(a = [], b = []) {
   return JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 }
+function planContentSnapshot(plan) {
+  if (!plan) return null;
+  const content = { ...plan };
+  delete content.updatedAt;
+  return JSON.stringify(content);
+}
+function touchPlanIfChanged(plan, before) {
+  if (planContentSnapshot(plan) !== before) plan.updatedAt = Date.now();
+  return plan;
+}
 
 function listenedToday(state, id, date) {
   return state.events.some((e) => e.wordId === id && e.date === date && e.mode === 'listen');
@@ -159,22 +169,29 @@ function trimIdsToTarget(state, ids, date, target) {
 }
 
 function syncSequentialTotals(plan) {
-  plan.newIds = [];
-  plan.reviewIds = [];
-  for (const segment of plan.bookSegments || []) {
-    plan.newIds.push(...segment.newIds);
-    plan.reviewIds.push(...segment.reviewIds);
-  }
-  plan.newIds = [...new Set(plan.newIds)];
-  plan.reviewIds = [...new Set(plan.reviewIds.filter((id) => !plan.newIds.includes(id)))];
-  plan.newTarget = (plan.bookSegments || []).reduce((sum, x) => sum + x.newTarget, 0);
-  plan.reviewTarget = (plan.bookSegments || []).reduce((sum, x) => sum + x.reviewTarget, 0);
-  plan.books = (plan.bookSegments || []).map((x) => x.book).filter(Boolean);
+  const segmentNew = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.newIds || []))];
+  const segmentReview = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.reviewIds || []))]
+    .filter((id) => !segmentNew.includes(id));
+  const segmentIds = new Set([...segmentNew, ...segmentReview]);
+
+  plan.carryNewIds = [...new Set(plan.carryNewIds || [])]
+    .filter((id) => !segmentIds.has(id));
+  plan.carryReviewIds = [...new Set(plan.carryReviewIds || [])]
+    .filter((id) => !segmentIds.has(id) && !plan.carryNewIds.includes(id));
+  plan.newIds = [...new Set([...plan.carryNewIds, ...segmentNew])];
+  plan.reviewIds = [...new Set([...plan.carryReviewIds, ...segmentReview])]
+    .filter((id) => !plan.newIds.includes(id));
+  plan.newTarget = plan.carryNewIds.length
+    + (plan.bookSegments || []).reduce((sum, segment) => sum + Math.max(0, Number(segment.newTarget) || 0), 0);
+  plan.reviewTarget = plan.carryReviewIds.length
+    + (plan.bookSegments || []).reduce((sum, segment) => sum + Math.max(0, Number(segment.reviewTarget) || 0), 0);
+  plan.books = (plan.bookSegments || []).map((segment) => segment.book).filter(Boolean);
 }
 
 export function ensureDailyPlan(state, options = {}) {
   const date = options.date || activeStudyDayKey(state);
   let plan = state.dailyPlans[date];
+  const before = planContentSnapshot(plan);
   if (!plan) {
     plan = state.dailyPlans[date] = {
       date,
@@ -184,6 +201,8 @@ export function ensureDailyPlan(state, options = {}) {
       reviewTarget: Math.max(0, Number(state.settings.defaultReviewTarget) || 0),
       newIds: [],
       reviewIds: [],
+      carryNewIds: [],
+      carryReviewIds: [],
       bookSegments: [],
       resumeWordId: null,
       drawNonce: 0,
@@ -191,16 +210,13 @@ export function ensureDailyPlan(state, options = {}) {
       updatedAt: Date.now(),
     };
   }
-
   if (options.mode === 'mixed' && plan.mode !== 'mixed') {
     convertPlanToMixed(state, plan, options.books ?? plan.books);
   }
   if (plan.mode === 'sequential') {
-    plan.updatedAt = Date.now();
     syncSequentialTotals(plan);
-    return plan;
+    return touchPlanIfChanged(plan, before);
   }
-
   if (Object.prototype.hasOwnProperty.call(options, 'books')) reconcileScope(state, plan, options.books || []);
   seedTodayFromListenHistory(state, plan);
   normalizeMixedPlanIdentity(state, plan);
@@ -214,9 +230,9 @@ export function ensureDailyPlan(state, options = {}) {
   plan.newIds = trimIdsToTarget(state, plan.newIds, plan.date, plan.newTarget);
   plan.reviewIds = trimIdsToTarget(state, plan.reviewIds, plan.date, plan.reviewTarget);
   fillDailyPlan(state, plan);
-  plan.updatedAt = Date.now();
-  return plan;
+  return touchPlanIfChanged(plan, before);
 }
+
 
 export function fillDailyPlan(state, plan) {
   if (plan.mode === 'sequential') return fillSequentialPlan(state, plan);
@@ -232,6 +248,7 @@ export function fillDailyPlan(state, plan) {
 }
 
 export function configureSequentialPlan(state, plan, configs = []) {
+  const before = planContentSnapshot(plan);
   const clean = [];
   const seenBooks = new Set();
   for (const row of configs) {
@@ -251,29 +268,36 @@ export function configureSequentialPlan(state, plan, configs = []) {
   plan.mode = 'sequential';
   plan.bookSegments = clean;
   fillSequentialPlan(state, plan);
-  plan.updatedAt = Date.now();
-  return plan;
+  return touchPlanIfChanged(plan, before);
 }
 
 export function fillSequentialPlan(state, plan) {
   const assigned = new Set();
-  const listenedIds = [...new Set(state.events.filter((e) => e.date === plan.date && e.mode === 'listen').map((e) => e.wordId))];
+  const wordMap = new Map(state.words.map((word) => [word.id, word]));
+  const listenedIds = listenedIdsOnDay(state, plan.date);
+  plan.carryNewIds = [];
+  plan.carryReviewIds = [];
+
   for (const segment of plan.bookSegments || []) {
-    const pool = state.words.filter((w) => !w.retired && (w.sources || []).includes(segment.book));
-    const valid = new Set(pool.map((w) => w.id));
+    const pool = state.words.filter((word) => !word.retired && (word.sources || []).includes(segment.book));
+    const valid = new Set(pool.map((word) => word.id));
     const existing = [...new Set([...(segment.newIds || []), ...(segment.reviewIds || [])])]
       .filter((id) => valid.has(id) && !assigned.has(id));
     segment.newIds = [];
     segment.reviewIds = [];
     for (const id of existing) {
-      const word = state.words.find((w) => w.id === id);
+      const word = wordMap.get(id);
       if (wordStudyKind(state, word, plan.date) === 'review') segment.reviewIds.push(id);
       else segment.newIds.push(id);
     }
+
+    // A formal listen event is durable day history. Re-selecting or removing a
+    // wordbook may change untouched candidates, but must not erase attempted or
+    // already-completed words from today's denominator.
     const present = new Set([...segment.newIds, ...segment.reviewIds]);
     for (const id of listenedIds) {
-      if (present.has(id) || assigned.has(id) || !valid.has(id) || wordPassedOnDay(state, id, plan.date)) continue;
-      const word = state.words.find((w) => w.id === id);
+      if (present.has(id) || assigned.has(id) || !valid.has(id)) continue;
+      const word = wordMap.get(id);
       if (wordStudyKind(state, word, plan.date) === 'review') segment.reviewIds.push(id);
       else segment.newIds.push(id);
       present.add(id);
@@ -290,27 +314,40 @@ export function fillSequentialPlan(state, plan) {
     segment.reviewIds.forEach((id) => assigned.add(id));
 
     const review = reviewCandidates(state, pool, assigned, plan.date, [segment.book], plan.drawNonce);
-    for (const w of review.slice(0, Math.max(0, segment.reviewTarget - segment.reviewIds.length))) {
-      segment.reviewIds.push(w.id);
-      assigned.add(w.id);
+    for (const word of review.slice(0, Math.max(0, segment.reviewTarget - segment.reviewIds.length))) {
+      segment.reviewIds.push(word.id);
+      assigned.add(word.id);
     }
     const fresh = freshCandidates(state, pool, assigned, plan.date, [segment.book], plan.drawNonce);
-    for (const w of fresh.slice(0, Math.max(0, segment.newTarget - segment.newIds.length))) {
-      segment.newIds.push(w.id);
-      assigned.add(w.id);
+    for (const word of fresh.slice(0, Math.max(0, segment.newTarget - segment.newIds.length))) {
+      segment.newIds.push(word.id);
+      assigned.add(word.id);
     }
+  }
+
+  for (const id of listenedIds) {
+    if (assigned.has(id)) continue;
+    const word = wordMap.get(id);
+    if (!word) continue;
+    if (wordStudyKind(state, word, plan.date) === 'review') plan.carryReviewIds.push(id);
+    else plan.carryNewIds.push(id);
+    assigned.add(id);
   }
   syncSequentialTotals(plan);
   return plan;
 }
 
+
 export function convertPlanToMixed(state, plan, books = []) {
+  const before = planContentSnapshot(plan);
   const attempted = [...new Set([...(plan.newIds || []), ...(plan.reviewIds || [])])]
     .filter((id) => listenedToday(state, id, plan.date));
   const attemptedNew = attempted.filter((id) => wordStudyKind(state, id, plan.date) === 'new');
   const attemptedReview = attempted.filter((id) => wordStudyKind(state, id, plan.date) === 'review');
   plan.mode = 'mixed';
   plan.bookSegments = [];
+  plan.carryNewIds = [];
+  plan.carryReviewIds = [];
   plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
   plan.books = [...books];
   plan.newTarget = Math.max(attemptedNew.length, Number(state.settings.defaultNewTarget) || 0);
@@ -318,8 +355,7 @@ export function convertPlanToMixed(state, plan, books = []) {
   plan.newIds = attemptedNew;
   plan.reviewIds = attemptedReview;
   fillDailyPlan(state, plan);
-  plan.updatedAt = Date.now();
-  return plan;
+  return touchPlanIfChanged(plan, before);
 }
 
 export function latestListenResult(state, wordId, date = activeStudyDayKey(state)) {
@@ -359,9 +395,19 @@ export function segmentStatus(state, plan, segment) {
 
 export function currentSequentialSegment(state, plan) {
   if (plan.mode !== 'sequential') return null;
+  const carry = {
+    id: '__carry__',
+    book: '今日已开始',
+    newTarget: (plan.carryNewIds || []).length,
+    reviewTarget: (plan.carryReviewIds || []).length,
+    newIds: [...(plan.carryNewIds || [])],
+    reviewIds: [...(plan.carryReviewIds || [])],
+  };
+  const carryStatus = segmentStatus(state, plan, carry);
+  if (carryStatus.new.pending + carryStatus.new.retry + carryStatus.review.pending + carryStatus.review.retry > 0) return carry;
   for (const segment of plan.bookSegments || []) {
-    const s = segmentStatus(state, plan, segment);
-    if (s.new.pending + s.new.retry + s.review.pending + s.review.retry > 0) return segment;
+    const status = segmentStatus(state, plan, segment);
+    if (status.new.pending + status.new.retry + status.review.pending + status.review.retry > 0) return segment;
   }
   return null;
 }

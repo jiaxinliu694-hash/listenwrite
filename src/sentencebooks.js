@@ -1,3 +1,5 @@
+import { normalizeWordLexeme } from './wordtext.js';
+
 const VALID_STATUS = new Set(['familiar', 'unfamiliar']);
 const VALID_PRACTICE_STATUS = new Set(['unseen', 'repeat', 'done', 'ignored']);
 const VALID_MODE_STATUS = new Set(['unseen', 'repeat', 'done']);
@@ -7,7 +9,7 @@ function id(prefix = 'id') {
 }
 
 export function normalizeLexeme(value) {
-  return String(value || '').trim().toLowerCase();
+  return normalizeWordLexeme(value);
 }
 
 export function ensureSimpleWords(state) {

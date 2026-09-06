@@ -35,6 +35,122 @@ setItem(
 );
 DATA_CHART_SEED.contentVersion = "2026-08-15-v2";
 
+// src/wordtext.js
+var ENTITIES = Object.freeze({
+  amp: "&",
+  nbsp: " ",
+  quot: '"',
+  apos: "'",
+  lt: "<",
+  gt: ">",
+  ensp: " ",
+  emsp: " ",
+  thinsp: " ",
+  lrm: "",
+  rlm: "",
+  shy: "",
+  zwnj: "",
+  zwj: "",
+  ndash: "\u2013",
+  mdash: "\u2014",
+  bull: "\u2022",
+  middot: "\xB7"
+});
+function decodeEntities(text) {
+  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, name) => {
+    if (name[0] !== "#") return ENTITIES[name.toLowerCase()] ?? whole;
+    const hex = /^#x/i.test(name);
+    const code = Number.parseInt(name.slice(hex ? 2 : 1), hex ? 16 : 10);
+    return code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : whole;
+  });
+}
+function typography(text) {
+  return text.normalize("NFC").replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 65248)).replace(/[\u00AD\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g, "").replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/[‘’ʼ]/g, "'").replace(/[‐‑]/g, "-");
+}
+function inspectWordText(value) {
+  const original = String(value ?? "");
+  let text = typography(original).trim();
+  const reasons = [];
+  if (text !== original.trim()) reasons.push("\u5B57\u7B26\u683C\u5F0F");
+  for (let i = 0; i < 4; i += 1) {
+    const decoded = typography(decodeEntities(text)).trim();
+    if (decoded === text) break;
+    text = decoded;
+    if (!reasons.includes("HTML \u8F6C\u4E49")) reasons.push("HTML \u8F6C\u4E49");
+  }
+  const formula = /^\s*[=+@]\s*[\p{L}_][\p{L}\p{N}_.]*\s*\(/u.test(text) || /^\s*=.*[!()[\]{}]/u.test(text);
+  if (formula) return { original, text: original.trim(), changed: false, valid: false, reasons, issue: "\u7591\u4F3C\u8868\u683C\u516C\u5F0F\uFF0C\u8BF7\u786E\u8BA4\u82F1\u6587\u5217" };
+  for (let i = 0; i < 6; i += 1) {
+    const before = text;
+    text = text.replace(/^=\s*"([^"\r\n]+)"$/, "$1");
+    if (!/^&(?:#|[a-z][a-z0-9]*;)/i.test(text)) {
+      text = text.replace(/^(?:[&=*_#•●▪‣·※†‡|!?:;，,：；。]\s*)+(?=[\p{L}\p{N}'"(])/u, "");
+    }
+    text = text.replace(/^(?:[-–—>»›]+\s+|\(?\d{1,4}[.)、]\s+)(?=[\p{L}])/u, "");
+    const wrappers = [['"', '"'], ["'", "'"], ["\u201C", "\u201D"], ["(", ")"], ["[", "]"], ["\u3010", "\u3011"]];
+    for (const [left, right] of wrappers) {
+      if (text.startsWith(left) && text.endsWith(right) && text.length > left.length + right.length) {
+        const inner = text.slice(left.length, -right.length).trim();
+        if (/[\p{L}\p{N}]/u.test(inner)) {
+          text = inner;
+          break;
+        }
+      }
+    }
+    text = text.replace(/([\p{L}\p{N}])[&=*_•●▪‣·※†‡|]+$/u, "$1").trim();
+    if (text === before) break;
+    if (!reasons.includes("\u8BCD\u6761\u8FB9\u754C\u6742\u5B57\u7B26")) reasons.push("\u8BCD\u6761\u8FB9\u754C\u6742\u5B57\u7B26");
+  }
+  text = text.replace(/ {2,}/g, " ").trim();
+  let issue = "";
+  if (!text || !/[\p{L}\p{N}]/u.test(text)) issue = "\u7A7A\u8BCD\u6761\u6216\u53EA\u6709\u7B26\u53F7";
+  else if (/[\u0000-\u001F\u007F<>]/u.test(text)) issue = "\u5305\u542B\u63A7\u5236\u5B57\u7B26\u6216 HTML \u6807\u8BB0";
+  else if (/&(?:#[^;\s]*|[a-z][a-z0-9]*);/i.test(text)) issue = "\u672A\u8BC6\u522B\u7684 HTML \u8F6C\u4E49";
+  else if (/^[&=*_#•●▪‣·※†‡|!?:;,，：；。]/u.test(text)) issue = "\u4ECD\u6709\u53EF\u7591\u524D\u7F00";
+  return { original, text, changed: text !== original, valid: !issue, reasons, issue };
+}
+function normalizeWordLexeme(value) {
+  const result = inspectWordText(value);
+  return (result.valid ? result.text : String(value ?? "").trim()).toLowerCase();
+}
+function hasWordTextRepairs(state2) {
+  return (state2?.words || []).some((word) => {
+    const result = inspectWordText(word?.en);
+    return result.valid && result.text !== String(word?.en ?? "");
+  });
+}
+function repairWordTextState(input) {
+  if (!input || !Array.isArray(input.words)) return input;
+  let changed = false;
+  const existing = input.wordTextRepairs;
+  const journal = existing && typeof existing === "object" && !Array.isArray(existing) ? { ...existing } : {};
+  const words = input.words.map((word, index) => {
+    if (!word || typeof word !== "object") return word;
+    const result = inspectWordText(word.en);
+    if (!result.valid || result.text === String(word.en ?? "")) return word;
+    changed = true;
+    const after = result.text.toLowerCase();
+    const key = `v1:${JSON.stringify([word.id ?? index, result.original, after])}`;
+    journal[key] = { wordId: word.id ?? null, before: result.original, after };
+    return { ...word, en: after };
+  });
+  if (!changed) return input;
+  const simpleWords = Array.isArray(input.simpleWords) ? [...new Set(input.simpleWords.map(normalizeWordLexeme).filter(Boolean))] : input.simpleWords;
+  return { ...input, words, ...Array.isArray(simpleWords) ? { simpleWords } : {}, wordTextRepairs: journal };
+}
+function wordTextReviewRows(state2) {
+  return (state2?.words || []).map((word) => ({ word, check: inspectWordText(word?.en) })).filter((row) => !row.check.valid);
+}
+function wordTextDuplicateGroups(state2) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const word of state2?.words || []) {
+    const key = normalizeWordLexeme(word?.en);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(word?.id);
+  }
+  return [...groups].filter(([, ids]) => ids.length > 1).map(([en, ids]) => ({ en, ids }));
+}
+
 // node_modules/ts-fsrs/dist/index.mjs
 var FSRSError = class _FSRSError extends Error {
   constructor(message = "FSRS Error") {
@@ -1987,7 +2103,7 @@ function id(prefix = "id") {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
 function normalizeLexeme(value) {
-  return String(value || "").trim().toLowerCase();
+  return normalizeWordLexeme(value);
 }
 function ensureSimpleWords(state2) {
   if (!Array.isArray(state2.simpleWords)) state2.simpleWords = [];
@@ -2347,7 +2463,7 @@ function normalizeSentenceBooks(value) {
 }
 
 // src/tokenizer.js
-var TOKEN_RE = /[A-Za-z]+\d+[A-Za-z0-9-]*|\d+[A-Za-z]+(?:-[A-Za-z0-9]+)*|(?:[$£€¥]\s*)?\d+(?::\d{1,2})?(?:[.,]\d+)?(?:%|(?:st|nd|rd|th))?|[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
+var TOKEN_RE = /[A-Za-z]+\d+[A-Za-z0-9-]*|\d+[A-Za-z]+(?:-[A-Za-z0-9]+)*|(?:[$£€¥]\s*)?(?:\d{1,3}(?:,\d{3})+|\d+)(?::\d{1,2}|\.\d+)?(?:%|st|nd|rd|th)?|[A-Za-z]+(?:['’-][A-Za-z]+)*/g;
 function normalizeToken(value) {
   return String(value || "").trim().toLowerCase().replace(/’/g, "'").replace(/\s+/g, " ");
 }
@@ -2363,107 +2479,220 @@ function tokenizeEnglish(text, options = {}) {
     return true;
   });
 }
-var SMALL = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+var SMALL = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19
+};
 var TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
-var ORDINAL = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12, thirteenth: 13, fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17, eighteenth: 18, nineteenth: 19, twentieth: 20, thirtieth: 30, fortieth: 40, fiftieth: 50, sixtieth: 60, seventieth: 70, eightieth: 80, ninetieth: 90 };
-function wordsToNumber(text) {
-  const parts = normalizeToken(text).replace(/-/g, " ").split(/\s+/).filter(Boolean).filter((x) => x !== "and");
+var SCALES = { thousand: 1e3, million: 1e6, billion: 1e9, trillion: 1e12 };
+var ORDINAL_CARDINAL = {
+  zeroth: "zero",
+  first: "one",
+  second: "two",
+  third: "three",
+  fourth: "four",
+  fifth: "five",
+  sixth: "six",
+  seventh: "seven",
+  eighth: "eight",
+  ninth: "nine",
+  tenth: "ten",
+  eleventh: "eleven",
+  twelfth: "twelve",
+  thirteenth: "thirteen",
+  fourteenth: "fourteen",
+  fifteenth: "fifteen",
+  sixteenth: "sixteen",
+  seventeenth: "seventeen",
+  eighteenth: "eighteen",
+  nineteenth: "nineteen",
+  twentieth: "twenty",
+  thirtieth: "thirty",
+  fortieth: "forty",
+  fiftieth: "fifty",
+  sixtieth: "sixty",
+  seventieth: "seventy",
+  eightieth: "eighty",
+  ninetieth: "ninety",
+  hundredth: "hundred",
+  thousandth: "thousand",
+  millionth: "million",
+  billionth: "billion",
+  trillionth: "trillion"
+};
+function numberWordParts(text) {
+  return normalizeToken(text).replace(/[–—-]/g, " ").split(/\s+/).filter(Boolean).filter((part) => part !== "and");
+}
+function integerWordsToNumber(parts) {
   if (!parts.length) return null;
-  let total = 0, current = 0, used = false;
-  for (const p of parts) {
-    if (p in SMALL) {
-      current += SMALL[p];
+  let total = 0;
+  let group = 0;
+  let previous = "start";
+  let previousScale = Number.POSITIVE_INFINITY;
+  let used = false;
+  for (const part of parts) {
+    if (part in SMALL) {
+      const value = SMALL[part];
+      if (previous === "unit" || previous === "teen") return null;
+      if (previous === "tens" && value >= 10) return null;
+      group += value;
+      previous = value < 10 ? "unit" : "teen";
       used = true;
-    } else if (p in TENS) {
-      current += TENS[p];
+    } else if (part in TENS) {
+      if (previous === "unit" || previous === "teen" || previous === "tens") return null;
+      group += TENS[part];
+      previous = "tens";
       used = true;
-    } else if (p === "hundred") {
-      current = (current || 1) * 100;
+    } else if (part === "hundred") {
+      if (previous === "unit" && group > 0 && group < 10) group *= 100;
+      else if (previous === "start" || previous === "scale") group = 100;
+      else return null;
+      previous = "hundred";
       used = true;
-    } else if (p === "thousand") {
-      total += (current || 1) * 1e3;
-      current = 0;
+    } else if (part in SCALES) {
+      const scale = SCALES[part];
+      if (scale >= previousScale) return null;
+      total += (group || 1) * scale;
+      group = 0;
+      previous = "scale";
+      previousScale = scale;
       used = true;
-    } else return null;
+    } else {
+      return null;
+    }
   }
-  return used ? total + current : null;
+  return used ? total + group : null;
+}
+function wordsToNumber(text) {
+  const parts = numberWordParts(text);
+  const point = parts.indexOf("point");
+  if (point < 0) return integerWordsToNumber(parts);
+  if (parts.indexOf("point", point + 1) >= 0) return null;
+  const integer = point ? integerWordsToNumber(parts.slice(0, point)) : 0;
+  const fractionWords = parts.slice(point + 1);
+  if (integer == null || !fractionWords.length || fractionWords.some((part) => !(part in SMALL) || SMALL[part] > 9)) return null;
+  return Number(`${integer}.${fractionWords.map((part) => SMALL[part]).join("")}`);
+}
+function ordinalValue(text) {
+  const parts = numberWordParts(text);
+  if (!parts.length) return null;
+  const last = parts.at(-1);
+  if (!(last in ORDINAL_CARDINAL)) return null;
+  parts[parts.length - 1] = ORDINAL_CARDINAL[last];
+  return integerWordsToNumber(parts);
 }
 function numericValue(text) {
   const clean = normalizeToken(text).replace(/,/g, "");
   if (/^\d+(?:\.\d+)?$/.test(clean)) return Number(clean);
   return wordsToNumber(clean);
 }
+function validClock(hour, minute) {
+  return Number.isInteger(hour) && Number.isInteger(minute) && hour >= 0 && hour <= 24 && minute >= 0 && minute < 60 && (hour !== 24 || minute === 0);
+}
+function addClock(out, hour, minute) {
+  if (validClock(hour, minute)) out.add(`time:${hour}:${String(minute).padStart(2, "0")}`);
+}
+function currencyCanonical(symbolOrCode) {
+  return {
+    "\xA3": "gbp",
+    gbp: "gbp",
+    pound: "gbp",
+    pounds: "gbp",
+    "$": "usd",
+    usd: "usd",
+    dollar: "usd",
+    dollars: "usd",
+    "\u20AC": "eur",
+    eur: "eur",
+    euro: "eur",
+    euros: "eur",
+    "\xA5": "jpy",
+    jpy: "jpy",
+    yen: "jpy"
+  }[symbolOrCode] || null;
+}
 function numericCanonicals(value) {
-  const s = normalizeToken(value).replace(/[–—]/g, "-").replace(/,/g, "").trim();
+  const raw = normalizeToken(value).replace(/[–—]/g, "-").trim();
+  const normalized = raw.replace(/,/g, "");
   const out = /* @__PURE__ */ new Set();
-  let m = s.match(/^£\s*(\d+(?:\.\d+)?)$/);
-  if (m) {
-    out.add("gbp:" + Number(m[1]));
+  let match = normalized.match(/^([£$€¥])\s*(\d+(?:\.\d+)?)$/);
+  if (match) {
+    out.add(`${currencyCanonical(match[1])}:${Number(match[2])}`);
     return [...out];
   }
-  m = s.match(/^(.*?)\s*(?:pounds?|gbp)$/);
-  if (m) {
-    const n2 = numericValue(m[1]);
-    if (n2 != null) {
-      out.add("gbp:" + n2);
-      return [...out];
+  match = normalized.match(/^(.*?)\s*(pounds?|gbp|dollars?|usd|euros?|eur|yen|jpy)$/);
+  if (match) {
+    const amount = numericValue(match[1]);
+    const currency = currencyCanonical(match[2]);
+    if (amount != null && currency) out.add(`${currency}:${amount}`);
+    return [...out];
+  }
+  match = normalized.match(/^(\d+(?:\.\d+)?)%$/);
+  if (match) {
+    out.add(`pct:${Number(match[1])}`);
+    return [...out];
+  }
+  match = normalized.match(/^(.*?)\s*(?:percent|per cent)$/);
+  if (match) {
+    const amount = numericValue(match[1]);
+    if (amount != null) out.add(`pct:${amount}`);
+    return [...out];
+  }
+  match = normalized.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (match) {
+    addClock(out, Number(match[1]), Number(match[2]));
+    return [...out];
+  }
+  match = normalized.match(/^(\d{1,2})\.(\d{2})$/);
+  if (match) addClock(out, Number(match[1]), Number(match[2]));
+  match = normalized.match(/^(\d+)(?:st|nd|rd|th)$/);
+  if (match) {
+    out.add(`ord:${Number(match[1])}`);
+    return [...out];
+  }
+  const ordinal = ordinalValue(normalized);
+  if (ordinal != null) {
+    out.add(`ord:${ordinal}`);
+    return [...out];
+  }
+  const number = numericValue(normalized);
+  if (number != null) {
+    out.add(`num:${number}`);
+  } else {
+    const parts = numberWordParts(normalized);
+    for (let index = 1; index < parts.length; index += 1) {
+      const hour = integerWordsToNumber(parts.slice(0, index));
+      const minute = integerWordsToNumber(parts.slice(index));
+      if (hour != null && minute != null) addClock(out, hour, minute);
     }
-  }
-  m = s.match(/^\$\s*(\d+(?:\.\d+)?)$/);
-  if (m) {
-    out.add("usd:" + Number(m[1]));
-    return [...out];
-  }
-  m = s.match(/^(.*?)\s*(?:dollars?|usd)$/);
-  if (m) {
-    const n2 = numericValue(m[1]);
-    if (n2 != null) {
-      out.add("usd:" + n2);
-      return [...out];
-    }
-  }
-  m = s.match(/^(\d+(?:\.\d+)?)%$/);
-  if (m) {
-    out.add("pct:" + Number(m[1]));
-    return [...out];
-  }
-  m = s.match(/^(.*?)\s*(?:percent|per cent)$/);
-  if (m) {
-    const n2 = numericValue(m[1]);
-    if (n2 != null) {
-      out.add("pct:" + n2);
-      return [...out];
-    }
-  }
-  m = s.match(/^(\d{1,2}):(\d{1,2})$/);
-  if (m) {
-    out.add("time:" + Number(m[1]) + ":" + String(Number(m[2])).padStart(2, "0"));
-    return [...out];
-  }
-  m = s.match(/^(\d+)(?:st|nd|rd|th)$/);
-  if (m) {
-    out.add("ord:" + Number(m[1]));
-    return [...out];
-  }
-  if (s in ORDINAL) {
-    out.add("ord:" + ORDINAL[s]);
-    return [...out];
-  }
-  const n = numericValue(s);
-  if (n != null) out.add("num:" + n);
-  m = s.match(/^(.*?)\s+(.*?)$/);
-  if (m) {
-    const h = numericValue(m[1]), min = numericValue(m[2]);
-    if (h != null && min != null && h <= 24 && min < 60) out.add("time:" + h + ":" + String(min).padStart(2, "0"));
   }
   return [...out];
 }
 function spellingMatches(input, answer) {
   if (normalizeToken(input) === normalizeToken(answer)) return true;
-  const a = numericCanonicals(answer), b = numericCanonicals(input);
-  if (!a.length || !b.length) return false;
-  const wanted = new Set(a);
-  return b.some((value) => wanted.has(value));
+  const expected = numericCanonicals(answer);
+  const actual = numericCanonicals(input);
+  if (!expected.length || !actual.length) return false;
+  const wanted = new Set(expected);
+  return actual.some((value) => wanted.has(value));
 }
 
 // src/textsentences.js
@@ -3169,7 +3398,24 @@ async function dbSet(key, value) {
     tx.objectStore(STORE).put(value, key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
   });
+}
+async function dbSetMany(entries) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    for (const [key, value] of entries) store.put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
+  });
+}
+function cloneForStorage(value) {
+  if (value == null) return value;
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
 }
 function queueWrite(task) {
   writeChain = writeChain.then(task, task);
@@ -3306,6 +3552,8 @@ function normalizePlan(plan, key) {
     reviewTarget: Math.max(0, Number(plan.reviewTarget) || 0),
     newIds: Array.isArray(plan.newIds) ? plan.newIds : [],
     reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [],
+    carryNewIds: Array.isArray(plan.carryNewIds) ? plan.carryNewIds : [],
+    carryReviewIds: Array.isArray(plan.carryReviewIds) ? plan.carryReviewIds : [],
     bookSegments: segments,
     resumeWordId: plan.resumeWordId || null,
     drawNonce: Math.max(0, Number(plan.drawNonce) || 0),
@@ -3354,6 +3602,7 @@ function normalizeSentenceSession(value) {
   return null;
 }
 function normalizeState(input) {
+  input = repairWordTextState(input);
   const base = defaultState();
   const inputVersion = Number(input?.version) || 0;
   const migrateScheduling = inputVersion < STATE_VERSION;
@@ -3405,6 +3654,20 @@ function normalizeState(input) {
   state2.version = STATE_VERSION;
   return state2;
 }
+function canonicalizeCloudState(input) {
+  const state2 = normalizeState(input);
+  const coldByWord = /* @__PURE__ */ new Map();
+  for (const event of state2.events) {
+    if (!event.cold || event.mode !== "listen") continue;
+    if (!coldByWord.has(event.wordId)) coldByWord.set(event.wordId, []);
+    coldByWord.get(event.wordId).push(event);
+  }
+  for (const word of state2.words) {
+    const events = coldByWord.get(word.id) || [];
+    word.card = events.length ? rebuildCard(events, state2.settings.retention) : word.card?.reps ? word.card : emptyCard(0);
+  }
+  return state2;
+}
 async function parseLocal(key) {
   try {
     const raw = localStorage.getItem(key);
@@ -3413,7 +3676,11 @@ async function parseLocal(key) {
     return null;
   }
 }
+async function flushStateWrites() {
+  await writeChain;
+}
 async function readPersistedState() {
+  await flushStateWrites();
   try {
     return await dbGet(STATE_KEY);
   } catch {
@@ -3423,7 +3690,20 @@ async function readPersistedState() {
 async function loadState() {
   try {
     const saved = await dbGet(STATE_KEY);
-    if (saved) return normalizeState(saved);
+    if (saved) {
+      const normalized = normalizeState(saved);
+      if (hasWordTextRepairs(saved)) {
+        try {
+          await queueWrite(() => dbSetMany([
+            ["word-text-backup-v1", cloneForStorage(saved)],
+            [STATE_KEY, normalized]
+          ]));
+        } catch (error) {
+          console.warn("Word text repair remains in memory; original local data retained", error);
+        }
+      }
+      return normalized;
+    }
     const fallback = await parseLocal(FALLBACK_KEY);
     if (fallback) {
       await queueWrite(() => dbSet(STATE_KEY, fallback));
@@ -3447,13 +3727,14 @@ async function saveState(state2) {
   if (remoteApplying) return;
   state2.version = STATE_VERSION;
   ensureSimpleWords(state2);
+  const snapshot = cloneForStorage(repairWordTextState(state2));
   return queueWrite(async () => {
     if (remoteApplying) return;
     try {
-      await dbSet(STATE_KEY, state2);
+      await dbSet(STATE_KEY, snapshot);
       localStorage.removeItem(FALLBACK_KEY);
     } catch {
-      localStorage.setItem(FALLBACK_KEY, JSON.stringify(state2));
+      localStorage.setItem(FALLBACK_KEY, JSON.stringify(snapshot));
     }
   });
 }
@@ -3462,12 +3743,17 @@ async function replaceState(raw) {
   await saveState(state2);
   return state2;
 }
-async function applyRemoteState(raw) {
+async function applySyncedState(raw) {
+  await flushStateWrites();
   remoteApplying = true;
-  const state2 = normalizeState(raw);
+  const state2 = canonicalizeCloudState(raw);
+  const snapshot = cloneForStorage(state2);
   try {
     await queueWrite(async () => {
-      await dbSet(STATE_KEY, state2);
+      await dbSetMany([
+        [STATE_KEY, snapshot],
+        [CLOUD_BASE_KEY, snapshot]
+      ]);
       try {
         localStorage.removeItem(FALLBACK_KEY);
       } catch {
@@ -3486,10 +3772,12 @@ async function readCloudSyncBase() {
   }
 }
 async function saveCloudSyncBase(value) {
-  return queueWrite(() => dbSet(CLOUD_BASE_KEY, value));
+  const snapshot = cloneForStorage(value);
+  return queueWrite(() => dbSet(CLOUD_BASE_KEY, snapshot));
 }
 async function saveCloudConflictBackup(value) {
-  return queueWrite(() => dbSet(CLOUD_CONFLICT_KEY, value));
+  const snapshot = cloneForStorage(value);
+  return queueWrite(() => dbSet(CLOUD_CONFLICT_KEY, snapshot));
 }
 function exportState(state2) {
   return JSON.stringify(state2, null, 2);
@@ -3504,6 +3792,14 @@ function clone(value) {
 }
 var SET_ARRAY_PATHS = /* @__PURE__ */ new Set(["simpleWords", "errorBooks"]);
 var ID_ARRAY_PATHS = /* @__PURE__ */ new Set(["words", "texts", "activities", "events"]);
+function isDerivedPath(path) {
+  return /^words\{[^}]+\}\.card(?:\.|$)/.test(path) || /^events\{[^}]+\}\.(?:cold|attempt)$/.test(path);
+}
+function derivedValue(base, local, cloud) {
+  if (local !== void 0) return clone(local);
+  if (cloud !== void 0) return clone(cloud);
+  return clone(base);
+}
 function itemKey(path, item, index) {
   if (ID_ARRAY_PATHS.has(path) && item && typeof item === "object" && item.id != null) return `id:${item.id}`;
   if (path === "sentenceBooks" && item && typeof item === "object" && item.id != null) return `id:${item.id}`;
@@ -3593,6 +3889,7 @@ function mergeObject(base = {}, local = {}, cloud = {}, path, conflicts) {
   return out;
 }
 function mergeValue(base, local, cloud, path, conflicts) {
+  if (isDerivedPath(path)) return derivedValue(base, local, cloud);
   if (same(local, cloud)) return clone(local);
   if (same(local, base)) return clone(cloud);
   if (same(cloud, base)) return clone(local);
@@ -3796,133 +4093,264 @@ function busyWithStudy() {
   const active = document.activeElement;
   return Boolean(active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName) && !active.closest("#lwCloudMask"));
 }
-async function rememberSyncedState(state2, revision, updatedAt) {
-  await saveCloudSyncBase(state2);
-  saveMeta({ userId: session.user.id, revision: Number(revision) || 0, lastSyncedHash: stateFingerprint(state2), cloudUpdatedAt: Number(updatedAt) || 0 });
+async function localStateForSync() {
+  await flushStateWrites();
+  return canonicalizeCloudState(await readPersistedState());
 }
-async function applyCloudState(row, { force = false } = {}) {
-  if (!row?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
-  if (!force && busyWithStudy()) {
-    pendingRemote = row;
-    setStatus("pending", "\u4E91\u7AEF\u6709\u65B0\u8BB0\u5F55\uFF1B\u5F53\u524D\u5B66\u4E60\u7ED3\u675F\u540E\u4F1A\u5E94\u7528\uFF0C\u4E0D\u4F1A\u6253\u65AD\u672C\u8F6E");
-    return false;
+function cloudRowForSync(row) {
+  return row?.state ? { ...row, state: canonicalizeCloudState(row.state) } : row;
+}
+async function rememberSyncedState(state2, revision, updatedAt) {
+  const canonical = canonicalizeCloudState(state2);
+  await saveCloudSyncBase(canonical);
+  saveMeta({
+    userId: session?.user?.id || null,
+    revision: Number(revision) || 0,
+    lastSyncedHash: stateFingerprint(canonical),
+    cloudUpdatedAt: Number(updatedAt) || 0
+  });
+  return canonical;
+}
+async function commitAppliedState(state2, revision, updatedAt) {
+  const applied = await applySyncedState(state2);
+  saveMeta({
+    userId: session?.user?.id || null,
+    revision: Number(revision) || 0,
+    lastSyncedHash: stateFingerprint(applied),
+    cloudUpdatedAt: Number(updatedAt) || 0
+  });
+  pendingRemote = null;
+  conflict = null;
+  return applied;
+}
+function deferCloudState(cloud, message = "\u4E91\u7AEF\u6709\u65B0\u8BB0\u5F55\uFF1B\u672C\u8F6E\u7ED3\u675F\u540E\u4F1A\u91CD\u65B0\u8BFB\u53D6\u4E24\u7AEF\u5E76\u5408\u5E76\uFF0C\u4E0D\u4F1A\u76F4\u63A5\u8986\u76D6\u672C\u8F6E\u5B66\u4E60") {
+  pendingRemote = cloudRowForSync(cloud);
+  setStatus("pending", message);
+  return false;
+}
+async function applyCloudState(row, { force = false, expectedLocalHash = null } = {}) {
+  const cloud = cloudRowForSync(row);
+  if (!cloud?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
+  if (!force) {
+    if (busyWithStudy()) return deferCloudState(cloud);
+    if (expectedLocalHash) {
+      const latestLocal = await localStateForSync();
+      if (stateFingerprint(latestLocal) !== expectedLocalHash) {
+        return deferCloudState(cloud, "\u540C\u6B65\u8BFB\u53D6\u671F\u95F4\u672C\u673A\u53C8\u6709\u65B0\u4FEE\u6539\uFF1B\u5DF2\u4FDD\u7559\uFF0C\u4E0B\u4E00\u6B21\u540C\u6B65\u4F1A\u91CD\u65B0\u5408\u5E76");
+      }
+    }
   }
-  await rememberSyncedState(row.state, row.revision, row.state_updated_at);
-  await applyRemoteState(row.state);
+  await commitAppliedState(cloud.state, cloud.revision, cloud.state_updated_at);
   setStatus("synced", "\u5DF2\u5E94\u7528\u4E91\u7AEF\u8BB0\u5F55");
-  location.reload();
+  if (typeof location !== "undefined") location.reload();
+  return true;
+}
+async function commitMergedStateIfCurrent(state2, result, expectedLocalHash, message) {
+  const cloud = cloudRowForSync({
+    state: state2,
+    revision: Number(result?.revision) || 0,
+    state_updated_at: Number(result?.cloud_updated_at) || Date.now()
+  });
+  if (busyWithStudy()) return deferCloudState(cloud);
+  const latestLocal = await localStateForSync();
+  if (stateFingerprint(latestLocal) !== expectedLocalHash) {
+    return deferCloudState(cloud, "\u5408\u5E76\u4E0A\u4F20\u671F\u95F4\u672C\u673A\u53C8\u6709\u65B0\u4FEE\u6539\uFF1B\u5DF2\u4FDD\u7559\uFF0C\u4E0B\u4E00\u6B21\u540C\u6B65\u4F1A\u5728\u65B0\u4E91\u7AEF\u7248\u672C\u4E0A\u7EE7\u7EED\u5408\u5E76");
+  }
+  await commitAppliedState(cloud.state, cloud.revision, cloud.state_updated_at);
+  setStatus("synced", message);
+  if (typeof location !== "undefined") location.reload();
   return true;
 }
 async function acceptPush(local, result) {
   await rememberSyncedState(local, Number(result?.revision) || 1, Number(result?.cloud_updated_at) || Date.now());
+  pendingRemote = null;
   conflict = null;
   setStatus("synced", "\u5DF2\u540C\u6B65\u5230\u4E91\u7AEF");
 }
 async function pushLocal(local, expectedRevision = null) {
-  const result = await pushCloud(local, expectedRevision);
+  const canonical = canonicalizeCloudState(local);
+  const result = await pushCloud(canonical, expectedRevision);
   if (result?.status === "conflict") {
-    await prepareConflict(local, { state: result.cloud_state, state_updated_at: result.cloud_updated_at, revision: result.revision });
+    await prepareConflict(canonical, {
+      state: result.cloud_state,
+      state_updated_at: result.cloud_updated_at,
+      revision: result.revision
+    });
     return false;
   }
-  await acceptPush(local, result);
+  await acceptPush(canonical, result);
   return true;
 }
 async function prepareConflict(local, cloud) {
-  const base = await readCloudSyncBase();
-  const merged = base ? mergeCloudStates(base, local, cloud?.state || {}) : null;
-  conflict = { local, cloud, base, merged };
-  await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud, base, mergedConflicts: merged?.conflicts || [] });
+  const localState = canonicalizeCloudState(local);
+  const cloudRow = cloudRowForSync(cloud);
+  const rawBase = await readCloudSyncBase();
+  const base = rawBase ? canonicalizeCloudState(rawBase) : null;
+  const rawMerged = base && cloudRow?.state ? mergeCloudStates(base, localState, cloudRow.state) : null;
+  const merged = rawMerged ? { ...rawMerged, state: canonicalizeCloudState(rawMerged.state) } : null;
+  conflict = { local: localState, cloud: cloudRow, base, merged };
+  await saveCloudConflictBackup({
+    createdAt: Date.now(),
+    local: localState,
+    cloud: cloudRow,
+    base,
+    mergedState: merged?.state || null,
+    mergedConflicts: merged?.conflicts || []
+  });
   setStatus("conflict", merged ? `\u68C0\u6D4B\u5230\u53CC\u7AEF\u4FEE\u6539\uFF1B\u53EF\u5B89\u5168\u5408\u5E76\u5B66\u4E60\u8BB0\u5F55${merged.conflicts.length ? `\uFF08\u53E6\u6709 ${merged.conflicts.length} \u5904\u5185\u5BB9\u51B2\u7A81\uFF09` : ""}` : "\u672C\u673A\u548C\u4E91\u7AEF\u90FD\u6709\u8BB0\u5F55\uFF0C\u8BF7\u9009\u62E9\u4FDD\u7559\u54EA\u4E00\u4EFD");
 }
-async function mergeConflict() {
-  if (!conflict?.cloud?.state) return;
-  const base = conflict.base || await readCloudSyncBase();
-  if (!base) throw new Error("\u7F3A\u5C11\u5171\u540C\u540C\u6B65\u57FA\u7EBF\uFF0C\u4E0D\u80FD\u81EA\u52A8\u5408\u5E76\uFF1B\u8BF7\u5148\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD\u518D\u9009\u62E9\u4E00\u8FB9");
-  const merged = mergeCloudStates(base, conflict.local, conflict.cloud.state);
-  const result = await pushCloud(merged.state, Number(conflict.cloud.revision) || null);
-  if (result?.status === "conflict") {
-    await prepareConflict(await readPersistedState(), { state: result.cloud_state, state_updated_at: result.cloud_updated_at, revision: result.revision });
-    return;
+async function withSyncLock(task) {
+  if (syncBusy) {
+    setStatus("syncing", "\u5DF2\u6709\u540C\u6B65\u4EFB\u52A1\u6B63\u5728\u6267\u884C");
+    return false;
   }
-  await rememberSyncedState(merged.state, result?.revision, result?.cloud_updated_at);
-  await applyRemoteState(merged.state);
-  setStatus("synced", merged.conflicts.length ? `\u5DF2\u5408\u5E76\uFF1B${merged.conflicts.length} \u5904\u540C\u65F6\u7F16\u8F91\u4EE5\u672C\u673A\u5185\u5BB9\u4E3A\u51C6\uFF0C\u4E91\u7AEF\u539F\u7A3F\u5DF2\u7559\u51B2\u7A81\u5907\u4EFD` : "\u53CC\u65B9\u5B66\u4E60\u8BB0\u5F55\u5DF2\u5408\u5E76");
-  location.reload();
-}
-async function reconcileCloud({ force = false } = {}) {
-  if (syncBusy) return;
-  const current = await ensureSession().catch(() => null);
-  if (!current) return setStatus("offline", "\u672A\u767B\u5F55\u4E91\u540C\u6B65");
-  if (pendingRemote && !busyWithStudy()) return applyCloudState(pendingRemote, { force: true });
   syncBusy = true;
-  setStatus("syncing", "\u6B63\u5728\u68C0\u67E5\u4E91\u7AEF\u2026");
   try {
-    const local = await readPersistedState();
-    const localHash = stateFingerprint(local);
-    const localHasData = hasUserData(local);
-    const meta = metaForUser();
-    const shouldCheckCloud = force || Date.now() - lastCloudCheck >= CLOUD_POLL_MS || !meta.revision;
-    if (!shouldCheckCloud) {
-      if (meta.lastSyncedHash && localHash !== meta.lastSyncedHash) await pushLocal(local, Number(meta.revision) || null);
-      else setStatus("synced", "\u5DF2\u540C\u6B65");
-      return;
-    }
-    const cloud = await pullCloud();
-    lastCloudCheck = Date.now();
-    if (!cloud) {
-      if (localHasData) await pushLocal(local, null);
-      else setStatus("ready", "\u5DF2\u767B\u5F55\uFF1B\u672C\u673A\u548C\u4E91\u7AEF\u90FD\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
-      return;
-    }
-    if (!localHasData) {
-      await applyCloudState(cloud);
-      return;
-    }
-    const cloudRevision = Number(cloud.revision) || 0;
-    const sameUserMeta = (readStored(META_KEY) || {}).userId === current.user.id;
-    if (!sameUserMeta || !meta.revision || !meta.lastSyncedHash) {
-      if (localHash === stateFingerprint(cloud.state)) {
-        await rememberSyncedState(local, cloudRevision, cloud.state_updated_at);
-        setStatus("synced", "\u5DF2\u540C\u6B65");
-      } else await prepareConflict(local, cloud);
-      return;
-    }
-    const localChanged = localHash !== meta.lastSyncedHash;
-    const cloudChanged = cloudRevision > Number(meta.revision || 0);
-    if (!localChanged && cloudChanged) {
-      await applyCloudState(cloud);
-      return;
-    }
-    if (localChanged && !cloudChanged) {
-      await pushLocal(local, cloudRevision);
-      return;
-    }
-    if (!localChanged && !cloudChanged) {
-      setStatus("synced", "\u5DF2\u540C\u6B65");
-      return;
-    }
-    const base = await readCloudSyncBase();
-    if (base) {
-      const merged = mergeCloudStates(base, local, cloud.state);
-      if (!merged.conflicts.length && !busyWithStudy()) {
-        const result = await pushCloud(merged.state, cloudRevision);
-        if (result?.status !== "conflict") {
-          await rememberSyncedState(merged.state, result?.revision, result?.cloud_updated_at);
-          await applyRemoteState(merged.state);
-          setStatus("synced", "\u5DF2\u81EA\u52A8\u5408\u5E76\u53CC\u65B9\u5B66\u4E60\u8BB0\u5F55");
-          location.reload();
-          return;
-        }
-      }
-    }
-    await prepareConflict(local, cloud);
-  } catch (error) {
-    console.error("Listenwrite cloud sync failed", error);
-    setStatus("error", error?.message || "\u4E91\u540C\u6B65\u5931\u8D25");
+    return await task();
   } finally {
     syncBusy = false;
     renderCloudModalIfOpen();
   }
+}
+async function mergeConflict() {
+  return withSyncLock(async () => {
+    setStatus("syncing", "\u6B63\u5728\u8BFB\u53D6\u4E24\u7AEF\u6700\u65B0\u8BB0\u5F55\u5E76\u5408\u5E76\u2026");
+    const local = await localStateForSync();
+    const cloud = cloudRowForSync(await pullCloud());
+    if (!cloud?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
+    const rawBase = conflict?.base || await readCloudSyncBase();
+    const base = rawBase ? canonicalizeCloudState(rawBase) : null;
+    if (!base) throw new Error("\u7F3A\u5C11\u5171\u540C\u540C\u6B65\u57FA\u7EBF\uFF0C\u4E0D\u80FD\u81EA\u52A8\u5408\u5E76\uFF1B\u8BF7\u5148\u4E0B\u8F7D\u4E91\u7AEF\u5907\u4EFD\u518D\u9009\u62E9\u4E00\u8FB9");
+    const merged = mergeCloudStates(base, local, cloud.state);
+    const mergedState = canonicalizeCloudState(merged.state);
+    const result = await pushCloud(mergedState, Number(cloud.revision) || null);
+    if (result?.status === "conflict") {
+      await prepareConflict(local, {
+        state: result.cloud_state,
+        state_updated_at: result.cloud_updated_at,
+        revision: result.revision
+      });
+      return false;
+    }
+    return commitMergedStateIfCurrent(
+      mergedState,
+      result,
+      stateFingerprint(local),
+      merged.conflicts.length ? `\u5DF2\u5408\u5E76\uFF1B${merged.conflicts.length} \u5904\u540C\u65F6\u7F16\u8F91\u4EE5\u672C\u673A\u5185\u5BB9\u4E3A\u51C6\uFF0C\u4E91\u7AEF\u539F\u7A3F\u5DF2\u7559\u51B2\u7A81\u5907\u4EFD` : "\u53CC\u65B9\u5B66\u4E60\u8BB0\u5F55\u5DF2\u5408\u5E76"
+    );
+  });
+}
+async function reconcileCloud({ force = false } = {}) {
+  return withSyncLock(async () => {
+    try {
+      const current = await ensureSession().catch(() => null);
+      if (!current) {
+        setStatus("offline", "\u672A\u767B\u5F55\u4E91\u540C\u6B65");
+        return false;
+      }
+      if (pendingRemote && !busyWithStudy()) {
+        pendingRemote = null;
+        force = true;
+        lastCloudCheck = 0;
+      }
+      setStatus("syncing", "\u6B63\u5728\u68C0\u67E5\u4E91\u7AEF\u2026");
+      const local = await localStateForSync();
+      const localHash = stateFingerprint(local);
+      const localHasData = hasUserData(local);
+      const meta = metaForUser();
+      const shouldCheckCloud = force || Date.now() - lastCloudCheck >= CLOUD_POLL_MS || !meta.revision;
+      if (!shouldCheckCloud) {
+        if (meta.lastSyncedHash && localHash !== meta.lastSyncedHash) await pushLocal(local, Number(meta.revision) || null);
+        else setStatus("synced", "\u5DF2\u540C\u6B65");
+        return true;
+      }
+      const cloud = cloudRowForSync(await pullCloud());
+      lastCloudCheck = Date.now();
+      if (!cloud) {
+        if (localHasData) await pushLocal(local, null);
+        else setStatus("ready", "\u5DF2\u767B\u5F55\uFF1B\u672C\u673A\u548C\u4E91\u7AEF\u90FD\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
+        return true;
+      }
+      if (!localHasData) {
+        await applyCloudState(cloud, { expectedLocalHash: localHash });
+        return true;
+      }
+      const cloudRevision = Number(cloud.revision) || 0;
+      const cloudHash = stateFingerprint(cloud.state);
+      const sameUserMeta = (readStored(META_KEY) || {}).userId === current.user.id;
+      if (!sameUserMeta || !meta.revision || !meta.lastSyncedHash) {
+        if (localHash === cloudHash) {
+          await rememberSyncedState(local, cloudRevision, cloud.state_updated_at);
+          setStatus("synced", "\u5DF2\u540C\u6B65");
+        } else {
+          await prepareConflict(local, cloud);
+        }
+        return true;
+      }
+      const localChanged = localHash !== meta.lastSyncedHash;
+      const cloudChanged = cloudRevision > Number(meta.revision || 0);
+      if (!localChanged && cloudChanged) {
+        await applyCloudState(cloud, { expectedLocalHash: localHash });
+        return true;
+      }
+      if (localChanged && !cloudChanged) {
+        await pushLocal(local, cloudRevision);
+        return true;
+      }
+      if (!localChanged && !cloudChanged) {
+        setStatus("synced", "\u5DF2\u540C\u6B65");
+        return true;
+      }
+      const rawBase = await readCloudSyncBase();
+      const base = rawBase ? canonicalizeCloudState(rawBase) : null;
+      if (base) {
+        const merged = mergeCloudStates(base, local, cloud.state);
+        const mergedState = canonicalizeCloudState(merged.state);
+        if (!merged.conflicts.length && !busyWithStudy()) {
+          const result = await pushCloud(mergedState, cloudRevision);
+          if (result?.status === "conflict") {
+            await prepareConflict(local, {
+              state: result.cloud_state,
+              state_updated_at: result.cloud_updated_at,
+              revision: result.revision
+            });
+            return false;
+          }
+          return commitMergedStateIfCurrent(
+            mergedState,
+            result,
+            localHash,
+            "\u5DF2\u81EA\u52A8\u5408\u5E76\u53CC\u65B9\u5B66\u4E60\u8BB0\u5F55"
+          );
+        }
+      }
+      await prepareConflict(local, cloud);
+      return true;
+    } catch (error) {
+      console.error("Listenwrite cloud sync failed", error);
+      setStatus("error", error?.message || "\u4E91\u540C\u6B65\u5931\u8D25");
+      return false;
+    }
+  });
+}
+async function useLatestCloudState() {
+  return withSyncLock(async () => {
+    setStatus("syncing", "\u6B63\u5728\u8BFB\u53D6\u6700\u65B0\u4E91\u7AEF\u8BB0\u5F55\u2026");
+    const local = await localStateForSync();
+    const cloud = cloudRowForSync(await pullCloud());
+    if (!cloud?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
+    await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud });
+    return applyCloudState(cloud, { force: true });
+  });
+}
+async function overwriteCloudWithLocalState() {
+  return withSyncLock(async () => {
+    setStatus("syncing", "\u6B63\u5728\u4E0A\u4F20\u6700\u65B0\u672C\u673A\u8BB0\u5F55\u2026");
+    const local = await localStateForSync();
+    const cloud = cloudRowForSync(await pullCloud());
+    if (cloud?.state) await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud });
+    return pushLocal(local, cloud ? Number(cloud.revision) || null : null);
+  });
 }
 async function cloudSignOut() {
   try {
@@ -4007,26 +4435,8 @@ function openCloudModal() {
     document.getElementById("lwCloudNow").onclick = () => reconcileCloud({ force: true });
     if (document.getElementById("lwCloudMerge")) document.getElementById("lwCloudMerge").onclick = () => mergeConflict().catch((e) => setStatus("error", e.message));
     if (document.getElementById("lwCloudBackup")) document.getElementById("lwCloudBackup").onclick = () => downloadJson(`listenwrite-cloud-conflict-${Date.now()}.json`, conflict.cloud.state);
-    document.getElementById("lwCloudPull").onclick = async () => {
-      try {
-        const cloud = conflict?.cloud || pendingRemote || await pullCloud();
-        if (!cloud?.state) throw new Error("\u4E91\u7AEF\u8FD8\u6CA1\u6709\u5B66\u4E60\u8BB0\u5F55");
-        await saveCloudConflictBackup({ createdAt: Date.now(), local: await readPersistedState(), cloud });
-        await applyCloudState(cloud, { force: true });
-      } catch (e) {
-        setStatus("error", e.message);
-      }
-    };
-    document.getElementById("lwCloudPush").onclick = async () => {
-      try {
-        const local = conflict?.local || await readPersistedState();
-        const cloud = conflict?.cloud || await pullCloud();
-        if (cloud?.state) await saveCloudConflictBackup({ createdAt: Date.now(), local, cloud });
-        await pushLocal(local, cloud ? Number(cloud.revision) || null : null);
-      } catch (e) {
-        setStatus("error", e.message);
-      }
-    };
+    document.getElementById("lwCloudPull").onclick = () => useLatestCloudState().catch((e) => setStatus("error", e.message));
+    document.getElementById("lwCloudPush").onclick = () => overwriteCloudWithLocalState().catch((e) => setStatus("error", e.message));
     document.getElementById("lwCloudLogout").onclick = cloudSignOut;
   } else {
     document.getElementById("lwCloudMagicLogin").onclick = async () => {
@@ -4082,6 +4492,25 @@ if (typeof window !== "undefined" && typeof document !== "undefined") queueMicro
   console.error("Listenwrite cloud init failed", error);
   setStatus("error", error?.message || "\u4E91\u540C\u6B65\u521D\u59CB\u5316\u5931\u8D25");
 }));
+
+// src/wordtext-ui.js
+function importCleaningHtml(rows, esc3) {
+  const cleaned = rows.filter((row) => row.cleaned);
+  const rejected = rows.filter((row) => !row.valid);
+  if (!cleaned.length && !rejected.length) return "";
+  return `<details class="details" open><summary>\u8BCD\u6761\u6E05\u6D17\uFF1A${cleaned.length} \u884C\u5DF2\u6E05\u7406 \xB7 ${rejected.length} \u884C\u4E0D\u5BFC\u5165</summary><div class="small">\u53EA\u6E05\u7406\u82F1\u6587\u8FB9\u754C\u6742\u5B57\u7B26\uFF0C\u4E2D\u6587\u91CA\u4E49\u3001\u8BCD\u6027\u3001\u6765\u6E90\u548C\u4F8B\u53E5\u4E0D\u505A\u5B57\u7B26\u5220\u6539\u3002\u65E0\u6CD5\u53EF\u9760\u5224\u65AD\u7684\u884C\u4F1A\u8DF3\u8FC7\u3002</div><div class="list">${[...cleaned, ...rejected].slice(0, 80).map((row) => `<div class="listitem"><code>${esc3(row.originalEn || "\uFF08\u7A7A\uFF09")}</code> \u2192 ${row.valid ? `<b>${esc3(row.en)}</b>` : `<span class="bad">\u8DF3\u8FC7\uFF1A${esc3(row.issue)}</span>`}</div>`).join("")}</div>${cleaned.length + rejected.length > 80 ? '<div class="small">\u8FD9\u91CC\u53EA\u663E\u793A\u524D 80 \u884C\uFF0C\u6E05\u6D17\u89C4\u5219\u4F1A\u5E94\u7528\u5230\u5168\u90E8\u5BFC\u5165\u884C\u3002</div>' : ""}</details>`;
+}
+function wordTextRepairHtml(state2, esc3) {
+  const repaired = Object.values(state2.wordTextRepairs || {}).filter((row) => row && typeof row === "object");
+  const review = wordTextReviewRows(state2);
+  const duplicates = wordTextDuplicateGroups(state2);
+  if (!repaired.length && !review.length) return "";
+  return `<section class="card"><h2 class="section-title">\u8BCD\u6761\u6742\u5B57\u7B26\u4FEE\u590D</h2><p class="small">\u5DF2\u6E05\u7406 ${repaired.length} \u9879\u3002\u5355\u8BCD ID\u3001\u5B66\u4E60\u8BB0\u5F55\u3001\u590D\u4E60\u5361\u7247\u548C\u8BCD\u4E66\u5F52\u5C5E\u4FDD\u6301\u4E0D\u53D8\uFF1B\u91CD\u540D\u8BCD\u4FDD\u7559\u5404\u81EA\u8BB0\u5F55\uFF0C\u4E0D\u81EA\u52A8\u5408\u5E76\u6216\u5220\u9664\u3002</p>${repaired.length ? `<details class="details"><summary>\u67E5\u770B\u4FEE\u6539\u524D\u540E</summary><div class="list">${repaired.slice(0, 80).map((row) => `<div class="listitem"><code>${esc3(row.before)}</code> \u2192 <b>${esc3(row.after)}</b></div>`).join("")}</div><button id="exportWordTextRepairs" class="soft">\u5BFC\u51FA\u5B8C\u6574\u4FEE\u590D\u8BB0\u5F55</button></details>` : ""}${review.length ? `<details class="details"><summary>\u4ECD\u9700\u68C0\u67E5 ${review.length} \u9879</summary><div class="small">\u8FD9\u4E9B\u539F\u8BCD\u6761\u6CA1\u6709\u5220\u9664\u3002\u53EF\u5728\u4E0B\u65B9\u8BCD\u5E93\u641C\u7D22\u540E\u5904\u7406\u3002</div>${review.slice(0, 40).map(({ word, check }) => `<div class="listitem">${esc3(word.en)} \xB7 ${esc3(check.issue)}</div>`).join("")}</details>` : ""}${duplicates.length ? `<div class="small">\u6E05\u6D17\u540E\u6709 ${duplicates.length} \u7EC4\u540C\u540D\u8BCD\uFF0C\u5DF2\u4FDD\u7559\u5168\u90E8 ID \u548C\u5386\u53F2\uFF0C\u672A\u81EA\u52A8\u5408\u5E76\u3002</div>` : ""}</section>`;
+}
+function bindWordTextRepair(state2, download2) {
+  const button = document.getElementById("exportWordTextRepairs");
+  if (button) button.onclick = () => download2("listenwrite-word-text-repairs.json", JSON.stringify(state2.wordTextRepairs || {}, null, 2));
+}
 
 // src/reinforcement.js
 var REQUIRED_GOOD_STREAK = 3;
@@ -4228,6 +4657,16 @@ function matchesBooks(word, books = []) {
 function sameBooks(a = [], b = []) {
   return JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 }
+function planContentSnapshot(plan) {
+  if (!plan) return null;
+  const content = { ...plan };
+  delete content.updatedAt;
+  return JSON.stringify(content);
+}
+function touchPlanIfChanged(plan, before) {
+  if (planContentSnapshot(plan) !== before) plan.updatedAt = Date.now();
+  return plan;
+}
 function listenedToday(state2, id3, date) {
   return state2.events.some((e) => e.wordId === id3 && e.date === date && e.mode === "listen");
 }
@@ -4333,21 +4772,21 @@ function trimIdsToTarget(state2, ids, date, target) {
   return [...attempted, ...untouched.slice(0, keepUntouched)];
 }
 function syncSequentialTotals(plan) {
-  plan.newIds = [];
-  plan.reviewIds = [];
-  for (const segment of plan.bookSegments || []) {
-    plan.newIds.push(...segment.newIds);
-    plan.reviewIds.push(...segment.reviewIds);
-  }
-  plan.newIds = [...new Set(plan.newIds)];
-  plan.reviewIds = [...new Set(plan.reviewIds.filter((id3) => !plan.newIds.includes(id3)))];
-  plan.newTarget = (plan.bookSegments || []).reduce((sum, x) => sum + x.newTarget, 0);
-  plan.reviewTarget = (plan.bookSegments || []).reduce((sum, x) => sum + x.reviewTarget, 0);
-  plan.books = (plan.bookSegments || []).map((x) => x.book).filter(Boolean);
+  const segmentNew = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.newIds || []))];
+  const segmentReview = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.reviewIds || []))].filter((id3) => !segmentNew.includes(id3));
+  const segmentIds = /* @__PURE__ */ new Set([...segmentNew, ...segmentReview]);
+  plan.carryNewIds = [...new Set(plan.carryNewIds || [])].filter((id3) => !segmentIds.has(id3));
+  plan.carryReviewIds = [...new Set(plan.carryReviewIds || [])].filter((id3) => !segmentIds.has(id3) && !plan.carryNewIds.includes(id3));
+  plan.newIds = [.../* @__PURE__ */ new Set([...plan.carryNewIds, ...segmentNew])];
+  plan.reviewIds = [.../* @__PURE__ */ new Set([...plan.carryReviewIds, ...segmentReview])].filter((id3) => !plan.newIds.includes(id3));
+  plan.newTarget = plan.carryNewIds.length + (plan.bookSegments || []).reduce((sum, segment) => sum + Math.max(0, Number(segment.newTarget) || 0), 0);
+  plan.reviewTarget = plan.carryReviewIds.length + (plan.bookSegments || []).reduce((sum, segment) => sum + Math.max(0, Number(segment.reviewTarget) || 0), 0);
+  plan.books = (plan.bookSegments || []).map((segment) => segment.book).filter(Boolean);
 }
 function ensureDailyPlan(state2, options = {}) {
   const date = options.date || activeStudyDayKey(state2);
   let plan = state2.dailyPlans[date];
+  const before = planContentSnapshot(plan);
   if (!plan) {
     plan = state2.dailyPlans[date] = {
       date,
@@ -4357,6 +4796,8 @@ function ensureDailyPlan(state2, options = {}) {
       reviewTarget: Math.max(0, Number(state2.settings.defaultReviewTarget) || 0),
       newIds: [],
       reviewIds: [],
+      carryNewIds: [],
+      carryReviewIds: [],
       bookSegments: [],
       resumeWordId: null,
       drawNonce: 0,
@@ -4368,9 +4809,8 @@ function ensureDailyPlan(state2, options = {}) {
     convertPlanToMixed(state2, plan, options.books ?? plan.books);
   }
   if (plan.mode === "sequential") {
-    plan.updatedAt = Date.now();
     syncSequentialTotals(plan);
-    return plan;
+    return touchPlanIfChanged(plan, before);
   }
   if (Object.prototype.hasOwnProperty.call(options, "books")) reconcileScope(state2, plan, options.books || []);
   seedTodayFromListenHistory(state2, plan);
@@ -4385,8 +4825,7 @@ function ensureDailyPlan(state2, options = {}) {
   plan.newIds = trimIdsToTarget(state2, plan.newIds, plan.date, plan.newTarget);
   plan.reviewIds = trimIdsToTarget(state2, plan.reviewIds, plan.date, plan.reviewTarget);
   fillDailyPlan(state2, plan);
-  plan.updatedAt = Date.now();
-  return plan;
+  return touchPlanIfChanged(plan, before);
 }
 function fillDailyPlan(state2, plan) {
   if (plan.mode === "sequential") return fillSequentialPlan(state2, plan);
@@ -4407,6 +4846,7 @@ function fillDailyPlan(state2, plan) {
   return plan;
 }
 function configureSequentialPlan(state2, plan, configs = []) {
+  const before = planContentSnapshot(plan);
   const clean = [];
   const seenBooks = /* @__PURE__ */ new Set();
   for (const row of configs) {
@@ -4426,27 +4866,29 @@ function configureSequentialPlan(state2, plan, configs = []) {
   plan.mode = "sequential";
   plan.bookSegments = clean;
   fillSequentialPlan(state2, plan);
-  plan.updatedAt = Date.now();
-  return plan;
+  return touchPlanIfChanged(plan, before);
 }
 function fillSequentialPlan(state2, plan) {
   const assigned = /* @__PURE__ */ new Set();
-  const listenedIds = [...new Set(state2.events.filter((e) => e.date === plan.date && e.mode === "listen").map((e) => e.wordId))];
+  const wordMap = new Map(state2.words.map((word) => [word.id, word]));
+  const listenedIds = listenedIdsOnDay(state2, plan.date);
+  plan.carryNewIds = [];
+  plan.carryReviewIds = [];
   for (const segment of plan.bookSegments || []) {
-    const pool = state2.words.filter((w) => !w.retired && (w.sources || []).includes(segment.book));
-    const valid = new Set(pool.map((w) => w.id));
+    const pool = state2.words.filter((word) => !word.retired && (word.sources || []).includes(segment.book));
+    const valid = new Set(pool.map((word) => word.id));
     const existing = [.../* @__PURE__ */ new Set([...segment.newIds || [], ...segment.reviewIds || []])].filter((id3) => valid.has(id3) && !assigned.has(id3));
     segment.newIds = [];
     segment.reviewIds = [];
     for (const id3 of existing) {
-      const word = state2.words.find((w) => w.id === id3);
+      const word = wordMap.get(id3);
       if (wordStudyKind(state2, word, plan.date) === "review") segment.reviewIds.push(id3);
       else segment.newIds.push(id3);
     }
     const present = /* @__PURE__ */ new Set([...segment.newIds, ...segment.reviewIds]);
     for (const id3 of listenedIds) {
-      if (present.has(id3) || assigned.has(id3) || !valid.has(id3) || wordPassedOnDay(state2, id3, plan.date)) continue;
-      const word = state2.words.find((w) => w.id === id3);
+      if (present.has(id3) || assigned.has(id3) || !valid.has(id3)) continue;
+      const word = wordMap.get(id3);
       if (wordStudyKind(state2, word, plan.date) === "review") segment.reviewIds.push(id3);
       else segment.newIds.push(id3);
       present.add(id3);
@@ -4461,25 +4903,36 @@ function fillSequentialPlan(state2, plan) {
     segment.newIds.forEach((id3) => assigned.add(id3));
     segment.reviewIds.forEach((id3) => assigned.add(id3));
     const review = reviewCandidates(state2, pool, assigned, plan.date, [segment.book], plan.drawNonce);
-    for (const w of review.slice(0, Math.max(0, segment.reviewTarget - segment.reviewIds.length))) {
-      segment.reviewIds.push(w.id);
-      assigned.add(w.id);
+    for (const word of review.slice(0, Math.max(0, segment.reviewTarget - segment.reviewIds.length))) {
+      segment.reviewIds.push(word.id);
+      assigned.add(word.id);
     }
     const fresh = freshCandidates(state2, pool, assigned, plan.date, [segment.book], plan.drawNonce);
-    for (const w of fresh.slice(0, Math.max(0, segment.newTarget - segment.newIds.length))) {
-      segment.newIds.push(w.id);
-      assigned.add(w.id);
+    for (const word of fresh.slice(0, Math.max(0, segment.newTarget - segment.newIds.length))) {
+      segment.newIds.push(word.id);
+      assigned.add(word.id);
     }
+  }
+  for (const id3 of listenedIds) {
+    if (assigned.has(id3)) continue;
+    const word = wordMap.get(id3);
+    if (!word) continue;
+    if (wordStudyKind(state2, word, plan.date) === "review") plan.carryReviewIds.push(id3);
+    else plan.carryNewIds.push(id3);
+    assigned.add(id3);
   }
   syncSequentialTotals(plan);
   return plan;
 }
 function convertPlanToMixed(state2, plan, books = []) {
+  const before = planContentSnapshot(plan);
   const attempted = [.../* @__PURE__ */ new Set([...plan.newIds || [], ...plan.reviewIds || []])].filter((id3) => listenedToday(state2, id3, plan.date));
   const attemptedNew = attempted.filter((id3) => wordStudyKind(state2, id3, plan.date) === "new");
   const attemptedReview = attempted.filter((id3) => wordStudyKind(state2, id3, plan.date) === "review");
   plan.mode = "mixed";
   plan.bookSegments = [];
+  plan.carryNewIds = [];
+  plan.carryReviewIds = [];
   plan.drawNonce = (Number(plan.drawNonce) || 0) + 1;
   plan.books = [...books];
   plan.newTarget = Math.max(attemptedNew.length, Number(state2.settings.defaultNewTarget) || 0);
@@ -4487,8 +4940,7 @@ function convertPlanToMixed(state2, plan, books = []) {
   plan.newIds = attemptedNew;
   plan.reviewIds = attemptedReview;
   fillDailyPlan(state2, plan);
-  plan.updatedAt = Date.now();
-  return plan;
+  return touchPlanIfChanged(plan, before);
 }
 function statusForIds(state2, ids, date) {
   const wordMap = new Map(state2.words.map((w) => [w.id, w]));
@@ -4531,9 +4983,19 @@ function segmentStatus(state2, plan, segment) {
 }
 function currentSequentialSegment(state2, plan) {
   if (plan.mode !== "sequential") return null;
+  const carry = {
+    id: "__carry__",
+    book: "\u4ECA\u65E5\u5DF2\u5F00\u59CB",
+    newTarget: (plan.carryNewIds || []).length,
+    reviewTarget: (plan.carryReviewIds || []).length,
+    newIds: [...plan.carryNewIds || []],
+    reviewIds: [...plan.carryReviewIds || []]
+  };
+  const carryStatus = segmentStatus(state2, plan, carry);
+  if (carryStatus.new.pending + carryStatus.new.retry + carryStatus.review.pending + carryStatus.review.retry > 0) return carry;
   for (const segment of plan.bookSegments || []) {
-    const s = segmentStatus(state2, plan, segment);
-    if (s.new.pending + s.new.retry + s.review.pending + s.review.retry > 0) return segment;
+    const status = segmentStatus(state2, plan, segment);
+    if (status.new.pending + status.new.retry + status.review.pending + status.review.retry > 0) return segment;
   }
   return null;
 }
@@ -4809,14 +5271,15 @@ function inferFieldMap(rows) {
   const first = rows[0] || [];
   const map = { en: 0, zh: 1, pos: 2, def: 3, source: 4, example: 5 };
   let matches = 0;
+  const detected = {};
   for (const [field, aliases] of Object.entries(FIELD_ALIASES)) {
     const index = first.findIndex((cell) => aliases.includes(normalizedHeader(cell)));
     if (index >= 0) {
-      map[field] = index;
+      detected[field] = index;
       matches += 1;
     }
   }
-  return { map, hasHeader: matches > 0 };
+  return { map: matches ? Object.fromEntries(Object.keys(map).map((field) => [field, detected[field] ?? -1])) : map, hasHeader: matches > 0 };
 }
 function buildImportDraft(text, fileName = "\u5BFC\u5165\u8BCD\u5E93") {
   const delimiter = detectDelimiter(text);
@@ -4841,7 +5304,9 @@ function recordsFromDraft(draft, map = draft?.map || {}) {
       const index = Number(map[field]);
       return Number.isInteger(index) && index >= 0 ? cleanCell(row[index]) : "";
     };
-    const en = value("en");
+    const originalEn = value("en");
+    const cleaning = inspectWordText(originalEn);
+    const en = cleaning.text;
     return {
       rowIndex,
       en,
@@ -4850,7 +5315,10 @@ function recordsFromDraft(draft, map = draft?.map || {}) {
       def: value("def"),
       source: value("source") || draft.sourceName || "\u5BFC\u5165\u8BCD\u5E93",
       example: value("example"),
-      valid: Boolean(en)
+      originalEn,
+      cleaned: cleaning.valid && cleaning.changed,
+      issue: cleaning.issue,
+      valid: cleaning.valid
     };
   });
 }
@@ -4858,6 +5326,9 @@ function recordsFromDraft(draft, map = draft?.map || {}) {
 // src/wordadmin.js
 function unique2(values) {
   return [...new Set((Array.isArray(values) ? values : []).map((v) => String(v || "").trim()).filter(Boolean))];
+}
+function uniqueIds(values) {
+  return [...new Set((Array.isArray(values) ? values : []).filter(Boolean))];
 }
 function updateWordFields(word, patch = {}) {
   if (!word) return null;
@@ -4877,12 +5348,15 @@ function removeId(list, wordId) {
 function deleteWordEverywhere(state2, wordId) {
   const word = state2.words.find((w) => w.id === wordId);
   if (!word) return false;
+  const lexeme = normalizeLexeme(word.en);
   state2.words = state2.words.filter((w) => w.id !== wordId);
   state2.events = (state2.events || []).filter((event) => event.wordId !== wordId);
-  state2.simpleWords = (state2.simpleWords || []).filter((lexeme) => lexeme !== word.en);
+  state2.simpleWords = (state2.simpleWords || []).filter((value) => normalizeLexeme(value) !== lexeme);
   for (const plan of Object.values(state2.dailyPlans || {})) {
     plan.newIds = removeId(plan.newIds, wordId);
     plan.reviewIds = removeId(plan.reviewIds, wordId);
+    plan.carryNewIds = removeId(plan.carryNewIds, wordId);
+    plan.carryReviewIds = removeId(plan.carryReviewIds, wordId);
     if (plan.resumeWordId === wordId) plan.resumeWordId = null;
     for (const segment of plan.bookSegments || []) {
       segment.newIds = removeId(segment.newIds, wordId);
@@ -4912,13 +5386,31 @@ function deleteWordbook(state2, book, { purgeExclusive = false } = {}) {
   state2.settings.typeBooks = (state2.settings.typeBooks || []).filter((x) => x !== name);
   if (state2.settings.freeListenProgress && typeof state2.settings.freeListenProgress === "object") delete state2.settings.freeListenProgress[name];
   state2.errorBooks = (state2.errorBooks || []).filter((x) => x !== name);
+  const events = state2.events || [];
   for (const plan of Object.values(state2.dailyPlans || {})) {
+    const before = JSON.stringify(plan);
     plan.books = (plan.books || []).filter((x) => x !== name);
     if (plan.mode === "sequential") {
+      const removed = (plan.bookSegments || []).filter((segment) => segment.book === name);
       plan.bookSegments = (plan.bookSegments || []).filter((segment) => segment.book !== name);
-      plan.newIds = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.newIds || []))];
-      plan.reviewIds = [...new Set((plan.bookSegments || []).flatMap((segment) => segment.reviewIds || []))];
+      const heardOnPlanDay = (id3) => Boolean(plan.date) && events.some(
+        (event) => event.wordId === id3 && event.date === plan.date && event.mode === "listen"
+      );
+      const removedNew = removed.flatMap((segment) => segment.newIds || []).filter(heardOnPlanDay);
+      const removedReview = removed.flatMap((segment) => segment.reviewIds || []).filter(heardOnPlanDay);
+      const segmentNew = uniqueIds(plan.bookSegments.flatMap((segment) => segment.newIds || []));
+      const segmentReview = uniqueIds(plan.bookSegments.flatMap((segment) => segment.reviewIds || [])).filter((id3) => !segmentNew.includes(id3));
+      const segmentIds = /* @__PURE__ */ new Set([...segmentNew, ...segmentReview]);
+      plan.carryNewIds = uniqueIds([...plan.carryNewIds || [], ...removedNew]).filter((id3) => !segmentIds.has(id3) && state2.words.some((word) => word.id === id3));
+      plan.carryReviewIds = uniqueIds([...plan.carryReviewIds || [], ...removedReview]).filter((id3) => !segmentIds.has(id3) && !plan.carryNewIds.includes(id3) && state2.words.some((word) => word.id === id3));
+      plan.newIds = uniqueIds([...plan.carryNewIds, ...segmentNew]);
+      plan.reviewIds = uniqueIds([...plan.carryReviewIds, ...segmentReview]).filter((id3) => !plan.newIds.includes(id3));
+      plan.newTarget = plan.carryNewIds.length + plan.bookSegments.reduce((sum, segment) => sum + Math.max(0, Number(segment.newTarget) || 0), 0);
+      plan.reviewTarget = plan.carryReviewIds.length + plan.bookSegments.reduce((sum, segment) => sum + Math.max(0, Number(segment.reviewTarget) || 0), 0);
+      plan.books = plan.bookSegments.map((segment) => segment.book).filter(Boolean);
+      if (plan.resumeWordId && !plan.newIds.includes(plan.resumeWordId) && !plan.reviewIds.includes(plan.resumeWordId)) plan.resumeWordId = null;
     }
+    if (JSON.stringify(plan) !== before) plan.updatedAt = Date.now();
   }
   return { affected: matched.length, removedWords, sharedWords };
 }
@@ -5467,7 +5959,6 @@ var dataChartUI = null;
 var statRange = 30;
 var statDay = currentDayKey();
 var statMonth = calendarDate(statDay);
-var saveChain = Promise.resolve();
 var saveFailureShown = false;
 var todayPlanPanelOpen = false;
 var typeFilterPanelOpen = false;
@@ -5554,7 +6045,7 @@ function restoreSentenceSession() {
 function persist() {
   syncActiveSentenceSession();
   mirrorSentenceDraft();
-  saveChain = saveChain.then(() => saveState(state)).then(() => {
+  return saveState(state).then(() => {
     saveFailureShown = false;
   }).catch((error) => {
     console.error("Listenwrite save failed", error);
@@ -5563,7 +6054,6 @@ function persist() {
       toast("\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u5148\u5BFC\u51FA\u5907\u4EFD\u540E\u518D\u7EE7\u7EED");
     }
   });
-  return saveChain;
 }
 function wordById(id3) {
   return state.words.find((w) => w.id === id3);
@@ -5730,6 +6220,7 @@ function planWordKind(plan, id3) {
 }
 function planWordBook(plan, id3) {
   if (plan?.mode !== "sequential") return "";
+  if ((plan.carryNewIds || []).includes(id3) || (plan.carryReviewIds || []).includes(id3)) return "\u4ECA\u65E5\u5DF2\u5F00\u59CB";
   const seg = (plan.bookSegments || []).find((x) => (x.newIds || []).includes(id3) || (x.reviewIds || []).includes(id3));
   return seg?.book || "";
 }
@@ -5790,13 +6281,14 @@ function renderHome() {
 function renderToday() {
   const date = currentDayKey();
   const books = state.settings.todayBooks || [];
+  const planBefore = JSON.stringify(state.dailyPlans[date] || null);
   let plan = ensureDailyPlan(state, planForTodayOptions(date, books));
   if (plan.mode === "sequential") {
     const existing = new Map((plan.bookSegments || []).map((x) => [x.book, x]));
     const chosen = books.map((book) => ({ book, newTarget: existing.get(book)?.newTarget ?? 0, reviewTarget: existing.get(book)?.reviewTarget ?? 0 }));
     configureSequentialPlan(state, plan, chosen);
   }
-  persist();
+  if (JSON.stringify(plan) !== planBefore) persist();
   const prog = sessionProgress(state, plan, null);
   const td = todayListeningStats(state, [], date);
   const mins = activityMinutes2("listen", date);
@@ -7092,16 +7584,21 @@ function speakSentence(t, sentence) {
 function addWordFromText(source, sentence) {
   const en = document.getElementById("textWord").value.trim().toLowerCase(), zh = document.getElementById("textZh").value.trim();
   if (!en || /\s/.test(en)) return toast("\u8BF7\u8F93\u5165\u4E00\u4E2A\u82F1\u6587\u5355\u8BCD");
-  upsertWord({ en, zh, source, example: sentence });
+  const added = upsertWord({ en, zh, source, example: sentence });
+  if (!added) return;
   persist();
   document.getElementById("textWord").value = "";
   document.getElementById("textZh").value = "";
   toast(`\u5DF2\u52A0\u5165 ${en}`);
 }
 function upsertWord({ en, zh = "", pos = "", def = "", source = "", example = "", overwrite = false, reviewHint = false }) {
-  en = String(en || "").trim().toLowerCase();
-  if (!en) return null;
-  let w = state.words.find((x) => x.en === en);
+  const checked = inspectWordText(en);
+  if (!checked.valid) {
+    toast(`\u672A\u5BFC\u5165\uFF1A${checked.issue}`);
+    return null;
+  }
+  en = normalizeWordLexeme(checked.text);
+  let w = state.words.find((x) => normalizeWordLexeme(x.en) === en);
   if (!w) {
     w = { id: uid("w"), en, zh, pos, def, sources: [], examples: [], retired: isSimpleLexeme(state, en), reviewHint: Boolean(reviewHint), card: null };
     state.words.push(w);
@@ -7184,7 +7681,7 @@ function importPreviewHtml() {
   if (!importDraft) return "";
   const rows = recordsFromDraft(importDraft, importDraft.map);
   const valid = rows.filter((r) => r.valid);
-  return `<section class="card"><div class="space"><div><h2 class="section-title">\u786E\u8BA4\u5BFC\u5165 \xB7 ${esc2(importDraft.fileName)}</h2><div class="small">${importDraft.delimiter === "	" ? "TSV" : "CSV"} \xB7 ${valid.length} \u884C\u53EF\u5BFC\u5165\u3002\u5148\u786E\u8BA4\u5217\u6620\u5C04\uFF0C\u518D\u5199\u5165\u8BCD\u5E93\u3002</div></div><button id="cancelImportDraft" class="ghost">\u53D6\u6D88</button></div><div class="filtergrid" style="margin-top:12px">${importFieldSelect("en", "\u82F1\u6587")}${importFieldSelect("zh", "\u4E2D\u6587")}${importFieldSelect("pos", "\u8BCD\u6027")}${importFieldSelect("def", "\u82F1\u6587\u91CA\u4E49")}${importFieldSelect("source", "\u8BCD\u4E66/\u6765\u6E90")}${importFieldSelect("example", "\u4F8B\u53E5")}</div><label class="small" style="display:block;margin-top:10px"><input id="importOverwrite" type="checkbox" style="width:auto"> \u5DF2\u5B58\u5728\u5355\u8BCD\uFF1A\u7528\u672C\u6B21\u975E\u7A7A\u5B57\u6BB5\u8986\u76D6\u65E7\u91CA\u4E49/\u8BCD\u6027/\u5B9A\u4E49</label><div class="error-compact" style="margin-top:10px">${valid.slice(0, 10).map((r) => `<div class="error-row"><span class="en">${esc2(r.en)}</span><span class="zh">${esc2(r.zh || "\u2014")}</span><span class="small">${esc2(r.source || "")}</span></div>`).join("") || '<div class="empty">\u6CA1\u6709\u53EF\u5BFC\u5165\u884C</div>'}</div><div class="row" style="margin-top:12px"><button id="confirmImportDraft" class="primary" ${valid.length ? "" : "disabled"}>\u786E\u8BA4\u5BFC\u5165 \xB7 ${valid.length}</button></div></section>`;
+  return `<section class="card"><div class="space"><div><h2 class="section-title">\u786E\u8BA4\u5BFC\u5165 \xB7 ${esc2(importDraft.fileName)}</h2><div class="small">${importDraft.delimiter === "	" ? "TSV" : "CSV"} \xB7 ${valid.length} \u884C\u53EF\u5BFC\u5165\u3002\u5148\u786E\u8BA4\u5217\u6620\u5C04\u4E0E\u6E05\u6D17\u7ED3\u679C\uFF0C\u518D\u5199\u5165\u8BCD\u5E93\u3002</div></div><button id="cancelImportDraft" class="ghost">\u53D6\u6D88</button></div>${importCleaningHtml(rows, esc2)}<div class="filtergrid" style="margin-top:12px">${importFieldSelect("en", "\u82F1\u6587")}${importFieldSelect("zh", "\u4E2D\u6587")}${importFieldSelect("pos", "\u8BCD\u6027")}${importFieldSelect("def", "\u82F1\u6587\u91CA\u4E49")}${importFieldSelect("source", "\u8BCD\u4E66/\u6765\u6E90")}${importFieldSelect("example", "\u4F8B\u53E5")}</div><label class="small" style="display:block;margin-top:10px"><input id="importOverwrite" type="checkbox" style="width:auto"> \u5DF2\u5B58\u5728\u5355\u8BCD\uFF1A\u7528\u672C\u6B21\u975E\u7A7A\u5B57\u6BB5\u8986\u76D6\u65E7\u91CA\u4E49/\u8BCD\u6027/\u5B9A\u4E49</label><div class="error-compact" style="margin-top:10px">${valid.slice(0, 10).map((r) => `<div class="error-row"><span class="en">${esc2(r.en)}</span><span class="zh">${esc2(r.zh || "\u2014")}</span><span class="small">${esc2(r.source || "")}</span></div>`).join("") || '<div class="empty">\u6CA1\u6709\u53EF\u5BFC\u5165\u884C</div>'}</div><div class="row" style="margin-top:12px"><button id="confirmImportDraft" class="primary" ${valid.length ? "" : "disabled"}>\u786E\u8BA4\u5BFC\u5165 \xB7 ${valid.length}</button></div></section>`;
 }
 function bindImportPreview() {
   if (!importDraft) return;
@@ -7201,7 +7698,7 @@ function bindImportPreview() {
     const rows = recordsFromDraft(importDraft, importDraft.map).filter((r) => r.valid);
     let added = 0, updated = 0;
     for (const row of rows) {
-      const existed = state.words.some((w) => w.en === String(row.en).trim().toLowerCase());
+      const existed = state.words.some((w) => normalizeWordLexeme(w.en) === normalizeWordLexeme(row.en));
       if (/错题|错词|error/i.test(row.source)) registerErrorBook(row.source);
       upsertWord({ ...row, overwrite });
       existed ? updated++ : added++;
@@ -7385,7 +7882,7 @@ function bindWordbookManage() {
 }
 function renderLibrary() {
   const books = allBooks(state);
-  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${wordbookManageHtml(books)}${freeListenSetupHtml(books)}${errorBookSectionHtml()}${pendingMeaningHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc2(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
+  shell(`<div class="stack"><section class="card hero"><div class="space"><div><h2>\u8BCD\u5E93</h2><p>\u5355\u8BCD\u53EA\u4FDD\u5B58\u4E00\u4EFD\uFF1B\u4E00\u672C\u8BCD\u53EF\u4EE5\u540C\u65F6\u5C5E\u4E8E\u591A\u4E2A\u8BCD\u4E66\u3002</p></div><span class="tag">${state.words.length} \u8BCD</span></div><div class="toolbar" style="margin-top:14px"><button id="importWords" class="primary">\u5BFC\u5165 CSV / TXT</button><button id="backupWords" class="soft">\u5B8C\u6574\u5907\u4EFD</button><button id="restoreWords" class="soft">\u6062\u590D\u5907\u4EFD</button></div><details class="details"><summary>\u590D\u4E60\u4E0E\u6717\u8BFB\u8BBE\u7F6E</summary><div class="grid2" style="margin-top:12px"><div class="field"><label>FSRS \u671F\u671B\u8BB0\u5FC6\u4FDD\u6301\u7387</label><input id="retention" type="number" min="0.75" max="0.97" step="0.01" value="${state.settings.retention}"></div><div class="field"><label>\u6717\u8BFB\u8BED\u901F</label><input id="speechRate" type="number" min="0.5" max="1.5" step="0.05" value="${state.settings.speechRate}"></div></div><div class="small" style="margin-top:8px">\u8C03\u5EA6\u6838\u5FC3\uFF1A${FSRS_VERSION}\u3002\u4FEE\u6539\u4FDD\u6301\u7387\u4F1A\u6309\u5386\u53F2\u9996\u8F6E\u8BB0\u5F55\u91CD\u65B0\u8BA1\u7B97\u5361\u7247\u72B6\u6001\u3002</div></details></section>${wordTextRepairHtml(state, esc2)}${wordbookManageHtml(books)}${freeListenSetupHtml(books)}${errorBookSectionHtml()}${pendingMeaningHtml()}${wordEditorHtml()}${importPreviewHtml()}<section class="card"><div class="space"><div><h2 class="section-title">\u5168\u90E8\u8BCD\u5E93</h2><div class="small">\u666E\u901A\u5217\u8868\u4E5F\u6539\u6210\u7D27\u51D1\u663E\u793A\uFF0C\u907F\u514D\u8BCD\u591A\u65F6\u4E00\u5C4F\u53EA\u80FD\u770B\u5230\u51E0\u4E2A\u3002</div></div></div><div class="grid2" style="margin-top:12px"><input id="wordSearch" placeholder="\u641C\u7D22\u5355\u8BCD\u6216\u91CA\u4E49"><select id="wordBook"><option value="">\u5168\u90E8\u8BCD\u4E66</option>${books.map((b) => `<option>${esc2(b)}</option>`).join("")}</select></div><div id="wordList" class="list" style="margin-top:12px"></div></section></div>`);
   document.getElementById("importWords").onclick = () => importInput.click();
   document.getElementById("backupWords").onclick = backup;
   document.getElementById("restoreWords").onclick = () => restoreInput.click();
@@ -7413,6 +7910,7 @@ function renderLibrary() {
   bindPendingMeanings();
   bindWordEditor();
   bindImportPreview();
+  bindWordTextRepair(state, download);
 }
 function drawWordList() {
   const box = document.getElementById("wordList");

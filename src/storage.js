@@ -1,3 +1,4 @@
+import { repairWordTextState, hasWordTextRepairs } from './wordtext.js';
 import { emptyCard, rebuildCard } from './scheduler.js';
 import { calendarDayKey } from './studyday.js';
 import { normalizeSentenceBooks, ensureSimpleWords, normalizeLexeme } from './sentencebooks.js';
@@ -54,7 +55,24 @@ async function dbSet(key, value) {
     tx.objectStore(STORE).put(value, key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
   });
+}
+async function dbSetMany(entries) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    for (const [key, value] of entries) store.put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+  });
+}
+function cloneForStorage(value) {
+  if (value == null) return value;
+  if (typeof structuredClone === 'function') return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
 }
 
 function queueWrite(task) {
@@ -168,6 +186,8 @@ function normalizePlan(plan, key) {
     books: Array.isArray(plan.books) ? plan.books : [],
     newTarget: Math.max(0, Number(plan.newTarget) || 0), reviewTarget: Math.max(0, Number(plan.reviewTarget) || 0),
     newIds: Array.isArray(plan.newIds) ? plan.newIds : [], reviewIds: Array.isArray(plan.reviewIds) ? plan.reviewIds : [],
+    carryNewIds: Array.isArray(plan.carryNewIds) ? plan.carryNewIds : [],
+    carryReviewIds: Array.isArray(plan.carryReviewIds) ? plan.carryReviewIds : [],
     bookSegments: segments, resumeWordId: plan.resumeWordId || null,
     drawNonce: Math.max(0, Number(plan.drawNonce) || 0), createdAt: Number(plan.createdAt) || Date.now(), updatedAt: Number(plan.updatedAt) || Date.now(),
   };
@@ -207,6 +227,7 @@ function normalizeSentenceSession(value) {
 }
 
 export function normalizeState(input) {
+  input = repairWordTextState(input);
   const base = defaultState();
   const inputVersion = Number(input?.version) || 0;
   const migrateScheduling = inputVersion < STATE_VERSION;
@@ -249,16 +270,40 @@ export function normalizeState(input) {
     if (migrateScheduling) word.card = evs.length ? rebuildCard(evs, state.settings.retention) : emptyCard();
     else if (!word.card) word.card = evs.length ? rebuildCard(evs, state.settings.retention) : emptyCard();
   }
-  state.version = STATE_VERSION;
+    state.version = STATE_VERSION;
   return state;
 }
 
+// Events are the durable source of truth. A cloud merge may combine histories
+// from multiple devices, so reindex cold/attempt fields and rebuild FSRS cards
+// before hashing, uploading or applying the merged state.
+export function canonicalizeCloudState(input) {
+  const state = normalizeState(input);
+  const coldByWord = new Map();
+  for (const event of state.events) {
+    if (!event.cold || event.mode !== 'listen') continue;
+    if (!coldByWord.has(event.wordId)) coldByWord.set(event.wordId, []);
+    coldByWord.get(event.wordId).push(event);
+  }
+  for (const word of state.words) {
+    const events = coldByWord.get(word.id) || [];
+    word.card = events.length
+      ? rebuildCard(events, state.settings.retention)
+      : (word.card?.reps ? word.card : emptyCard(0));
+  }
+  return state;
+}
 async function parseLocal(key) {
+
   try { const raw = localStorage.getItem(key); return raw ? normalizeState(JSON.parse(raw)) : null; }
   catch { return null; }
 }
 
+export async function flushStateWrites() {
+  await writeChain;
+}
 export async function readPersistedState() {
+  await flushStateWrites();
   try { return await dbGet(STATE_KEY); }
   catch { return parseLocal(FALLBACK_KEY); }
 }
@@ -266,7 +311,20 @@ export async function readPersistedState() {
 export async function loadState() {
   try {
     const saved = await dbGet(STATE_KEY);
-    if (saved) return normalizeState(saved);
+    if (saved) {
+      const normalized = normalizeState(saved);
+      if (hasWordTextRepairs(saved)) {
+        // Keep the exact original local state alongside the repaired state.
+        // A failed migration write must never fall through to empty sample data.
+        try {
+          await queueWrite(() => dbSetMany([
+            ['word-text-backup-v1', cloneForStorage(saved)],
+            [STATE_KEY, normalized],
+          ]));
+        } catch (error) { console.warn('Word text repair remains in memory; original local data retained', error); }
+      }
+      return normalized;
+    }
     const fallback = await parseLocal(FALLBACK_KEY);
     if (fallback) { await queueWrite(() => dbSet(STATE_KEY, fallback)); return fallback; }
     const legacy = await parseLocal(LEGACY_KEY);
@@ -288,10 +346,11 @@ export async function saveState(state) {
   if (remoteApplying) return;
   state.version = STATE_VERSION;
   ensureSimpleWords(state);
+  const snapshot = cloneForStorage(repairWordTextState(state));
   return queueWrite(async () => {
     if (remoteApplying) return;
-    try { await dbSet(STATE_KEY, state); localStorage.removeItem(FALLBACK_KEY); }
-    catch { localStorage.setItem(FALLBACK_KEY, JSON.stringify(state)); }
+    try { await dbSet(STATE_KEY, snapshot); localStorage.removeItem(FALLBACK_KEY); }
+    catch { localStorage.setItem(FALLBACK_KEY, JSON.stringify(snapshot)); }
   });
 }
 
@@ -315,6 +374,27 @@ export async function applyRemoteState(raw) {
   }
 }
 
+export async function applySyncedState(raw) {
+  await flushStateWrites();
+  remoteApplying = true;
+  const state = canonicalizeCloudState(raw);
+  const snapshot = cloneForStorage(state);
+  try {
+    await queueWrite(async () => {
+      // STATE_KEY and CLOUD_BASE_KEY advance in one transaction. If this fails,
+      // neither key is committed and cloud metadata must not be updated.
+      await dbSetMany([
+        [STATE_KEY, snapshot],
+        [CLOUD_BASE_KEY, snapshot],
+      ]);
+      try { localStorage.removeItem(FALLBACK_KEY); } catch {}
+    });
+    return state;
+  } finally {
+    remoteApplying = false;
+  }
+}
+
 export function isRemoteStateApplying() { return remoteApplying; }
 
 export async function readCloudSyncBase() {
@@ -322,11 +402,13 @@ export async function readCloudSyncBase() {
 }
 
 export async function saveCloudSyncBase(value) {
-  return queueWrite(() => dbSet(CLOUD_BASE_KEY, value));
+  const snapshot = cloneForStorage(value);
+  return queueWrite(() => dbSet(CLOUD_BASE_KEY, snapshot));
 }
 
 export async function saveCloudConflictBackup(value) {
-  return queueWrite(() => dbSet(CLOUD_CONFLICT_KEY, value));
+  const snapshot = cloneForStorage(value);
+  return queueWrite(() => dbSet(CLOUD_CONFLICT_KEY, snapshot));
 }
 
 export async function readCloudConflictBackup() {
