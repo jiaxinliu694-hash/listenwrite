@@ -1,0 +1,40 @@
+name: Verify personal no-prompt sync v48
+on:
+  push:
+    branches: [feat/direct-personal-sync-v48]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: direct-sync-v48
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply checked integration
+        run: python3 tools/apply-direct-v48.py
+      - run: npm ci
+      - name: Full syntax and regression checks
+        run: |
+          node --check src/cloud-direct.js
+          npm run check
+      - name: Build browser bundle and retest
+        run: |
+          npm run build
+          npm test
+          git diff --check
+      - name: Commit verified runtime and remove installer
+        run: |
+          rm tools/apply-direct-v48.py .github/workflows/direct-v48-verify.yml
+          git config user.name 'listenwrite-direct-sync-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src tests app.bundle.js index.html tools/apply-direct-v48.py .github/workflows/direct-v48-verify.yml
+          git commit -m 'Enable private no-prompt sync without password or email'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
