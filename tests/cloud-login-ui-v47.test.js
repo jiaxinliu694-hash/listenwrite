@@ -1,16 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from 'jsdom';
+import { JSDOM, VirtualConsole } from 'jsdom';
 import { indexedDB } from 'fake-indexeddb';
 
 test('v47 cloud dialog offers password login without mail and polling preserves input/errors', async t => {
+  const browserErrors = [], observers = [];
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on('jsdomError', error => browserErrors.push(error));
   const dom = new JSDOM('<!doctype html><html><head></head><body><div class="topbar"><div class="toolbar"></div></div></body></html>', {
-    url: 'https://jiaxinliu694-hash.github.io/listenwrite/', pretendToBeVisual: true,
+    url: 'https://jiaxinliu694-hash.github.io/listenwrite/', pretendToBeVisual: true, virtualConsole,
   });
   const names = ['window', 'document', 'location', 'history', 'localStorage', 'MutationObserver', 'indexedDB', 'fetch', 'setInterval'];
   const originals = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const intervals = [], calls = [];
   for (const name of names.slice(0, 7)) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: dom.window[name] });
+  globalThis.MutationObserver = class extends dom.window.MutationObserver {
+    constructor(callback) { super(callback); observers.push(this); }
+  };
   globalThis.indexedDB = indexedDB;
   globalThis.setInterval = fn => { intervals.push(fn); return { unref() {} }; };
   globalThis.fetch = async (url, options) => {
@@ -18,12 +24,15 @@ test('v47 cloud dialog offers password login without mail and polling preserves 
     return { ok: false, status: url.includes('/otp') ? 429 : 400,
       headers: { get: () => null }, json: async () => ({ code: url.includes('/otp') ? 'over_email_send_rate_limit' : 'invalid_credentials' }) };
   };
-  t.after(() => {
+  t.after(async () => {
+    for (const observer of observers) observer.disconnect();
     dom.window.close();
+    await new Promise(resolve => queueMicrotask(resolve));
     for (const [name, descriptor] of originals) {
       if (descriptor) Object.defineProperty(globalThis, name, descriptor);
       else delete globalThis[name];
     }
+    assert.deepEqual(browserErrors, []);
   });
   const cloud = await import('../src/cloudsync.js?ui-v47');
   await cloud.initCloudSync();
