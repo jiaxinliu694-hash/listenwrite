@@ -1,0 +1,39 @@
+name: Verify password login and resilient sessions v47
+on:
+  push:
+    branches: [fix/password-session-v47]
+permissions:
+  contents: write
+concurrency:
+  group: auth-v47
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply baseline-checked integration
+        run: python3 tools/apply-auth-v47.py
+      - run: npm ci
+      - name: Syntax and complete regression tests
+        run: |
+          node --check src/cloud-auth.js
+          npm run check
+      - name: Build browser bundle and recheck
+        run: |
+          npm run build
+          npm test
+          git diff --check
+      - name: Commit tested runtime and remove one-time installer
+        run: |
+          rm tools/apply-auth-v47.py .github/workflows/auth-v47-verify.yml
+          git config user.name 'listenwrite-auth-fix-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src tests app.bundle.js index.html tools/apply-auth-v47.py .github/workflows/auth-v47-verify.yml
+          git commit -m 'Enable password-first cloud login and preserve sessions on transient failures'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
